@@ -92,13 +92,16 @@ def refresh_screener_row_for_symbol(
 
     is_stale = False
     stale_minutes = None
+    # stale_minutes intentionally stays None here: price_history only
+    # stores a `trade_date` (a date, not a timestamp), so there's no
+    # reliable per-symbol "last fetched at" instant to diff against
+    # stale_data_threshold_minutes for EOD-sourced closes. (An earlier
+    # version computed minutes-since-midnight-of-trade_date here, which
+    # made same-day EOD data register as hundreds of minutes stale by
+    # mid-afternoon -- a bug, not a real freshness signal.) Staleness for
+    # EOD data is a day-granularity question instead: is the latest close
+    # older than a reasonable number of trading days.
     if latest_point:
-        # Treat the price as stale if its trade_date is older than the
-        # threshold would imply for an intraday feed (EOD data on its own
-        # trade_date is never "stale" by this measure; a live quote that
-        # hasn't refreshed within stale_threshold_minutes is).
-        fetched_at = datetime.combine(latest_point.trade_date, datetime.min.time(), tzinfo=IST)
-        stale_minutes = (as_of - fetched_at).total_seconds() / 60
         is_stale = latest_point.trade_date < as_of_date - timedelta(days=5)
 
     # Bound history strictly before whatever date `latest_price` actually
