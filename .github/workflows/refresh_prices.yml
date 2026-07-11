@@ -1,0 +1,45 @@
+name: Refresh Nifty 50 screener data
+
+on:
+  workflow_dispatch:
+  schedule:
+    # All times UTC. NSE trading hours are 09:15-15:30 IST (03:45-10:00 UTC).
+    - cron: "45,0,15,30 4-9 * * 1-5"   # intraday prices every 15 min during market hours
+    - cron: "30 10 * * 1-5"            # EOD OHLCV shortly after 15:30 IST close
+    - cron: "0 1 * * 1-5"              # fundamentals/dividends once daily, before market open
+    - cron: "45 10 * * 1-5"            # screener snapshot recompute after EOD prices land
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Determine mode from schedule
+        id: mode
+        run: |
+          case "${{ github.event.schedule }}" in
+            "45,0,15,30 4-9 * * 1-5") echo "mode=intraday" >> "$GITHUB_OUTPUT" ;;
+            "30 10 * * 1-5") echo "mode=eod" >> "$GITHUB_OUTPUT" ;;
+            "0 1 * * 1-5") echo "mode=fundamentals" >> "$GITHUB_OUTPUT" ;;
+            "45 10 * * 1-5") echo "mode=screener" >> "$GITHUB_OUTPUT" ;;
+            *) echo "mode=all" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Run refresh
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          MARKET_DATA_PROVIDER: ${{ vars.MARKET_DATA_PROVIDER || 'mock' }}
+          FUNDAMENTALS_PROVIDER: ${{ vars.FUNDAMENTALS_PROVIDER || 'mock' }}
+          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+        run: python scripts/run_refresh.py --mode=${{ steps.mode.outputs.mode }}

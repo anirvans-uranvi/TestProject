@@ -1,0 +1,23 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  # Optional: standalone refresh scheduler, so intraday/EOD/fundamentals
+  # refreshes keep running without relying on GitHub Actions cron. Disable
+  # by not starting this service (`docker compose up app`) if you'd rather
+  # rely purely on .github/workflows/refresh_prices.yml.
+  scheduler:
+    build: .
+    entrypoint: ["python", "scripts/run_refresh.py", "--mode=all", "--daemon"]
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
