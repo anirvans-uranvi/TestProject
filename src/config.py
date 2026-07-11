@@ -17,8 +17,8 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = Field(default="", alias="SUPABASE_SERVICE_ROLE_KEY")
 
     # Providers
-    market_data_provider: Literal["dhan", "mock"] = Field(default="mock", alias="MARKET_DATA_PROVIDER")
-    fundamentals_provider: Literal["manual", "mock"] = Field(default="mock", alias="FUNDAMENTALS_PROVIDER")
+    market_data_provider: Literal["dhan", "yfinance", "mock"] = Field(default="mock", alias="MARKET_DATA_PROVIDER")
+    fundamentals_provider: Literal["yfinance", "manual", "mock"] = Field(default="mock", alias="FUNDAMENTALS_PROVIDER")
     dhan_client_id: str = Field(default="", alias="DHAN_CLIENT_ID")
     dhan_access_token: str = Field(default="", alias="DHAN_ACCESS_TOKEN")
 

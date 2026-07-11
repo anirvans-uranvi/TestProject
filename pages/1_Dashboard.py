@@ -252,10 +252,13 @@ for _, r in filtered.iterrows():
     )
 
 table_df = pd.DataFrame(display_rows)
-st.markdown(
-    table_df.drop(columns=["Symbol"]).to_html(escape=False, index=False),
-    unsafe_allow_html=True,
-)
+if table_df.empty:
+    st.info("No stocks match your current filters. Try loosening the sidebar filters (e.g. minimum dividend yield/PEG) or confirm screener data has been seeded/refreshed.")
+else:
+    st.markdown(
+        table_df.drop(columns=["Symbol"]).to_html(escape=False, index=False),
+        unsafe_allow_html=True,
+    )
 
 st.divider()
 selected_symbol = st.selectbox("Open in Stock Detail →", table_df["Symbol"] if not table_df.empty else [])

@@ -42,6 +42,7 @@ scripts/
   fetch_nifty50_constituents.py   Refresh companies/nifty50_constituents
   seed_mock_data.py                Backfill synthetic prices/fundamentals/dividends/snapshots
   run_refresh.py                    CLI entrypoint for cron/GitHub Actions/APScheduler
+  import_screener_csv.py            Import a screener.in CSV export as PE/PEG/dividend-yield data
 supabase/
   migrations/               Schema, RLS policies, views/functions
   seed.sql                   Current Nifty 50 constituents + companies (reference data only)
@@ -106,7 +107,11 @@ settings.
 - **Views/functions**: `latest_screener_view` (one joined row per current
   constituent) and `get_classification_history(symbol, days)` back the
   Dashboard and Stock Detail pages respectively -- see
-  `supabase/migrations/0003_views_functions.sql`.
+  `supabase/migrations/0003_views_functions.sql` and the fixes in
+  `0004_fix_constituents_fk_and_view_defaults.sql` (adds the
+  `nifty50_constituents -> companies` FK PostgREST needs for embedded
+  queries, and defaults `status`/`data_quality` to Unavailable/`{}`
+  instead of `NULL` for constituents with no snapshot yet).
 
 ## Environment variables
 
@@ -116,8 +121,8 @@ See `.env.example` for the full list with comments. Key ones:
 |---|---|
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | Client-side (RLS-scoped) access |
 | `SUPABASE_SERVICE_ROLE_KEY` | Server-side only; refresh scripts |
-| `MARKET_DATA_PROVIDER` | `dhan` or `mock` |
-| `FUNDAMENTALS_PROVIDER` | `manual` or `mock` |
+| `MARKET_DATA_PROVIDER` | `dhan`, `yfinance`, or `mock` |
+| `FUNDAMENTALS_PROVIDER` | `yfinance`, `manual`, or `mock` |
 | `DHAN_CLIENT_ID`, `DHAN_ACCESS_TOKEN` | Required when `MARKET_DATA_PROVIDER=dhan` |
 | `DEFAULT_DIVIDEND_YIELD_THRESHOLD`, `DEFAULT_PEG_THRESHOLD` | Fallback thresholds before a user configures Settings |
 
@@ -128,14 +133,53 @@ interfaces so a price vendor and a fundamentals vendor can be swapped
 separately:
 
 - **`PriceDataProvider`**: `DhanProvider` (live, via [DhanHQ API
-  v2](https://dhanhq.co/docs/v2/)) or `MockPriceProvider` (deterministic
-  synthetic OHLCV, no credentials needed).
-- **`FundamentalsDataProvider`**: `ManualFundamentalsProvider` (reads
-  hand-curated CSVs in `data/`) or `MockFundamentalsProvider` (synthetic).
+  v2](https://dhanhq.co/docs/v2/), a licensed broker -- prices only),
+  `YFinancePriceProvider` (live, via the unofficial `yfinance` package,
+  no key needed -- see caveats below), or `MockPriceProvider`
+  (deterministic synthetic OHLCV, no credentials needed).
+- **`FundamentalsDataProvider`**: `YFinanceFundamentalsProvider` (live PE/
+  PEG/EPS/market-cap plus *real* per-event dividend history, no key
+  needed), `ManualFundamentalsProvider` (reads hand-curated CSVs in
+  `data/`, e.g. via the screener.in importer below), or
+  `MockFundamentalsProvider` (synthetic).
 
 Select via `MARKET_DATA_PROVIDER` / `FUNDAMENTALS_PROVIDER` in `.env`.
 Adding a real vendor: implement the relevant ABC in `src/data_providers/`
 and add a branch in `src/data_providers/factory.py`.
+
+**yfinance (`MARKET_DATA_PROVIDER=yfinance` / `FUNDAMENTALS_PROVIDER=yfinance`)**
+is the simplest way to get real data with zero paid credentials -- no
+signup, no key. It's the only provider here that covers prices AND
+fundamentals AND real dividend history from one source. The tradeoff:
+`yfinance` wraps Yahoo Finance's internal JSON API rather than an
+officially licensed feed. It's a stable, actively-maintained, widely used
+library (not HTML scraping), but Yahoo's terms restrict automated
+commercial use and Yahoo has rate-limited/blocked yfinance traffic before.
+Treat it as good enough for personal/analytical use and prototyping;
+switch to Dhan (prices) plus a real licensed fundamentals vendor before
+relying on this for anything commercial. NSE symbols are addressed as
+`<SYMBOL>.NS` (e.g. `RELIANCE.NS`) internally -- no config needed.
+
+**Getting real PE/PEG/dividend data from screener.in**: screener.in has no
+public API (they say so explicitly), so `scripts/import_screener_csv.py`
+imports their official "Export screen results" CSV feature instead of
+scraping. Build a screen containing the Nifty 50 symbols on screener.in,
+export it, then:
+
+```bash
+python scripts/import_screener_csv.py path/to/export.csv
+```
+
+Columns are matched fuzzily by name (NSE Code / PE / PEG / Div Yld % /
+Market Cap / EPS) since the export's exact columns depend on what you
+chose to include. This writes straight to Supabase (`fundamental_snapshots`,
+`dividend_events`), so the deployed app picks it up immediately -- no
+redeploy needed. Re-run it periodically (e.g. weekly) as you re-export.
+Note: screener.in's export gives a dividend *yield percentage*, not
+individual ex-dividend dates, so the script records one synthetic
+`dividend_events` row per symbol (tagged `source="screener_in_estimated"`)
+sized to reproduce that yield -- it is an approximation, not real dividend
+history.
 
 ## Calculation logic
 
@@ -218,18 +262,44 @@ docker compose up               # + the APScheduler refresh daemon
 
 ## Limitations
 
-- **PE / PEG / dividend data coverage is the main known gap.** DhanHQ v2
-  (the configured live price provider) only exposes prices (OHLCV,
-  quotes) -- it does not provide PE, PEG, EPS, market cap, or
-  dividend/corporate-action data, and no other licensed fundamentals
-  vendor was in scope for this build. `ManualFundamentalsProvider` reads
-  hand-curated CSVs (`data/manual_fundamentals.csv`,
-  `data/manual_dividends.csv`, currently empty templates -- see
-  `data/README.md`) as a stopgap; rows older than 120 days are flagged
-  stale. **To close this gap**, license a fundamentals data vendor with
-  NSE coverage and implement `FundamentalsDataProvider` against it (see
-  `src/data_providers/base.py`), then set `FUNDAMENTALS_PROVIDER`
+- **No officially licensed source for PE / PEG / dividend data was
+  available in scope.** DhanHQ v2 (a licensed broker) only exposes prices
+  -- no PE, PEG, EPS, market cap, or dividend data. NSE itself has no
+  public self-serve API. screener.in and Trendlyne, the two vendor
+  alternatives considered, both explicitly told us they have no public API
+  either -- see their sections above. `YFinanceFundamentalsProvider` (the
+  current default recommendation, see [Market data
+  providers](#market-data-providers)) closes the functional gap for free
+  using the unofficial `yfinance` package, but it's still not a licensed
+  data agreement. `scripts/import_screener_csv.py` (screener.in's official
+  CSV export) and `ManualFundamentalsProvider` (hand-curated CSVs in
+  `data/`, currently empty templates -- see `data/README.md`) remain
+  available as alternatives; manually-sourced rows are flagged stale after
+  120 days. **To close this gap with a real licensing agreement**,
+  implement `FundamentalsDataProvider` against a paid vendor (see
+  `src/data_providers/base.py`) and set `FUNDAMENTALS_PROVIDER`
   accordingly -- no other code changes are needed.
+- **`yfinance` is an unofficial Yahoo Finance client, not a licensed
+  feed.** It wraps Yahoo's internal JSON API rather than scraping HTML,
+  and is a stable, widely-used library, but Yahoo's terms restrict
+  automated commercial use and Yahoo has rate-limited/blocked yfinance
+  traffic in the past. It's a reasonable default for personal/analytical
+  use (which is what was requested here); replace it with Dhan (prices)
+  plus a licensed fundamentals vendor before relying on this for a
+  commercial product.
+- **screener.in dividend yield is an estimate, not real dividend
+  history.** Their CSV export gives a yield percentage, not individual
+  ex-dividend dates, so `import_screener_csv.py` fabricates one dividend
+  event per symbol sized to reproduce that percentage
+  (`source="screener_in_estimated"`). This is fine for the TTM-yield
+  criterion today but will silently age out of the 365-day window over
+  the next year if not re-imported, and will never populate the Stock
+  Detail dividend-history timeline with real historical payouts.
+- **PEG is frequently unavailable from screener.in.** PEG isn't one of
+  screener.in's default screen columns; it only comes through if you add
+  a custom formula column for it. Stocks without a PEG value correctly
+  show criterion C (and therefore often overall status) as Unavailable
+  rather than a guess.
 - **Dhan instrument-master parsing is defensive but unverified against a
   live account.** `src/data_providers/dhan_provider.py` resolves NSE
   symbols to Dhan `security_id`s via fuzzy column matching against Dhan's

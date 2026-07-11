@@ -101,8 +101,17 @@ def refresh_screener_row_for_symbol(
         stale_minutes = (as_of - fetched_at).total_seconds() / 60
         is_stale = latest_point.trade_date < as_of_date - timedelta(days=5)
 
-    history_start = as_of_date - timedelta(days=HISTORY_LOOKBACK_DAYS)
-    history = price_repo.get_price_history(client, symbol, history_start, as_of_date - timedelta(days=1))
+    # Bound history strictly before whatever date `latest_price` actually
+    # came from -- NOT always "as_of_date - 1". When no intraday quote has
+    # been fetched yet, get_latest_close() returns the most recent EOD row
+    # (which may be yesterday, or older over a weekend/holiday); using a
+    # fixed as_of_date-1 cutoff would then include that same row as the
+    # tail of historical_closes too, comparing latest_price to itself and
+    # forcing every return to exactly 0.
+    latest_trade_date = latest_point.trade_date if latest_point else as_of_date
+    history_end = latest_trade_date - timedelta(days=1)
+    history_start = history_end - timedelta(days=HISTORY_LOOKBACK_DAYS)
+    history = price_repo.get_price_history(client, symbol, history_start, history_end)
     historical_closes = [p.effective_close for p in history]
 
     fundamentals = fundamentals_repo.get_latest_fundamentals(client, symbol)
