@@ -10,6 +10,7 @@ from __future__ import annotations
 import streamlit as st
 from supabase import Client
 
+from src.config import get_settings
 from src.repositories.supabase_client import get_anon_client, get_user_client
 
 
@@ -51,8 +52,12 @@ def sign_in(email: str, password: str) -> str | None:
 
 
 def sign_up(email: str, password: str) -> str | None:
+    payload: dict = {"email": email, "password": password}
+    app_base_url = get_settings().app_base_url
+    if app_base_url:
+        payload["options"] = {"email_redirect_to": app_base_url}
     try:
-        resp = _auth_client().auth.sign_up({"email": email, "password": password})
+        resp = _auth_client().auth.sign_up(payload)
     except Exception as exc:  # noqa: BLE001
         return str(exc)
     if resp.user is None:

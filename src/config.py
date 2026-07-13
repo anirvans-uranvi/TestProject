@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     # Misc
     app_timezone: str = Field(default="Asia/Kolkata", alias="APP_TIMEZONE")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    # Public URL of the deployed app, e.g. https://your-app.streamlit.app --
+    # passed as email_redirect_to on sign-up so confirmation emails don't
+    # link to Supabase's default (often localhost) Site URL. Leave blank
+    # for local dev to fall back to Supabase's configured Site URL.
+    app_base_url: str = Field(default="", alias="APP_BASE_URL")
 
     @property
     def has_service_role(self) -> bool:
