@@ -1,7 +1,13 @@
 import streamlit as st
 
 from src.config import get_settings
-from src.utils.session import current_user_email, require_login, sign_out
+from src.utils.session import (
+    current_user_email,
+    handle_recovery_redirect,
+    inject_hash_to_query_bridge,
+    require_login,
+    sign_out,
+)
 from src.utils.ui import render_disclaimer
 
 st.set_page_config(
@@ -9,6 +15,12 @@ st.set_page_config(
     page_icon="📈",
     layout="wide",
 )
+
+# Must run before require_login(): picks up the session token Supabase
+# puts in the URL fragment when a user lands here from a sign-up
+# confirmation or password-reset email link.
+inject_hash_to_query_bridge()
+handle_recovery_redirect()
 
 require_login()
 

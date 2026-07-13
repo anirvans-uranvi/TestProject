@@ -6,7 +6,7 @@ from src.config import get_settings
 from src.models.enums import Theme
 from src.models.user import UserSettings
 from src.repositories import settings_repo
-from src.utils.session import current_user_email, current_user_id, get_user_client_cached, require_login
+from src.utils.session import current_user_email, current_user_id, get_user_client_cached, require_login, set_new_password
 from src.utils.ui import render_disclaimer
 
 st.set_page_config(page_title="Settings | Nifty 50 Screener", page_icon="⚙️", layout="wide")
@@ -65,6 +65,23 @@ st.checkbox("Slack", value=False, disabled=True, help="Not implemented yet -- se
 st.divider()
 st.subheader("Account")
 st.markdown(f"**Signed in as:** {current_user_email()}")
+
+with st.expander("Change password"):
+    with st.form("change_password_form"):
+        new_password = st.text_input("New password", type="password", key="settings_new_password")
+        confirm_password = st.text_input("Confirm new password", type="password", key="settings_confirm_password")
+        change_submitted = st.form_submit_button("Update password")
+    if change_submitted:
+        if new_password != confirm_password:
+            st.error("Passwords do not match.")
+        elif len(new_password) < 6:
+            st.error("Password must be at least 6 characters.")
+        else:
+            error = set_new_password(new_password)
+            if error:
+                st.error(error)
+            else:
+                st.success("Password updated.")
 
 st.divider()
 st.subheader("Data provider configuration (read-only, set via environment variables)")
