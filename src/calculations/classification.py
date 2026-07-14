@@ -3,7 +3,10 @@
 Criteria (spec-exact):
     A = TTM dividend yield > threshold (default 3%)
     B = 1-day, 5-day, AND 20-day returns all > 0%  (exactly 0% is neutral, fails)
-    C = PEG ratio > threshold (default 1.0)
+    C = PEG ratio <= threshold (default 1.0) -- a lower PEG is the desirable
+        side (conventionally, PEG <= 1 suggests a stock priced reasonably
+        relative to its earnings growth), so this criterion passes AT OR
+        BELOW the threshold, unlike A and B which pass ABOVE theirs.
 
 Rules:
     Unavailable — any of A/B/C cannot be computed (missing inputs), or the
@@ -40,7 +43,7 @@ def criterion_b(
 def criterion_c(peg_ratio: float | None, threshold: float = 1.0) -> bool | None:
     if peg_ratio is None:
         return None
-    return peg_ratio > threshold
+    return peg_ratio <= threshold
 
 
 def classify(

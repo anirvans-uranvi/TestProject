@@ -86,7 +86,7 @@ with score_cols[1]:
 with score_cols[2]:
     st.metric("C · PEG", f"{row.peg_ratio:.2f}" if row.peg_ratio is not None else "N/A")
     st.markdown(pass_fail_badge(row.criterion_c))
-    st.caption(f"Threshold: > {user_settings.peg_threshold}")
+    st.caption(f"Threshold: <= {user_settings.peg_threshold}")
 
 # ---------------------------------------------------------------------
 # Price chart

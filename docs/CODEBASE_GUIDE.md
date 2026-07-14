@@ -89,10 +89,11 @@ src/utils/           Cross-cutting helpers: formatting, timezones,
 
 Why split calculations out as pure functions instead of methods on a
 service class: every rule in the spec (exactly-0%-is-neutral, missing
-data must never read as a failed criterion, PEG boundary is strict `>`
-not `>=`) is a one-line, deterministic, easily-misremembered rule. Keeping
-them as standalone functions with no dependencies means every rule has a
-direct, fast, no-mocking-required test in `tests/test_calculations_*.py`.
+data must never read as a failed criterion, PEG passes at-or-below its
+threshold while the other two criteria pass strictly above theirs) is a
+one-line, deterministic, easily-misremembered rule. Keeping them as
+standalone functions with no dependencies means every rule has a direct,
+fast, no-mocking-required test in `tests/test_calculations_*.py`.
 
 ## Directory map
 
@@ -183,13 +184,14 @@ test exhaustively.
 
 - **`returns.py`**: `pct_return(latest, base)` and `return_1d/5d/20d(latest_price, historical_closes)`. `historical_closes` must be ordered oldest→newest and must NOT include the day `latest_price` came from — see the note on `screener_service.py` under [Services](#services-srcservices) for a real bug this exact boundary caused.
 - **`dividends.py`**: `ttm_dividend_sum`/`ttm_dividend_yield(events, as_of_date, latest_price)`. An empty `dividend_events` list sums to `0.0` (a confirmed-zero yield), not `None` — missing-vs-zero is a distinction the *caller* (the provider/repo layer) is responsible for, based on whether a fundamentals fetch actually succeeded.
-- **`classification.py`**: `criterion_a/b/c()` each return `bool | None` (`None` = missing input, never a fail). `classify(a, b, c, is_stale)` short-circuits to `UNAVAILABLE` if `is_stale` or any criterion is `None`, before ever checking pass/fail counts — this ordering is the whole point of the "missing is never a failure" rule. `build_classification(...)` is the one-stop version that also assembles the `DataQuality` record.
+- **`classification.py`**: `criterion_a/b/c()` each return `bool | None` (`None` = missing input, never a fail). `criterion_a`/`criterion_b` pass strictly *above* their threshold; `criterion_c` (PEG) passes *at or below* its threshold — the direction is deliberately reversed for PEG, since a lower PEG is the conventionally desirable side. `classify(a, b, c, is_stale)` short-circuits to `UNAVAILABLE` if `is_stale` or any criterion is `None`, before ever checking pass/fail counts — this ordering is the whole point of the "missing is never a failure" rule. `build_classification(...)` is the one-stop version that also assembles the `DataQuality` record.
 - **`moving_averages.py`**: `moving_average_series()` (pandas, for the Stock Detail chart, `min_periods=window` so a partial window renders as `NaN` not a misleading partial average) and `latest_moving_average()` (scalar, for scorecards).
 
 `tests/test_calculations_*.py` specifically cover the boundary cases:
-exactly 0% return, exactly-at-threshold (3.00% yield, PEG 1.00 — both must
-*fail*, spec says strict `>`), missing vs. confirmed-zero, and every
-missing-data combination for `classify()`.
+exactly 0% return (fails B), exactly 3.00% yield (fails A, strict `>`),
+exactly PEG 1.00 at the default threshold (**passes** C, since C uses
+`<=`), missing vs. confirmed-zero, and every missing-data combination for
+`classify()`.
 
 ## Data providers (`src/data_providers/`)
 

@@ -29,7 +29,7 @@ with st.form("thresholds_form"):
         value=float(current.dividend_yield_threshold), min_value=0.0, step=0.25,
     )
     peg_threshold = st.number_input(
-        "PEG threshold -- criterion C passes above this",
+        "PEG threshold -- criterion C passes at or below this",
         value=float(current.peg_threshold), min_value=0.0, step=0.1,
     )
     stale_minutes = st.number_input(

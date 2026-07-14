@@ -14,7 +14,7 @@ def make_row(**overrides) -> ScreenerRow:
         return_20d=2.0,
         ttm_dividend_yield=4.0,
         pe_ratio=25.0,
-        peg_ratio=1.5,
+        peg_ratio=0.8,
         data_quality=DataQuality(),
     )
     defaults.update(overrides)
@@ -36,8 +36,8 @@ class TestRecomputeWithUserThresholds:
         assert result.status == ScreenerStatus.AMBER
 
     def test_looser_peg_threshold_can_upgrade_to_green(self):
-        row = make_row(peg_ratio=1.5)
-        settings = UserSettings(user_id="u1", dividend_yield_threshold=3.0, peg_threshold=0.5)
+        row = make_row(peg_ratio=1.5)  # fails at the default 1.0 threshold
+        settings = UserSettings(user_id="u1", dividend_yield_threshold=3.0, peg_threshold=2.0)
         result = recompute_with_user_thresholds(row, settings)
         assert result.criterion_c is True
         assert result.status == ScreenerStatus.GREEN

@@ -18,7 +18,7 @@ class TestComputeScreenerRow:
             historical_closes=closes,
             dividend_events=[make_event(date(2026, 2, 1), 150.0)],
             pe_ratio=25.0,
-            peg_ratio=1.8,
+            peg_ratio=0.8,
             as_of_date=date(2026, 7, 11),
         )
         assert row.status == ScreenerStatus.GREEN
@@ -53,7 +53,7 @@ class TestComputeScreenerRow:
         assert row.status == ScreenerStatus.UNAVAILABLE
         assert row.data_quality.missing_peg is True
 
-    def test_red_row_no_dividends_negative_momentum_low_peg(self):
+    def test_red_row_no_dividends_negative_momentum_high_peg(self):
         closes = [4200.0] * 20  # latest lower than base -> negative returns
         row = compute_screener_row(
             symbol="TCS",
@@ -61,7 +61,7 @@ class TestComputeScreenerRow:
             historical_closes=closes,
             dividend_events=[],  # confirmed zero dividends -> criterion A fails, not unavailable
             pe_ratio=25.0,
-            peg_ratio=0.5,
+            peg_ratio=1.5,
             as_of_date=date(2026, 7, 11),
         )
         assert row.status == ScreenerStatus.RED
@@ -95,8 +95,8 @@ class TestComputeScreenerRow:
             peg_ratio=1.8,
             as_of_date=date(2026, 7, 11),
             dividend_yield_threshold=20.0,  # very high bar, should fail now
-            peg_threshold=5.0,  # 1.8 now fails too
+            peg_threshold=5.0,  # 1.8 <= 5.0 now passes (default threshold of 1.0 would have failed it)
         )
         assert row.criterion_a is False
-        assert row.criterion_c is False
-        assert row.status == ScreenerStatus.AMBER  # only B passes
+        assert row.criterion_c is True
+        assert row.status == ScreenerStatus.AMBER  # B and C pass, A fails

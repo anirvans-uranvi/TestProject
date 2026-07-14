@@ -217,10 +217,15 @@ Adjusted close is preferred over raw close when available
 (`PricePoint.effective_close`).
 
 Criteria: **A** = TTM yield > threshold (default 3%) · **B** = 1D, 5D, and
-20D returns all strictly > 0% · **C** = PEG > threshold (default 1.0).
-Exactly 0% return is neutral and fails B. A criterion whose inputs are
-missing evaluates to `None`, never `False` -- rows with any `None`
-criterion are **Unavailable**, not Red. See
+20D returns all strictly > 0% · **C** = PEG <= threshold (default 1.0).
+Note the direction flips for C: A and B pass *above* their threshold
+(higher yield/returns are the desirable side), while C passes *at or
+below* its threshold (a lower PEG is conventionally the desirable side --
+priced reasonably relative to earnings growth). Exactly 0% return is
+neutral and fails B; exactly-at-threshold PEG (e.g. 1.00 at the default
+threshold) *passes* C, unlike A which fails at exactly-at-threshold. A
+criterion whose inputs are missing evaluates to `None`, never `False` --
+rows with any `None` criterion are **Unavailable**, not Red. See
 `src/calculations/classification.py` for the exact rules and
 `tests/test_calculations_classification.py` for boundary coverage (exactly
 0%, exactly-at-threshold, missing-vs-confirmed-zero, staleness).

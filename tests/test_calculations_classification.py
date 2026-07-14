@@ -44,20 +44,20 @@ class TestCriterionB:
 
 
 class TestCriterionC:
-    def test_above_threshold_passes(self):
-        assert criterion_c(1.01, 1.0) is True
+    def test_above_threshold_fails(self):
+        assert criterion_c(1.01, 1.0) is False
 
-    def test_exactly_at_threshold_fails(self):
-        assert criterion_c(1.0, 1.0) is False
+    def test_exactly_at_threshold_passes(self):
+        assert criterion_c(1.0, 1.0) is True
 
-    def test_below_threshold_fails(self):
-        assert criterion_c(0.99, 1.0) is False
+    def test_below_threshold_passes(self):
+        assert criterion_c(0.99, 1.0) is True
 
     def test_missing_returns_none(self):
         assert criterion_c(None, 1.0) is None
 
-    def test_negative_peg_fails(self):
-        assert criterion_c(-0.5, 1.0) is False
+    def test_negative_peg_passes(self):
+        assert criterion_c(-0.5, 1.0) is True
 
 
 class TestClassify:
@@ -103,7 +103,7 @@ class TestBuildClassification:
             return_1d=0.5,
             return_5d=1.2,
             return_20d=3.0,
-            peg_ratio=1.5,
+            peg_ratio=0.8,
             latest_price=1000.0,
             pe_ratio=20.0,
         )
@@ -120,7 +120,7 @@ class TestBuildClassification:
             return_1d=-0.5,
             return_5d=-1.2,
             return_20d=-3.0,
-            peg_ratio=0.5,
+            peg_ratio=1.5,
             latest_price=1000.0,
         )
         assert result.status == ScreenerStatus.RED
@@ -162,8 +162,8 @@ class TestBuildClassification:
             peg_ratio=2.0,
             latest_price=1000.0,
             dividend_yield_threshold=6.0,  # 5.0 now fails
-            peg_threshold=3.0,  # 2.0 now fails
+            peg_threshold=3.0,  # 2.0 <= 3.0 now passes (default threshold of 1.0 would have failed it)
         )
         assert result.criterion_a is False
-        assert result.criterion_c is False
-        assert result.status == ScreenerStatus.AMBER  # only B passes
+        assert result.criterion_c is True
+        assert result.status == ScreenerStatus.AMBER  # B and C pass, A fails

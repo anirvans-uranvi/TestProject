@@ -41,11 +41,11 @@ def explain_classification(row: ScreenerRow) -> str:
     if row.criterion_c is None:
         peg_phrase = "its PEG ratio could not be checked"
     elif row.criterion_c:
-        peg_str = f"{row.peg_ratio:.2f}" if row.peg_ratio is not None else "above the threshold"
-        peg_phrase = f"its PEG ratio ({peg_str}) is above the threshold"
-    else:
         peg_str = f"{row.peg_ratio:.2f}" if row.peg_ratio is not None else "at or below the threshold"
         peg_phrase = f"its PEG ratio ({peg_str}) is at or below the threshold"
+    else:
+        peg_str = f"{row.peg_ratio:.2f}" if row.peg_ratio is not None else "above the threshold"
+        peg_phrase = f"its PEG ratio ({peg_str}) is above the threshold"
 
     lead = {
         ScreenerStatus.GREEN: f"{row.name} is Green: all three criteria pass.",

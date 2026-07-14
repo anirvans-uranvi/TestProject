@@ -88,7 +88,7 @@ counts = {
 extra_counts = {
     "Yield > threshold": int((df["criterion_a"] == True).sum()),  # noqa: E712
     "All momentum +ve": int((df["criterion_b"] == True).sum()),  # noqa: E712
-    "PEG > threshold": int((df["criterion_c"] == True).sum()),
+    "PEG <= threshold": int((df["criterion_c"] == True).sum()),
 }
 
 metric_cols = st.columns(8)
@@ -100,7 +100,7 @@ metric_specs = [
     ("⚪ Unavailable", counts["Unavailable"], "unavailable"),
     ("Yield > threshold", extra_counts["Yield > threshold"], None),
     ("All momentum +ve", extra_counts["All momentum +ve"], None),
-    ("PEG > threshold", extra_counts["PEG > threshold"], None),
+    ("PEG <= threshold", extra_counts["PEG <= threshold"], None),
 ]
 for col, (label, value, status_value) in zip(metric_cols, metric_specs):
     with col:
