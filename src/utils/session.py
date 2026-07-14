@@ -80,7 +80,22 @@ def sign_out() -> None:
 
 
 def request_password_reset(email: str) -> str | None:
-    """Sends a password-reset email. Returns an error message on failure."""
+    """Sends a password-reset email containing a one-time code. Returns an
+    error message on failure.
+
+    We deliberately do NOT rely on the email's magic link: Supabase puts
+    the recovery session token in the URL fragment
+    (`#access_token=...&type=recovery`), which browsers never send to any
+    server -- and there is no way to bridge it into Streamlit either,
+    because Streamlit's own iframe sandbox (used to run any JS we inject)
+    omits `allow-top-navigation`, so a script inside it is flatly denied
+    permission to redirect/rewrite the parent page's URL (confirmed
+    directly: navigating window.parent.location throws
+    `SecurityError: ... does not have permission to navigate the target
+    frame`). The 6-digit code Supabase includes in the same email sidesteps
+    this entirely -- the user types it into verify_recovery_code() below,
+    which is a plain server-side call.
+    """
     app_base_url = get_settings().app_base_url
     options = {"redirect_to": app_base_url} if app_base_url else {}
     try:
@@ -90,10 +105,28 @@ def request_password_reset(email: str) -> str | None:
     return None
 
 
+def verify_recovery_code(email: str, code: str) -> str | None:
+    """Exchanges the one-time code from the reset email for a session,
+    and flags that a new password must be set (enforced in require_login(),
+    which every page already calls)."""
+    try:
+        resp = _auth_client().auth.verify_otp({"email": email, "token": code, "type": "recovery"})
+    except Exception as exc:  # noqa: BLE001
+        return str(exc)
+    if resp.session is None or resp.user is None:
+        return "Invalid or expired code."
+    st.session_state["sb_access_token"] = resp.session.access_token
+    st.session_state["sb_refresh_token"] = resp.session.refresh_token
+    st.session_state["sb_user_id"] = resp.user.id
+    st.session_state["sb_user_email"] = resp.user.email
+    st.session_state["sb_recovery_pending"] = True
+    return None
+
+
 def set_new_password(new_password: str) -> str | None:
     """Updates the current session's password -- works for both a normal
     logged-in session (Settings page) and a password-recovery session
-    established by handle_recovery_redirect()."""
+    established by verify_recovery_code()."""
     try:
         get_user_client_cached().auth.update_user({"password": new_password})
     except Exception as exc:  # noqa: BLE001
@@ -104,69 +137,6 @@ def set_new_password(new_password: str) -> str | None:
 
 def is_password_recovery_pending() -> bool:
     return bool(st.session_state.get("sb_recovery_pending"))
-
-
-def inject_hash_to_query_bridge() -> None:
-    """Streamlit can't read a URL's #fragment server-side -- browsers never
-    send fragments in the HTTP request. Supabase's confirmation/password
-    -reset email links put the session token in the fragment
-    (`#access_token=...&type=recovery`), so this reaches into the parent
-    page (st.iframe renders in a same-origin iframe) and moves the
-    fragment into the query string instead, where st.query_params can see
-    it, then reloads. A no-op if there's no such fragment.
-    """
-    st.iframe(
-        """
-        <script>
-        (function() {
-            try {
-                var hash = window.parent.location.hash;
-                if (hash && hash.indexOf('access_token') !== -1) {
-                    var params = new URLSearchParams(hash.substring(1));
-                    var url = new URL(window.parent.location.href);
-                    params.forEach(function(value, key) { url.searchParams.set(key, value); });
-                    url.hash = '';
-                    window.parent.location.replace(url.toString());
-                }
-            } catch (e) {}
-        })();
-        </script>
-        """,
-        height=1,
-    )
-
-
-def handle_recovery_redirect() -> None:
-    """Call once near the top of app.py, before require_login(). Picks up
-    the access_token/refresh_token/type=recovery query params left by
-    inject_hash_to_query_bridge() after a user clicks a password-reset
-    email link, establishes that session, and flags that a new password
-    must be set before the rest of the app is usable (enforced in
-    require_login(), which every page already calls).
-    """
-    params = st.query_params
-    if params.get("type") != "recovery":
-        return
-    access_token = params.get("access_token")
-    refresh_token = params.get("refresh_token")
-    if not access_token:
-        return
-
-    client = _auth_client()
-    try:
-        client.auth.set_session(access_token, refresh_token or "")
-        user_resp = client.auth.get_user(access_token)
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"This password reset link is invalid or has expired: {exc}")
-        st.query_params.clear()
-        return
-
-    st.session_state["sb_access_token"] = access_token
-    st.session_state["sb_refresh_token"] = refresh_token
-    st.session_state["sb_user_id"] = user_resp.user.id
-    st.session_state["sb_user_email"] = user_resp.user.email
-    st.session_state["sb_recovery_pending"] = True
-    st.query_params.clear()
 
 
 def _render_set_new_password_form() -> None:
@@ -230,15 +200,28 @@ def require_login() -> None:
                 st.rerun()
 
     with forgot_tab:
-        st.caption("We'll email you a link to set a new password.")
+        st.caption("Step 1: we'll email you a 6-digit code (ignore the link in that email).")
         with st.form("forgot_password_form"):
-            email = st.text_input("Email", key="forgot_email")
-            submitted = st.form_submit_button("Send reset link")
-        if submitted:
-            error = request_password_reset(email)
+            reset_email = st.text_input("Email", key="forgot_email")
+            send_submitted = st.form_submit_button("Send reset code")
+        if send_submitted:
+            error = request_password_reset(reset_email)
             if error:
                 st.error(error)
             else:
-                st.success("If an account exists for that email, a password reset link has been sent.")
+                st.success("If an account exists for that email, a 6-digit code has been sent.")
+
+        st.divider()
+        st.caption("Step 2: enter the code to set a new password.")
+        with st.form("verify_code_form"):
+            code_email = st.text_input("Email", key="verify_email")
+            code = st.text_input("6-digit code", key="verify_code")
+            verify_submitted = st.form_submit_button("Verify code")
+        if verify_submitted:
+            error = verify_recovery_code(code_email, code)
+            if error:
+                st.error(error)
+            else:
+                st.rerun()
 
     st.stop()

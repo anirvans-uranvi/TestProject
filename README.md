@@ -112,6 +112,21 @@ settings.
   `nifty50_constituents -> companies` FK PostgREST needs for embedded
   queries, and defaults `status`/`data_quality` to Unavailable/`{}`
   instead of `NULL` for constituents with no snapshot yet).
+- **Password reset uses a 6-digit code, not the email's magic link.**
+  Supabase's recovery link puts the session token in the URL fragment
+  (`#access_token=...`), which no server (including ours) ever receives,
+  and Streamlit's own iframe sandbox blocks the only other way to grab it
+  (JS navigating the parent page) -- confirmed directly, it throws
+  `SecurityError: ... does not have permission to navigate the target
+  frame`. So `request_password_reset`/`verify_recovery_code` in
+  `src/utils/session.py` use Supabase's OTP code instead: the same
+  recovery email also contains a 6-digit code via the `{{ .Token }}`
+  template variable, verified server-side via `auth.verify_otp(...)` --
+  no redirect handling needed. **This requires enabling that variable in
+  your Supabase email template**: Dashboard -> Authentication -> Email
+  Templates -> Reset Password -> add `{{ .Token }}` somewhere in the body
+  (Supabase's default template doesn't show it by default, only the
+  link). The link Supabase still includes is otherwise unused by this app.
 
 ## Environment variables
 
