@@ -7,6 +7,11 @@ each as **Green / Amber / Red / Unavailable**.
 > This dashboard is an analytical tool, not investment advice. Verify data
 > and consider your risk tolerance before trading.
 
+**New to this codebase?** See [docs/CODEBASE_GUIDE.md](docs/CODEBASE_GUIDE.md)
+for a developer-oriented walkthrough of how the code is organized, the
+database schema, and common changes. This README covers setup and
+operations; that doc covers the code itself.
+
 ## Contents
 
 - [Architecture](#architecture)
