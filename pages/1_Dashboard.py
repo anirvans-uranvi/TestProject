@@ -75,8 +75,10 @@ df = pd.DataFrame([r.model_dump() for r in rows])
 # ---------------------------------------------------------------------
 # Metric cards (also usable as quick filters via session_state)
 # ---------------------------------------------------------------------
+ALL_STATUSES = ["Green", "Amber", "Red", "Unavailable"]
+
 if "status_filter" not in st.session_state:
-    st.session_state["status_filter"] = "All"
+    st.session_state["status_filter"] = list(ALL_STATUSES)
 
 counts = {
     "Total": len(df),
@@ -105,7 +107,7 @@ metric_specs = [
 for col, (label, value, status_value) in zip(metric_cols, metric_specs):
     with col:
         if st.button(f"{label}\n{value}", key=f"metric_{label}", use_container_width=True):
-            st.session_state["status_filter"] = status_value.capitalize() if status_value else "All"
+            st.session_state["status_filter"] = [status_value.capitalize()] if status_value else list(ALL_STATUSES)
             st.rerun()
 
 st.divider()
@@ -115,9 +117,9 @@ st.divider()
 # ---------------------------------------------------------------------
 with st.sidebar:
     st.subheader("Filters")
-    status_options = ["All", "Green", "Amber", "Red", "Unavailable"]
-    status_filter = st.selectbox(
-        "Status", status_options, index=status_options.index(st.session_state["status_filter"])
+    status_filter = st.multiselect(
+        "Status", ALL_STATUSES, default=st.session_state["status_filter"],
+        help="Pick any combination -- e.g. Green + Red only. Leave all selected (or click 'Total stocks' above) to show everything.",
     )
     st.session_state["status_filter"] = status_filter
 
@@ -152,7 +154,11 @@ with st.sidebar:
     if chosen_preset != "—":
         preset = next(f for f in saved_filters if f.name == chosen_preset)
         fj = preset.filter_json
-        status_filter = fj.get("status", status_filter)
+        loaded_status = fj.get("status", status_filter)
+        if isinstance(loaded_status, str):  # backward-compat with presets saved before multi-select
+            status_filter = list(ALL_STATUSES) if loaded_status == "All" else [loaded_status]
+        else:
+            status_filter = loaded_status
         sector_filter = fj.get("sector", sector_filter)
         search = fj.get("search", search)
         min_yield = fj.get("min_yield", min_yield)
@@ -182,8 +188,7 @@ with st.sidebar:
 # Apply filters
 # ---------------------------------------------------------------------
 filtered = df.copy()
-if status_filter != "All":
-    filtered = filtered[filtered["status"] == status_filter.lower()]
+filtered = filtered[filtered["status"].isin([s.lower() for s in status_filter])]
 if sector_filter:
     filtered = filtered[filtered["sector"].isin(sector_filter)]
 if search:
