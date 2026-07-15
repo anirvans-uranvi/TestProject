@@ -129,9 +129,15 @@ with st.sidebar:
     search = st.text_input("Search company or symbol")
 
     min_yield = st.number_input(
-        "Minimum dividend yield (%)", value=float(user_settings.dividend_yield_threshold), step=0.5
+        "Minimum dividend yield (%)", value=0.0, step=0.5,
+        help=f"Independent of your Settings threshold ({user_settings.dividend_yield_threshold}% for criterion A) -- "
+             "defaults to 0 so nothing is excluded until you raise it.",
     )
-    min_peg = st.number_input("Minimum PEG", value=float(user_settings.peg_threshold), step=0.1)
+    min_peg = st.number_input(
+        "Minimum PEG", value=0.0, step=0.1,
+        help=f"Independent of your Settings threshold ({user_settings.peg_threshold} for criterion C) -- "
+             "defaults to 0 so nothing is excluded until you raise it.",
+    )
 
     st.caption("Momentum filters")
     mom_1d = st.selectbox("1D", ["Any", "Positive", "Negative"], key="mom1d")
