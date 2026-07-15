@@ -10,7 +10,7 @@ from src.services.threshold_override import apply_user_thresholds
 from src.utils.formatting import direction_arrow, format_inr, format_pct, pass_fail_badge
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.timezones import format_ist, now_ist
-from src.utils.ui import market_state_label, render_disclaimer, status_badge
+from src.utils.ui import market_state_label, render_disclaimer, status_dot
 
 st.set_page_config(page_title="Dashboard | Nifty 50 Screener", page_icon="📊", layout="wide")
 require_login()
@@ -258,7 +258,7 @@ for i, (_, r) in enumerate(filtered.iterrows(), start=1):
                 f"B:{'✅' if r['criterion_b'] else ('❌' if r['criterion_b'] is False else '—')} "
                 f"C:{'✅' if r['criterion_c'] else ('❌' if r['criterion_c'] is False else '—')}"
             ),
-            "Status": status_badge(r["status"]),
+            "Status": status_dot(r["status"]),
             "Symbol": r["symbol"],
         }
     )

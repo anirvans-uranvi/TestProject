@@ -41,6 +41,16 @@ def status_badge(status: ScreenerStatus) -> str:
     )
 
 
+def status_dot(status: ScreenerStatus) -> str:
+    """Color-coded circle only, no text label -- for compact table cells
+    (e.g. the Dashboard screener table) where the row already carries a
+    Criteria column and other context. Use status_badge() instead
+    wherever the status needs to stand alone (e.g. the Stock Detail
+    header), since spelling it out matters more there for accessibility."""
+    _color, icon, label = STATUS_STYLE[ScreenerStatus(status)]
+    return f'<span title="{label}" style="font-size:1.3em;">{icon}</span>'
+
+
 def market_state_label(state: MarketState) -> str:
     return MARKET_STATE_LABEL[MarketState(state)]
 
