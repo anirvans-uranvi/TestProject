@@ -256,14 +256,14 @@ for i, (_, r) in enumerate(filtered.iterrows(), start=1):
             "1D": f"{direction_arrow(r['return_1d'])} {format_pct(r['return_1d'])} {pass_fail_icon(_momentum_pass(r['return_1d']))}",
             "5D": f"{direction_arrow(r['return_5d'])} {format_pct(r['return_5d'])} {pass_fail_icon(_momentum_pass(r['return_5d']))}",
             "20D": f"{direction_arrow(r['return_20d'])} {format_pct(r['return_20d'])} {pass_fail_icon(_momentum_pass(r['return_20d']))}",
-            "Dividend yield": f"{format_pct(r['ttm_dividend_yield'], signed=False)} {pass_fail_badge(r['criterion_a'])}",
-            "PE": f"{r['pe_ratio']:.1f}" if pd.notna(r["pe_ratio"]) else "N/A",
-            "PEG": f"{r['peg_ratio']:.2f} {pass_fail_badge(r['criterion_c'])}" if pd.notna(r["peg_ratio"]) else "N/A",
-            "Criteria": (
+            "Momentum": (
                 f"A:{'✅' if r['criterion_a'] else ('❌' if r['criterion_a'] is False else '—')} "
                 f"B:{'✅' if r['criterion_b'] else ('❌' if r['criterion_b'] is False else '—')} "
                 f"C:{'✅' if r['criterion_c'] else ('❌' if r['criterion_c'] is False else '—')}"
             ),
+            "Dividend yield": f"{format_pct(r['ttm_dividend_yield'], signed=False)} {pass_fail_badge(r['criterion_a'])}",
+            "PE": f"{r['pe_ratio']:.1f}" if pd.notna(r["pe_ratio"]) else "N/A",
+            "PEG": f"{r['peg_ratio']:.2f} {pass_fail_badge(r['criterion_c'])}" if pd.notna(r["peg_ratio"]) else "N/A",
             "Status": status_dot(r["status"]),
             "Symbol": r["symbol"],
         }
