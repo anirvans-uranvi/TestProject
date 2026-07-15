@@ -7,7 +7,7 @@ from src.models.user import SavedFilter
 from src.repositories import fetch_log_repo, settings_repo, snapshot_repo
 from src.services.market_calendar import get_market_state
 from src.services.threshold_override import apply_user_thresholds
-from src.utils.formatting import direction_arrow, format_inr, format_pct, pass_fail_badge
+from src.utils.formatting import direction_arrow, format_inr, format_pct, pass_fail_badge, pass_fail_icon
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.timezones import format_ist, now_ist
 from src.utils.ui import market_state_label, render_disclaimer, status_dot
@@ -240,6 +240,12 @@ filtered = filtered.sort_values(sort_map[sort_col], ascending=not sort_desc, na_
 # ---------------------------------------------------------------------
 st.subheader(f"Screener ({len(filtered)} of {len(df)} stocks)")
 
+def _momentum_pass(value) -> bool | None:
+    """Per-column momentum pass/fail: > 0% passes, matching criterion B's
+    per-period rule (exactly 0% is neutral/fails)."""
+    return None if pd.isna(value) else value > 0
+
+
 display_rows = []
 for i, (_, r) in enumerate(filtered.iterrows(), start=1):
     display_rows.append(
@@ -247,9 +253,9 @@ for i, (_, r) in enumerate(filtered.iterrows(), start=1):
             "#": i,
             "Stock": f"**{r['name']}**  \n{r['symbol']} · {r['sector'] or '—'}",
             "Latest price": format_inr(r["latest_price"]),
-            "1D": f"{direction_arrow(r['return_1d'])} {format_pct(r['return_1d'])}",
-            "5D": f"{direction_arrow(r['return_5d'])} {format_pct(r['return_5d'])}",
-            "20D": f"{direction_arrow(r['return_20d'])} {format_pct(r['return_20d'])}",
+            "1D": f"{direction_arrow(r['return_1d'])} {format_pct(r['return_1d'])} {pass_fail_icon(_momentum_pass(r['return_1d']))}",
+            "5D": f"{direction_arrow(r['return_5d'])} {format_pct(r['return_5d'])} {pass_fail_icon(_momentum_pass(r['return_5d']))}",
+            "20D": f"{direction_arrow(r['return_20d'])} {format_pct(r['return_20d'])} {pass_fail_icon(_momentum_pass(r['return_20d']))}",
             "Dividend yield": f"{format_pct(r['ttm_dividend_yield'], signed=False)} {pass_fail_badge(r['criterion_a'])}",
             "PE": f"{r['pe_ratio']:.1f}" if pd.notna(r["pe_ratio"]) else "N/A",
             "PEG": f"{r['peg_ratio']:.2f} {pass_fail_badge(r['criterion_c'])}" if pd.notna(r["peg_ratio"]) else "N/A",

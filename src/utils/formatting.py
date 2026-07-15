@@ -55,3 +55,11 @@ def pass_fail_badge(value: bool | None) -> str:
     if value is None:
         return "N/A"
     return "✅ Pass" if value else "❌ Fail"
+
+
+def pass_fail_icon(value: bool | None) -> str:
+    """Same pass/fail signal as pass_fail_badge() but symbol-only (no
+    'Pass'/'Fail' text), for compact table cells."""
+    if value is None:
+        return "—"
+    return "✅" if value else "❌"
