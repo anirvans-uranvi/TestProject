@@ -242,12 +242,6 @@ filtered = filtered.sort_values(sort_map[sort_col], ascending=not sort_desc, na_
 # ---------------------------------------------------------------------
 st.subheader(f"Screener ({len(filtered)} of {len(df)} stocks)")
 
-def _momentum_pass(value) -> bool | None:
-    """Per-column momentum pass/fail: > 0% passes, matching criterion B's
-    per-period rule (exactly 0% is neutral/fails)."""
-    return None if pd.isna(value) else value > 0
-
-
 display_rows = []
 for i, (_, r) in enumerate(filtered.iterrows(), start=1):
     display_rows.append(
@@ -255,9 +249,9 @@ for i, (_, r) in enumerate(filtered.iterrows(), start=1):
             "#": i,
             "Stock": r["name"],
             "Latest price": format_inr(r["latest_price"]),
-            "1D": f"{direction_arrow(r['return_1d'])} {format_pct(r['return_1d'])} {pass_fail_icon(_momentum_pass(r['return_1d']))}",
-            "5D": f"{direction_arrow(r['return_5d'])} {format_pct(r['return_5d'])} {pass_fail_icon(_momentum_pass(r['return_5d']))}",
-            "20D": f"{direction_arrow(r['return_20d'])} {format_pct(r['return_20d'])} {pass_fail_icon(_momentum_pass(r['return_20d']))}",
+            "1D": f"{direction_arrow(r['return_1d'])} {format_pct(r['return_1d'])}",
+            "5D": f"{direction_arrow(r['return_5d'])} {format_pct(r['return_5d'])}",
+            "20D": f"{direction_arrow(r['return_20d'])} {format_pct(r['return_20d'])}",
             "Momentum": pass_fail_icon(r["criterion_b"]),
             "Dividend yield": f"{format_pct(r['ttm_dividend_yield'], signed=False)} {pass_fail_icon(r['criterion_a'])}",
             "PE": f"{r['pe_ratio']:.1f}" if pd.notna(r["pe_ratio"]) else "N/A",
