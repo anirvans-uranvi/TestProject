@@ -251,7 +251,7 @@ for i, (_, r) in enumerate(filtered.iterrows(), start=1):
     display_rows.append(
         {
             "#": i,
-            "Stock": f"**{r['name']}**  \n{r['symbol']} · {r['sector'] or '—'}",
+            "Stock": r["name"],
             "Latest price": format_inr(r["latest_price"]),
             "1D": f"{direction_arrow(r['return_1d'])} {format_pct(r['return_1d'])} {pass_fail_icon(_momentum_pass(r['return_1d']))}",
             "5D": f"{direction_arrow(r['return_5d'])} {format_pct(r['return_5d'])} {pass_fail_icon(_momentum_pass(r['return_5d']))}",
