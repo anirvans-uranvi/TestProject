@@ -237,6 +237,14 @@ rows with any `None` criterion are **Unavailable**, not Red. See
 | Red | none of A, B, C pass |
 | Unavailable | any criterion has missing inputs, or data is stale beyond the configured threshold |
 
+PE/PEG/EPS/market cap feed A and C from whichever `fundamental_snapshots`
+row is *most recent for that specific field*, not necessarily the row
+for today -- see [`get_latest_fundamentals()`](docs/CODEBASE_GUIDE.md#repositories-srcrepositories).
+A provider gap on a given day (e.g. yfinance's PEG intermittently
+returning null) falls back to the last day that field had a real value,
+rather than making the stock Unavailable. Only a field that has *never*
+been available for a symbol reads as genuinely missing.
+
 Thresholds and the staleness window are configurable per-user in
 **Settings**; `src/services/threshold_override.py` re-applies a signed-in
 user's thresholds to the server-computed `daily_screener_snapshots` row at

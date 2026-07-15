@@ -257,6 +257,23 @@ Server-side scripts (`scripts/*.py`, `refresh_service.py`) always use
 — that would ship the service-role key's privileges to whatever a page
 does, defeating RLS entirely.
 
+`fundamentals_repo.get_latest_fundamentals()` does NOT simply return the
+single most recent `fundamental_snapshots` row. Each field (`pe_ratio`,
+`peg_ratio`, `eps`, `market_cap`) is carried forward **independently**
+from the most recent row where that specific field was actually non-null
+(`carry_forward_fields()`, a pure helper directly unit-tested in
+`tests/test_fundamentals_repo.py`). This matters because a single day's
+fetch commonly has gaps — yfinance's `pegRatio` in particular is
+intermittently `None` for a symbol even on a day PE/EPS came back fine —
+and treating "missing in today's row" the same as "never available"
+would flag a stock Unavailable despite a perfectly good recent value
+existing. There is deliberately no equivalent for `price_history` or
+`dividend_events`: prices are only ever inserted with `close` populated
+(no partial rows to fall back within), and dividend TTM yield already
+sums *all* historical events in the trailing-365-day window rather than
+reading a single "latest" row, so both already use whatever data exists
+without needing this treatment.
+
 ## Services (`src/services/`)
 
 - **`screener_service.py`** — `compute_screener_row(...)` is the pure calculation step (calls into `src/calculations/`, fully unit-tested in `tests/test_screener_service.py`). `refresh_screener_row_for_symbol(client, symbol, ...)` is the I/O wrapper: reads normalized data back out of Supabase, calls `compute_screener_row`, persists the result. **A real bug was found and fixed here**: the history-window upper bound must be `latest_point.trade_date - 1 day`, not a fixed `as_of_date - 1` — when no intraday quote has been fetched yet, `get_latest_close()` returns the most recent EOD row, which could be *older* than `as_of_date - 1`; using a fixed cutoff let that same row appear as both `latest_price` and the last element of `historical_closes`, silently forcing `return_1d` to exactly `0.0` for every symbol. If you ever touch this function, keep that comment — it's easy to reintroduce.
@@ -284,7 +301,7 @@ titled "app"). Every page in `pages/` starts with
 proceed (a valid session exists) or renders the Sign in / Create account /
 Forgot password tabs and `st.stop()`s.
 
-- **`1_Dashboard.py`** — loads `latest_screener_view` via `snapshot_repo.get_latest_screener()`, applies the signed-in user's thresholds via `threshold_override.apply_user_thresholds()`, renders metric cards (also usable as quick filters, wired through `st.session_state["status_filter"]`), sidebar filters, and the screener table (rendered as an HTML table via `.to_html()` so status badges can use colored spans — `st.dataframe` doesn't support arbitrary per-cell HTML).
+- **`1_Dashboard.py`** — loads `latest_screener_view` via `snapshot_repo.get_latest_screener()`, applies the signed-in user's thresholds via `threshold_override.apply_user_thresholds()`, renders metric cards (also usable as quick filters, wired through `st.session_state["status_filter"]`), sidebar filters, and the screener table (rendered as an HTML table via `.to_html()` so status badges can use colored spans — `st.dataframe` doesn't support arbitrary per-cell HTML). The Status sidebar filter is a `st.multiselect` over `ALL_STATUSES = ["Green", "Amber", "Red", "Unavailable"]` — `status_filter` is always a *list* (any combination, not one-or-all), and the final row filter is a single `df["status"].isin([...])`, so selecting all four is equivalent to no filter at all. Saved filter presets normalize old single-string `"status"` values (from before this was a multiselect) into a list on load for backward compatibility.
 - **`2_Stock_Detail.py`** — the most feature-dense page: Plotly candlestick (falls back to a line chart if OHLC is incomplete) with volume subplot, moving averages, entry/target/stop-loss lines, dividend timeline, classification-history chart, position notes form, and inline alert creation.
 - **`3_Alerts.py`** — alert CRUD (including portfolio-wide alerts, `symbol IS NULL`) and notification history.
 - **`4_Settings.py`** — per-user thresholds, theme, change-password.
@@ -348,7 +365,12 @@ whole suite runs with zero network access). One file per module under
 test, named `test_<module>.py`. If you add a new pure function to
 `src/calculations/` or `src/services/`, it should get a same-pattern test
 file — boundary cases (exactly-at-threshold, missing data) are the ones
-that matter most given how the spec is written.
+that matter most given how the spec is written. The same applies inside
+otherwise I/O-heavy repository modules: `fundamentals_repo.py`'s actual
+carry-forward logic is factored out into a standalone pure function
+(`carry_forward_fields()`) specifically so it has a direct test
+(`test_fundamentals_repo.py`) without needing to mock a Supabase client —
+prefer that split over testing repo logic through a mocked client.
 
 ## Common changes, step by step
 
