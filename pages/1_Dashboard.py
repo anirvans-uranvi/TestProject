@@ -148,9 +148,10 @@ with st.sidebar:
 
     sort_col = st.selectbox(
         "Sort by",
-        ["Status", "Symbol", "Latest price", "1D return", "5D return", "20D return", "Dividend yield", "PEG"],
+        ["Stock", "Status", "Symbol", "Latest price", "1D return", "5D return", "20D return", "Dividend yield", "PEG"],
+        index=0,
     )
-    sort_desc = st.checkbox("Descending", value=True)
+    sort_desc = st.checkbox("Descending", value=False)
 
     st.divider()
     st.subheader("Saved filter presets")
@@ -224,6 +225,7 @@ if complete_only:
     filtered = filtered[filtered["status"] != "unavailable"]
 
 sort_map = {
+    "Stock": "name",
     "Status": "status",
     "Symbol": "symbol",
     "Latest price": "latest_price",
