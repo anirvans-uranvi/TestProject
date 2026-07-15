@@ -241,10 +241,10 @@ filtered = filtered.sort_values(sort_map[sort_col], ascending=not sort_desc, na_
 st.subheader(f"Screener ({len(filtered)} of {len(df)} stocks)")
 
 display_rows = []
-for _, r in filtered.iterrows():
+for i, (_, r) in enumerate(filtered.iterrows(), start=1):
     display_rows.append(
         {
-            "Status": status_badge(r["status"]),
+            "#": i,
             "Stock": f"**{r['name']}**  \n{r['symbol']} · {r['sector'] or '—'}",
             "Latest price": format_inr(r["latest_price"]),
             "1D": f"{direction_arrow(r['return_1d'])} {format_pct(r['return_1d'])}",
@@ -258,6 +258,7 @@ for _, r in filtered.iterrows():
                 f"B:{'✅' if r['criterion_b'] else ('❌' if r['criterion_b'] is False else '—')} "
                 f"C:{'✅' if r['criterion_c'] else ('❌' if r['criterion_c'] is False else '—')}"
             ),
+            "Status": status_badge(r["status"]),
             "Symbol": r["symbol"],
         }
     )
