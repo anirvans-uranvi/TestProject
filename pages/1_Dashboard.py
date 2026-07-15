@@ -7,7 +7,7 @@ from src.models.user import SavedFilter
 from src.repositories import fetch_log_repo, settings_repo, snapshot_repo
 from src.services.market_calendar import get_market_state
 from src.services.threshold_override import apply_user_thresholds
-from src.utils.formatting import direction_arrow, format_inr, format_pct, pass_fail_badge, pass_fail_icon
+from src.utils.formatting import direction_arrow, format_inr, format_pct, pass_fail_icon
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.timezones import format_ist, now_ist
 from src.utils.ui import market_state_label, render_disclaimer, status_dot
@@ -259,7 +259,7 @@ for i, (_, r) in enumerate(filtered.iterrows(), start=1):
             "Momentum": pass_fail_icon(r["criterion_b"]),
             "Dividend yield": f"{format_pct(r['ttm_dividend_yield'], signed=False)} {pass_fail_icon(r['criterion_a'])}",
             "PE": f"{r['pe_ratio']:.1f}" if pd.notna(r["pe_ratio"]) else "N/A",
-            "PEG": f"{r['peg_ratio']:.2f} {pass_fail_badge(r['criterion_c'])}" if pd.notna(r["peg_ratio"]) else "N/A",
+            "PEG": f"{r['peg_ratio']:.2f} {pass_fail_icon(r['criterion_c'])}" if pd.notna(r["peg_ratio"]) else "N/A",
             "Status": status_dot(r["status"]),
             "Symbol": r["symbol"],
         }
