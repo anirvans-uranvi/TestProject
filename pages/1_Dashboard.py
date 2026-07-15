@@ -79,6 +79,8 @@ ALL_STATUSES = ["Green", "Amber", "Red", "Unavailable"]
 
 if "status_filter" not in st.session_state:
     st.session_state["status_filter"] = list(ALL_STATUSES)
+if "criterion_filter" not in st.session_state:
+    st.session_state["criterion_filter"] = None
 
 counts = {
     "Total": len(df),
@@ -95,19 +97,24 @@ extra_counts = {
 
 metric_cols = st.columns(8)
 metric_specs = [
-    ("Total stocks", counts["Total"], None),
-    ("🟢 Green", counts["Green"], "green"),
-    ("🟠 Amber", counts["Amber"], "amber"),
-    ("🔴 Red", counts["Red"], "red"),
-    ("⚪ Unavailable", counts["Unavailable"], "unavailable"),
-    ("Yield > threshold", extra_counts["Yield > threshold"], None),
-    ("All momentum +ve", extra_counts["All momentum +ve"], None),
-    ("PEG <= threshold", extra_counts["PEG <= threshold"], None),
+    ("Total stocks", counts["Total"], None, None),
+    ("🟢 Green", counts["Green"], "green", None),
+    ("🟠 Amber", counts["Amber"], "amber", None),
+    ("🔴 Red", counts["Red"], "red", None),
+    ("⚪ Unavailable", counts["Unavailable"], "unavailable", None),
+    ("Yield > threshold", extra_counts["Yield > threshold"], None, "criterion_a"),
+    ("All momentum +ve", extra_counts["All momentum +ve"], None, "criterion_b"),
+    ("PEG <= threshold", extra_counts["PEG <= threshold"], None, "criterion_c"),
 ]
-for col, (label, value, status_value) in zip(metric_cols, metric_specs):
+for col, (label, value, status_value, criterion_key) in zip(metric_cols, metric_specs):
     with col:
         if st.button(f"{label}\n{value}", key=f"metric_{label}", use_container_width=True):
-            st.session_state["status_filter"] = [status_value.capitalize()] if status_value else list(ALL_STATUSES)
+            if criterion_key:
+                st.session_state["criterion_filter"] = criterion_key
+                st.session_state["status_filter"] = list(ALL_STATUSES)
+            else:
+                st.session_state["status_filter"] = [status_value.capitalize()] if status_value else list(ALL_STATUSES)
+                st.session_state["criterion_filter"] = None
             st.rerun()
 
 st.divider()
@@ -196,6 +203,8 @@ with st.sidebar:
 # ---------------------------------------------------------------------
 filtered = df.copy()
 filtered = filtered[filtered["status"].isin([s.lower() for s in status_filter])]
+if st.session_state["criterion_filter"]:
+    filtered = filtered[filtered[st.session_state["criterion_filter"]] == True]  # noqa: E712
 if sector_filter:
     filtered = filtered[filtered["sector"].isin(sector_filter)]
 if search:
@@ -240,7 +249,16 @@ filtered = filtered.sort_values(sort_map[sort_col], ascending=not sort_desc, na_
 # ---------------------------------------------------------------------
 # Screener table
 # ---------------------------------------------------------------------
-st.subheader(f"Screener ({len(filtered)} of {len(df)} stocks)")
+_CRITERION_FILTER_LABEL = {
+    "criterion_a": "Yield > threshold",
+    "criterion_b": "All momentum +ve",
+    "criterion_c": "PEG <= threshold",
+}
+_active_criterion_label = _CRITERION_FILTER_LABEL.get(st.session_state["criterion_filter"])
+_subheader = f"Screener ({len(filtered)} of {len(df)} stocks)"
+if _active_criterion_label:
+    _subheader += f" — filtered to: {_active_criterion_label}"
+st.subheader(_subheader)
 
 display_rows = []
 for i, (_, r) in enumerate(filtered.iterrows(), start=1):
