@@ -21,6 +21,7 @@ it — for setup, environment variables, and operational limitations, see
 - [Auth: a non-obvious quirk](#auth-a-non-obvious-quirk)
 - [Utils (`src/utils/`)](#utils-srcutils)
 - [Scripts (`scripts/`)](#scripts-scripts)
+- [Edge Functions (`supabase/functions/`)](#edge-functions-supabasefunctions)
 - [Tests (`tests/`)](#tests-tests)
 - [Common changes, step by step](#common-changes-step-by-step)
 
@@ -121,6 +122,7 @@ scripts/
 supabase/
   migrations/                      Schema, RLS policies, views/functions, in numbered order
   seed.sql                          Current Nifty 50 constituents + companies (reference data only)
+  functions/manual-refresh/         Edge Function (Deno/TypeScript) behind the Dashboard's on-demand refresh
 tests/                             Pytest suite -- almost entirely calculations/services, no network
 ```
 
@@ -372,6 +374,70 @@ at the top so they run without installing the package) using
   ```
   then re-run `run_refresh.py --mode=screener` to recompute. `fundamental_snapshots` doesn't need this — its upsert key is `(symbol, as_of_date)`, so a same-day real fetch fully replaces that day's mock row.
 - **`import_screener_csv.py`** — converts a screener.in "Export screen results" CSV into `fundamental_snapshots`/`dividend_events` rows, with fuzzy column-name matching since the export's exact columns depend on what the user chose to include on screener.in.
+
+## Edge Functions (`supabase/functions/`)
+
+`manual-refresh/` backs the Dashboard's "Manual refresh" button
+(`src/services/edge_refresh.py` calls it over HTTP). It exists because a
+real fetch-and-write needs the Supabase service-role key, which cannot
+live in Streamlit page code (Streamlit Cloud runs that code inside every
+logged-in user's own browser session) — an Edge Function runs
+server-side inside Supabase's own infrastructure instead, so it's safe to
+give it the key there. This is a fundamentally different runtime from
+the rest of this project: Supabase Edge Functions run **Deno/TypeScript**,
+not Python.
+
+- **`calculations.ts`** — a direct port of `src/calculations/*.py` plus
+  `fundamentals_repo.py::carry_forward_fields`, same function names/shape
+  translated to camelCase specifically so the two are easy to diff against
+  each other. **This is a second copy of business logic living in a
+  different language, with no automated check that it stays in sync with
+  the Python originals** — if you change a rule in `src/calculations/`
+  (a threshold direction, what counts as stale, etc.), mirror the change
+  here too. `calculations.test.ts` mirrors the same boundary cases as
+  `tests/test_calculations_classification.py` (exactly-at-threshold,
+  missing-vs-confirmed-zero, PEG's reversed `<=` direction) — run with
+  `deno test supabase/functions/manual-refresh/calculations.test.ts`.
+- **`yahoo.ts`** — `fetchChartData()` (price history + dividend events,
+  one Yahoo endpoint, no auth needed) and `fetchFundamentals()` (PE/PEG/
+  EPS/market cap, a *different* Yahoo endpoint that needs a session
+  cookie + "crumb" token obtained via a separate handshake — real added
+  fragility beyond what Python's `yfinance` package already manages for
+  the cron-refresh side of this project; see README "Limitations"). Both
+  endpoint shapes were confirmed with live `curl` requests before this
+  was written, not assumed from documentation (there isn't any — both are
+  unofficial).
+- **`index.ts`** — the HTTP handler: verifies the caller's JWT (any
+  logged-in user may trigger this — it refreshes shared data, not
+  anything per-user), checks a 5-minute cooldown against
+  `provider_fetch_log` (`provider_name = 'manual_edge'`, `fetch_type =
+  'all'` — `'all'` had to be added to that column's CHECK constraint in
+  `0005_add_manual_refresh_fetch_type.sql`, since none of the existing
+  per-mode values fit a single combined refresh), then processes
+  constituents in concurrency-limited batches of 8, and logs one summary
+  row plus returns `{succeeded, failed, total, symbolsFailed}` as JSON.
+  One symbol's failure doesn't abort the batch (each symbol's pipeline is
+  wrapped in try/catch, mirroring `refresh_service.py`'s per-symbol
+  error handling).
+- Not using `supabase gen types typescript` (no generated Database
+  schema type), so `supabase-js` clients are typed as `any` deliberately
+  (see the `AnyClient` alias in `index.ts`) rather than fighting the
+  library's default `never`-row inference for an ungenerated schema.
+
+**Deploying/updating this function requires the Supabase CLI** (see
+README "On-demand refresh" for the exact commands) — unlike the SQL
+migrations elsewhere in this project, the Edge Functions Dashboard editor
+is a much rougher way to manage a multi-file TypeScript function with
+imports. `SUPABASE_URL`/`SUPABASE_ANON_KEY`/`SUPABASE_SERVICE_ROLE_KEY`
+are auto-injected into every function's environment by Supabase; no
+manual secret configuration is needed for this function to run.
+
+Deno was installed locally at `~/.deno/bin/deno.exe` specifically to
+test-and-typecheck this code before ever deploying it (`deno test`,
+`deno check`) — there is no way to deploy to or invoke a live Supabase
+project's Edge Functions from this development environment directly, so
+`deno test`/`deno check` are as far as verification goes without the
+user actually deploying and clicking the button themselves.
 
 ## Tests (`tests/`)
 

@@ -56,6 +56,9 @@ class FetchType(StrEnum):
     FUNDAMENTALS = "fundamentals"
     DIVIDEND = "dividend"
     CONSTITUENTS = "constituents"
+    ALL = "all"  # logged by the on-demand manual-refresh Edge Function,
+    # which does price+dividend+fundamentals+screener in one invocation
+    # rather than the Python cron path's separate --mode values
 
 
 class FetchStatus(StrEnum):

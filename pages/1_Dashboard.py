@@ -5,6 +5,7 @@ import streamlit as st
 
 from src.models.user import SavedFilter
 from src.repositories import fetch_log_repo, settings_repo, snapshot_repo
+from src.services import edge_refresh
 from src.services.market_calendar import get_market_state
 from src.services.threshold_override import apply_user_thresholds
 from src.utils.formatting import direction_arrow, format_inr, format_pct, pass_fail_icon
@@ -28,7 +29,10 @@ def _load_screener_rows(_client, _cache_bust: int):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_last_fetch(_client, _cache_bust: int):
-    return fetch_log_repo.get_last_successful_fetch(_client, "intraday_price")
+    # "all" is the on-demand manual-refresh Edge Function's combined log
+    # entry -- included so the header reflects it, not just the cron
+    # path's per-mode "intraday_price" entries.
+    return fetch_log_repo.get_last_successful_fetch(_client, ["intraday_price", "all"])
 
 
 if "dashboard_cache_bust" not in st.session_state:
@@ -55,9 +59,33 @@ with header_col2:
         st.markdown(f"**Data freshness:** {age_min:.0f} min ago")
 with header_col3:
     if st.button("🔄 Manual refresh", use_container_width=True):
+        with st.spinner("Refreshing live data from Yahoo Finance -- this can take up to a minute..."):
+            try:
+                summary = edge_refresh.trigger_manual_refresh(st.session_state["sb_access_token"])
+            except edge_refresh.ManualRefreshError as exc:
+                st.session_state["last_manual_refresh_summary"] = {"error": str(exc)}
+            else:
+                st.session_state["last_manual_refresh_summary"] = summary
         st.session_state["dashboard_cache_bust"] += 1
         st.cache_data.clear()
         st.rerun()
+
+# Shown once, right after the rerun triggered by the button above (a
+# message set and then immediately st.rerun()-ed away would never
+# actually render, so this is stashed in session_state and displayed on
+# the next script run instead).
+if st.session_state.get("last_manual_refresh_summary"):
+    summary = st.session_state.pop("last_manual_refresh_summary")
+    if summary.get("error"):
+        st.error(summary["error"])
+    elif summary["failed"] == 0:
+        st.success(f"✅ Refreshed all {summary['succeeded']} stocks.")
+    else:
+        failed_symbols = ", ".join(f["symbol"] for f in summary["symbolsFailed"])
+        st.warning(
+            f"Refreshed {summary['succeeded']} of {summary['total']} stocks -- "
+            f"{summary['failed']} failed: {failed_symbols}"
+        )
 
 render_disclaimer()
 

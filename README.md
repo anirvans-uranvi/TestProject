@@ -22,6 +22,7 @@ operations; that doc covers the code itself.
 - [Calculation logic](#calculation-logic)
 - [Running tests](#running-tests)
 - [Scheduled refresh](#scheduled-refresh)
+- [On-demand refresh (Dashboard "Manual refresh" button)](#on-demand-refresh-dashboard-manual-refresh-button)
 - [Docker](#docker)
 - [Limitations](#limitations)
 
@@ -290,6 +291,55 @@ retry transient provider failures with exponential backoff
 (`tenacity`, in `src/services/refresh_service.py` and
 `src/data_providers/dhan_provider.py`).
 
+## On-demand refresh (Dashboard "Manual refresh" button)
+
+The scheduled mechanisms above run independently of the Streamlit app.
+The Dashboard's **Manual refresh** button is a separate, fourth path that
+does an actual live fetch on click, implemented as a **Supabase Edge
+Function** (`supabase/functions/manual-refresh/`) rather than in
+Streamlit page code -- a real fetch-and-write needs the Supabase
+service-role key (bypasses RLS), which must never live in Streamlit page
+code since Streamlit Cloud runs that code in every logged-in user's own
+browser session. The Edge Function holds the key safely as a
+Supabase-injected environment variable (runs server-side inside
+Supabase's infrastructure); Streamlit only ever sends the *calling user's
+own* access token (`src/services/edge_refresh.py`), never any secret.
+
+It reimplements price/dividend/fundamentals fetching (via Yahoo Finance,
+unofficial endpoints, see [Limitations](#limitations)) and the
+return/classification math **in TypeScript**
+(`supabase/functions/manual-refresh/calculations.ts`,
+`yahoo.ts`) -- a deliberate, explicitly-accepted tradeoff to get a truly
+instant on-demand refresh with full feature parity to
+`run_refresh.py --mode=all`, at the cost of duplicating business logic in
+a second language. If you change a rule in `src/calculations/`, mirror it
+in `calculations.ts` too; run `deno test
+supabase/functions/manual-refresh/calculations.test.ts` to check the port
+still matches the documented boundary cases.
+
+A 5-minute cooldown (tracked via `provider_fetch_log`, `provider_name =
+'manual_edge'`) applies across all users, to keep repeated clicks from
+rate-limiting the whole project's access to Yahoo's endpoints.
+
+**Deploying the Edge Function** (one-time setup, requires the Supabase
+CLI -- Edge Functions are genuinely easier to develop/deploy with proper
+tooling than via the Dashboard's editor, unlike the SQL migrations
+earlier in this README):
+
+```bash
+npm install -g supabase   # or: scoop install supabase
+supabase login
+supabase link --project-ref <your-project-ref>
+supabase functions deploy manual-refresh
+```
+
+`SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` are
+automatically available to the function at runtime -- Supabase injects
+them into every Edge Function's environment, no manual secret-setting
+needed. No changes are required on the Streamlit side beyond having
+`SUPABASE_URL` set (already required for everything else) -- the
+function's URL is derived from it.
+
 ## Docker
 
 ```bash
@@ -346,6 +396,18 @@ docker compose up               # + the APScheduler refresh daemon
   use (which is what was requested here); replace it with Dhan (prices)
   plus a licensed fundamentals vendor before relying on this for a
   commercial product.
+- **The manual-refresh Edge Function's fundamentals fetch depends on an
+  undocumented Yahoo "crumb" + cookie handshake, more fragile than the
+  Python `yfinance` path above.** Its price/dividend endpoint needs no
+  auth (verified directly), but its fundamentals endpoint
+  (`quoteSummary`) started requiring a session cookie plus a crumb token
+  fetched via a separate request -- reimplemented by hand in
+  `supabase/functions/manual-refresh/yahoo.ts` since there's no Deno
+  equivalent of `yfinance` to manage this automatically. Yahoo can change
+  or remove this handshake at any time with no notice; if the Edge
+  Function's fundamentals step starts failing for every symbol, this is
+  the first thing to check (re-verify the flow with `curl` the same way
+  it was confirmed originally -- see `docs/CODEBASE_GUIDE.md`).
 - **screener.in dividend yield is an estimate, not real dividend
   history.** Their CSV export gives a yield percentage, not individual
   ex-dividend dates, so `import_screener_csv.py` fabricates one dividend
