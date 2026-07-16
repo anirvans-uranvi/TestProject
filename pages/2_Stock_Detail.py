@@ -25,10 +25,11 @@ from src.services.threshold_override import recompute_with_user_thresholds
 from src.utils.formatting import format_crores, format_inr, format_pct, pass_fail_badge
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.timezones import format_ist, now_ist
-from src.utils.ui import buy_sell_label, plotly_template, render_disclaimer, status_badge
+from src.utils.ui import buy_sell_label, inject_tailwind, plotly_template, render_disclaimer, status_badge
 
 st.set_page_config(page_title="Stock Detail | Nifty 50 Screener", page_icon="🔍", layout="wide")
 require_login()
+inject_tailwind()
 
 client = get_user_client_cached()
 user_id = current_user_id()

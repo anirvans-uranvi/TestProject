@@ -299,6 +299,16 @@ docker compose up               # + the APScheduler refresh daemon
 
 ## Limitations
 
+- **The Dashboard's screener table depends on a Tailwind CSS CDN link at
+  runtime** (`unpkg.com/tailwindcss@2.2.19`, loaded by `inject_tailwind()`
+  in `src/utils/ui.py`). Streamlit's own native widgets can't be styled by
+  an external CSS framework at all -- only the custom HTML we hand-render
+  (the screener table, status icons) uses it, giving it a mobile-friendly
+  card layout on phones and a normal table on wider screens. If that CDN
+  is unreachable (offline, a restrictive corporate firewall, etc.), the
+  table still renders and is still fully readable/functional, just
+  without the Tailwind styling -- see `docs/CODEBASE_GUIDE.md` for why a
+  `<link>` tag was used instead of Tailwind's more common CDN `<script>`.
 - **No officially licensed source for PE / PEG / dividend data was
   available in scope.** DhanHQ v2 (a licensed broker) only exposes prices
   -- no PE, PEG, EPS, market cap, or dividend data. NSE itself has no

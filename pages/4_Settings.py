@@ -7,10 +7,11 @@ from src.models.enums import Theme
 from src.models.user import UserSettings
 from src.repositories import settings_repo
 from src.utils.session import current_user_email, current_user_id, get_user_client_cached, require_login, set_new_password
-from src.utils.ui import render_disclaimer
+from src.utils.ui import inject_tailwind, render_disclaimer
 
 st.set_page_config(page_title="Settings | Nifty 50 Screener", page_icon="⚙️", layout="wide")
 require_login()
+inject_tailwind()
 
 client = get_user_client_cached()
 user_id = current_user_id()

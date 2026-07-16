@@ -8,10 +8,11 @@ from src.models.enums import AlertType
 from src.repositories import alerts_repo, companies_repo, notification_repo
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.timezones import format_ist
-from src.utils.ui import render_disclaimer
+from src.utils.ui import inject_tailwind, render_disclaimer
 
 st.set_page_config(page_title="Alerts | Nifty 50 Screener", page_icon="🔔", layout="wide")
 require_login()
+inject_tailwind()
 
 client = get_user_client_cached()
 user_id = current_user_id()

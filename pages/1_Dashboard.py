@@ -10,10 +10,11 @@ from src.services.threshold_override import apply_user_thresholds
 from src.utils.formatting import direction_arrow, format_inr, format_pct, pass_fail_icon
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.timezones import format_ist, now_ist
-from src.utils.ui import market_state_label, render_disclaimer, status_dot
+from src.utils.ui import inject_tailwind, market_state_label, render_disclaimer, render_screener_table, status_dot
 
 st.set_page_config(page_title="Dashboard | Nifty 50 Screener", page_icon="📊", layout="wide")
 require_login()
+inject_tailwind()
 
 client = get_user_client_cached()
 user_id = current_user_id()
@@ -283,10 +284,7 @@ table_df = pd.DataFrame(display_rows)
 if table_df.empty:
     st.info("No stocks match your current filters. Try loosening the sidebar filters (e.g. minimum dividend yield/PEG) or confirm screener data has been seeded/refreshed.")
 else:
-    st.markdown(
-        table_df.drop(columns=["Symbol"]).to_html(escape=False, index=False),
-        unsafe_allow_html=True,
-    )
+    st.markdown(render_screener_table(display_rows, user_settings.theme), unsafe_allow_html=True)
 
 st.divider()
 selected_symbol = st.selectbox("Open in Stock Detail →", table_df["Symbol"] if not table_df.empty else [])

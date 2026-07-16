@@ -2,7 +2,7 @@ import streamlit as st
 
 from src.config import get_settings
 from src.utils.session import current_user_email, require_login, sign_out
-from src.utils.ui import render_disclaimer
+from src.utils.ui import inject_tailwind, render_disclaimer
 
 st.set_page_config(
     page_title="Nifty 50 Momentum & Dividend Screener",
@@ -11,6 +11,7 @@ st.set_page_config(
 )
 
 require_login()
+inject_tailwind()
 
 with st.sidebar:
     st.caption(f"Signed in as {current_user_email()}")
