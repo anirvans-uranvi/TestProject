@@ -198,15 +198,24 @@ def render_screener_table(rows: list[dict], theme: Theme | str = Theme.SYSTEM) -
             f'<div class="{c["muted"]} text-xs">{col}</div><div class="{c["cell_text"]} text-sm mb-1">{row[col]}</div>'
             for col in card_fields
         )
-        cards.append(f"""
-        <div class="rounded-lg border {c['card']} p-3 shadow-sm">
-          <div class="flex items-center justify-between gap-2 mb-2">
-            <span class="{c['cell_text']} font-semibold text-sm">#{row['#']} {row['Stock']}</span>
-            <span class="shrink-0">{row['Status']}</span>
-          </div>
-          <div class="grid grid-cols-2 gap-x-3">{stat_pairs}</div>
-        </div>
-        """)
+        # Built as one continuous line, not a multi-line/indented f-string
+        # -- joining indented multi-line card blocks left a whitespace-only
+        # line between each pair of cards, which Streamlit's markdown
+        # renderer treats as a blank line, ending the HTML block early.
+        # Everything after the first card then got parsed as an indented
+        # code block and shown as literal `<div>` text instead of being
+        # rendered (only reproduced on narrow/mobile viewports, since the
+        # desktop table's <tr> rows are built the same single-line way and
+        # never had this problem).
+        cards.append(
+            f'<div class="rounded-lg border {c["card"]} p-3 shadow-sm">'
+            f'<div class="flex items-center justify-between gap-2 mb-2">'
+            f'<span class="{c["cell_text"]} font-semibold text-sm">#{row["#"]} {row["Stock"]}</span>'
+            f'<span class="shrink-0">{row["Status"]}</span>'
+            f"</div>"
+            f'<div class="grid grid-cols-2 gap-x-3">{stat_pairs}</div>'
+            f"</div>"
+        )
 
     cards_html = f'<div class="md:hidden flex flex-col gap-3">{"".join(cards)}</div>'
 
