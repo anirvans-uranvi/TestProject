@@ -161,7 +161,16 @@ async function refreshOneSymbol(
     const sortedPoints = [...chart.points].sort((a, b) => (a.tradeDate < b.tradeDate ? -1 : 1));
     const latestPoint = sortedPoints[sortedPoints.length - 1];
     const latestPrice = latestPoint.adjustedClose ?? latestPoint.close;
-    const historicalCloses = sortedPoints.slice(0, -1).map((p) => p.adjustedClose ?? p.close);
+    // Filter out points with no close at all -- Yahoo's chart endpoint
+    // sometimes includes a timestamp for an NSE holiday with null OHLCV
+    // (a "phantom" non-trading day), which otherwise lands exactly at the
+    // "1 day ago" index and makes return1d Unavailable even though a real
+    // previous close exists just one day further back. Same fix as
+    // screener_service.py::refresh_screener_row_for_symbol.
+    const historicalCloses = sortedPoints
+      .slice(0, -1)
+      .map((p) => p.adjustedClose ?? p.close)
+      .filter((c): c is number => c !== null);
 
     const isStale = latestPoint.tradeDate < isoDateMinusDays(asOfDate, 5);
 

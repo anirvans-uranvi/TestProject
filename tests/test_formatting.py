@@ -1,5 +1,34 @@
+import math
+
 from src.models.enums import AlertType
-from src.utils.formatting import alert_type_label, summarize_alert_config
+from src.utils.formatting import alert_type_label, direction_arrow, format_crores, format_inr, format_pct, summarize_alert_config
+
+
+class TestNanTreatedAsMissing:
+    """pd.DataFrame([r.model_dump() for r in rows]) (pages/1_Dashboard.py)
+    silently converts a Pydantic model's `None` into float('nan') for any
+    column that also has real float values elsewhere in the same column
+    -- a real bug this caused: a correctly-missing return_1d rendered as
+    the literal string "nan%" instead of a missing-data placeholder,
+    since `value is None` doesn't catch NaN. Every formatter must treat
+    NaN exactly like None."""
+
+    def test_format_pct_nan_same_as_none(self):
+        assert format_pct(float("nan")) == format_pct(None) == "—"
+
+    def test_direction_arrow_nan_same_as_none(self):
+        assert direction_arrow(float("nan")) == direction_arrow(None) == "—"
+
+    def test_format_inr_nan_same_as_none(self):
+        assert format_inr(float("nan")) == format_inr(None) == "—"
+
+    def test_format_crores_nan_same_as_none(self):
+        assert format_crores(float("nan")) == format_crores(None) == "—"
+
+    def test_real_values_still_format_normally(self):
+        assert format_pct(1.5) == "+1.50%"
+        assert direction_arrow(1.5) == "▲"
+        assert math.isnan(float("nan"))  # sanity check the test fixture itself
 
 
 class TestAlertTypeLabel:

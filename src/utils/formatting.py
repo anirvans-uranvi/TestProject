@@ -1,6 +1,22 @@
 from __future__ import annotations
 
+import math
+
 from src.models.enums import AlertType
+
+
+def _is_missing(value: float | None) -> bool:
+    """True for None AND for float('nan'). Pydantic models correctly use
+    None for missing data, but building a pandas DataFrame from a list of
+    those models (pages/1_Dashboard.py: pd.DataFrame([r.model_dump() for
+    r in rows])) silently converts None to NaN for any column that also
+    has real float values elsewhere in the same column -- a real bug this
+    caused: rows[i]['return_1d'] is None upstream (correctly missing) but
+    reads back as float('nan') from the DataFrame, which `value is None`
+    doesn't catch, so it fell through to numeric formatting and rendered
+    as the literal string "nan%" instead of a missing-data placeholder.
+    Every formatter below checks this instead of a bare `is None`."""
+    return value is None or (isinstance(value, float) and math.isnan(value))
 
 
 def _group_indian(int_str: str) -> str:
@@ -17,7 +33,7 @@ def _group_indian(int_str: str) -> str:
 
 
 def format_inr(value: float | None, decimals: int = 2) -> str:
-    if value is None:
+    if _is_missing(value):
         return "—"
     sign = "-" if value < 0 else ""
     value = abs(value)
@@ -30,21 +46,21 @@ def format_inr(value: float | None, decimals: int = 2) -> str:
 
 
 def format_crores(value_in_rupees: float | None) -> str:
-    if value_in_rupees is None:
+    if _is_missing(value_in_rupees):
         return "—"
     crores = value_in_rupees / 1e7
     return f"₹{crores:,.0f} Cr"
 
 
 def format_pct(value: float | None, decimals: int = 2, signed: bool = True) -> str:
-    if value is None:
+    if _is_missing(value):
         return "—"
     sign = "+" if signed and value > 0 else ""
     return f"{sign}{value:.{decimals}f}%"
 
 
 def direction_arrow(value: float | None) -> str:
-    if value is None:
+    if _is_missing(value):
         return "—"
     if value > 0:
         return "▲"

@@ -14,13 +14,28 @@ from supabase import Client
 from src.calculations.classification import build_classification, criterion_52w_high, criterion_52w_low
 from src.calculations.dividends import ttm_dividend_yield
 from src.calculations.returns import return_1d, return_5d, return_20d
-from src.models.market_data import DividendEvent
+from src.models.market_data import DividendEvent, PricePoint
 from src.models.screener import DailyScreenerSnapshot
 from src.repositories import dividends_repo, fundamentals_repo, price_repo, snapshot_repo
 from src.services.market_calendar import IST
 
 HISTORY_LOOKBACK_DAYS = 45  # comfortably covers 20 trading days + weekends/holidays
 DIVIDEND_LOOKBACK_DAYS = 400  # >365 so the TTM window is always fully covered
+
+
+def valid_closes(history: list[PricePoint]) -> list[float]:
+    """Pure helper: history's effective closes with gaps dropped, so the
+    result represents actual completed trading sessions only, ordered
+    oldest -> newest same as `history` (see returns.py's docstring on
+    what historical_closes must mean). A provider can include a row for a
+    day with no real trading -- e.g. Yahoo's chart endpoint sometimes
+    returns a timestamp for an NSE holiday with null OHLCV, a "phantom"
+    non-trading day -- and if that None landed exactly at the "1 day ago"
+    position, return_1d went Unavailable even though a real previous
+    close existed just one day further back. Filtering here means
+    return_1d/5d/20d's [-1]/[-5]/[-20] indexing always lands on a real
+    trading day, skipping the gap instead of tripping on it."""
+    return [c for c in (p.effective_close for p in history) if c is not None]
 
 
 def compute_screener_row(
@@ -123,7 +138,7 @@ def refresh_screener_row_for_symbol(
     history_end = latest_trade_date - timedelta(days=1)
     history_start = history_end - timedelta(days=HISTORY_LOOKBACK_DAYS)
     history = price_repo.get_price_history(client, symbol, history_start, history_end)
-    historical_closes = [p.effective_close for p in history]
+    historical_closes = valid_closes(history)
 
     fundamentals = fundamentals_repo.get_latest_fundamentals(client, symbol)
     pe_ratio = fundamentals.pe_ratio if fundamentals else None

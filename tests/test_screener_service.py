@@ -1,12 +1,53 @@
 from datetime import date
 
 from src.models.enums import DividendType, ScreenerStatus
-from src.models.market_data import DividendEvent
-from src.services.screener_service import compute_screener_row
+from src.models.market_data import DividendEvent, PricePoint
+from src.services.screener_service import compute_screener_row, valid_closes
 
 
 def make_event(ex_date: date, amount: float) -> DividendEvent:
     return DividendEvent(symbol="TCS", ex_date=ex_date, amount_per_share=amount, dividend_type=DividendType.FINAL)
+
+
+def make_point(trade_date: date, close: float | None) -> PricePoint:
+    return PricePoint(symbol="TCS", trade_date=trade_date, close=close, adjusted_close=close)
+
+
+class TestValidCloses:
+    def test_drops_gap_days_preserving_order(self):
+        history = [
+            make_point(date(2026, 7, 13), 100.0),
+            make_point(date(2026, 7, 14), 101.0),
+            make_point(date(2026, 7, 16), None),  # e.g. an NSE holiday Yahoo still timestamps
+            make_point(date(2026, 7, 17), 103.0),
+        ]
+        assert valid_closes(history) == [100.0, 101.0, 103.0]
+
+    def test_no_gaps_returns_all_closes(self):
+        history = [make_point(date(2026, 7, d), float(d)) for d in range(13, 18)]
+        assert valid_closes(history) == [13.0, 14.0, 15.0, 16.0, 17.0]
+
+    def test_empty_history_returns_empty_list(self):
+        assert valid_closes([]) == []
+
+    def test_gap_at_the_most_recent_position_no_longer_breaks_1d_lookup(self):
+        # This is the exact real-world scenario: a phantom holiday row
+        # lands right before the latest price, so a NAIVE historical_closes
+        # (without gap-filtering) would put None at [-1] and make return_1d
+        # Unavailable even though a real previous close exists further back.
+        history = [
+            make_point(date(2026, 7, 13), 3177.5),
+            make_point(date(2026, 7, 14), 3188.8999),
+            make_point(date(2026, 7, 15), 3150.6001),
+            make_point(date(2026, 7, 16), None),  # phantom holiday row
+        ]
+        closes = valid_closes(history)
+        row = compute_screener_row(
+            symbol="TCS", latest_price=3153.8999, historical_closes=closes, dividend_events=[],
+            pe_ratio=25.0, peg_ratio=0.8, as_of_date=date(2026, 7, 17),
+        )
+        assert row.return_1d is not None
+        assert row.data_quality.missing_return_1d is False
 
 
 class TestComputeScreenerRow:
