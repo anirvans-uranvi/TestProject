@@ -11,7 +11,7 @@ from src.services.threshold_override import apply_user_thresholds
 from src.utils.formatting import direction_arrow, format_inr, format_pct, pass_fail_icon
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.timezones import format_ist, now_ist
-from src.utils.ui import inject_global_styles, market_state_label, render_disclaimer, render_pill, render_screener_table, status_dot
+from src.utils.ui import inject_global_styles, market_state_label, render_disclaimer, render_pill, render_screener_table
 
 st.set_page_config(page_title="Dashboard | Nifty 50 Screener", page_icon="📊", layout="wide")
 require_login()  # already injects Tailwind + the light-theme CSS design system
@@ -317,7 +317,6 @@ for i, (_, r) in enumerate(filtered.iterrows(), start=1):
             "Dividend yield": f"{format_pct(r['ttm_dividend_yield'], signed=False)} {pass_fail_icon(r['criterion_a'])}",
             "PE": f"{r['pe_ratio']:.1f}" if pd.notna(r["pe_ratio"]) else "N/A",
             "PEG": f"{r['peg_ratio']:.2f} {pass_fail_icon(r['criterion_c'])}" if pd.notna(r["peg_ratio"]) else "N/A",
-            "Status": status_dot(r["status"]),
             "Symbol": r["symbol"],
         }
     )

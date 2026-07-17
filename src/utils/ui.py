@@ -52,44 +52,6 @@ def status_badge(status: ScreenerStatus) -> str:
     )
 
 
-# Custom shapes per status (no single emoji matches these precisely):
-# green tick in a green square, blue "!" in an amber circle, white cross
-# in a red triangle. Built as small inline SVGs for exact control over
-# shape/color rather than relying on font-rendered emoji glyphs.
-_STATUS_SVG = {
-    ScreenerStatus.GREEN: (
-        '<svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">'
-        '<rect x="1" y="1" width="18" height="18" rx="2" fill="#0f9d58"/>'
-        '<path d="M5 10.3 L8.3 13.6 L15 6.8" stroke="white" stroke-width="2.2" '
-        'fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>'
-    ),
-    ScreenerStatus.AMBER: (
-        '<svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">'
-        '<circle cx="10" cy="10" r="9" fill="#f4a623"/>'
-        '<rect x="9" y="4.5" width="2" height="7.5" rx="1" fill="#1a56db"/>'
-        '<rect x="9" y="13.5" width="2" height="2" rx="1" fill="#1a56db"/></svg>'
-    ),
-    ScreenerStatus.RED: (
-        '<svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">'
-        '<path d="M10 1 L19 18 L1 18 Z" fill="#d93025" stroke="#d93025" stroke-linejoin="round"/>'
-        '<path d="M7 9 L13 15 M13 9 L7 15" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>'
-    ),
-}
-
-
-def status_dot(status: ScreenerStatus) -> str:
-    """Color-coded shape only, no text label -- for compact table cells
-    (e.g. the Dashboard screener table) where the row already carries a
-    Criteria column and other context. Use status_badge() instead
-    wherever the status needs to stand alone (e.g. the Stock Detail
-    header), since spelling it out matters more there for accessibility."""
-    status = ScreenerStatus(status)
-    _color, icon, label = STATUS_STYLE[status]
-    svg = _STATUS_SVG.get(status)
-    inner = svg if svg else f'<span style="font-size:1.3em;">{icon}</span>'
-    return f'<span title="{label}">{inner}</span>'
-
-
 def market_state_label(state: MarketState) -> str:
     return MARKET_STATE_LABEL[MarketState(state)]
 
@@ -395,11 +357,12 @@ def render_screener_table(rows: list[dict], theme: Theme | str = Theme.SYSTEM) -
         # rendered (only reproduced on narrow/mobile viewports, since the
         # desktop table's <tr> rows are built the same single-line way and
         # never had this problem).
+        status_span = f'<span class="shrink-0">{row["Status"]}</span>' if "Status" in row else ""
         cards.append(
             f'<div class="rounded-lg border {c["card"]} p-3 shadow-sm">'
             f'<div class="flex items-center justify-between gap-2 mb-2">'
             f'<span class="{c["cell_text"]} font-semibold text-sm">#{row["#"]} {row["Stock"]}</span>'
-            f'<span class="shrink-0">{row["Status"]}</span>'
+            f"{status_span}"
             f"</div>"
             f'<div class="grid grid-cols-2 gap-x-3">{stat_pairs}</div>'
             f"</div>"
