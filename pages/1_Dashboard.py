@@ -184,7 +184,7 @@ with st.sidebar:
 
     sort_col = st.selectbox(
         "Sort by",
-        ["Stock", "Status", "Symbol", "Latest price", "1D return", "5D return", "20D return", "Dividend yield", "PEG"],
+        ["Stock", "Status", "Latest price", "1D return", "5D return", "20D return", "Dividend yield", "PEG"],
         index=0,
     )
     sort_desc = st.checkbox("Descending", value=False)
@@ -263,9 +263,8 @@ if complete_only:
     filtered = filtered[filtered["status"] != "unavailable"]
 
 sort_map = {
-    "Stock": "name",
+    "Stock": "symbol",
     "Status": "status",
-    "Symbol": "symbol",
     "Latest price": "latest_price",
     "52W High": "week_52_high",
     "52W Low": "week_52_low",
@@ -306,7 +305,7 @@ for i, (_, r) in enumerate(filtered.iterrows(), start=1):
     display_rows.append(
         {
             "#": i,
-            "Stock": r["name"],
+            "Stock": r["symbol"],
             "Latest price": format_inr(r["latest_price"]),
             "52W High": f"{format_inr(r['week_52_high'])} {pass_fail_icon(r['criterion_52w_high'])}" if pd.notna(r["week_52_high"]) else "N/A",
             "52W Low": f"{format_inr(r['week_52_low'])} {pass_fail_icon(r['criterion_52w_low'])}" if pd.notna(r["week_52_low"]) else "N/A",
