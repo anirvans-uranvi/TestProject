@@ -11,15 +11,15 @@ from src.services.threshold_override import apply_user_thresholds
 from src.utils.formatting import direction_arrow, format_inr, format_pct, pass_fail_icon
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.timezones import format_ist, now_ist
-from src.utils.ui import inject_tailwind, market_state_label, render_disclaimer, render_screener_table, status_dot
+from src.utils.ui import inject_global_styles, market_state_label, render_disclaimer, render_pill, render_screener_table, status_dot
 
 st.set_page_config(page_title="Dashboard | Nifty 50 Screener", page_icon="📊", layout="wide")
-require_login()
-inject_tailwind()
+require_login()  # already injects Tailwind + the light-theme CSS design system
 
 client = get_user_client_cached()
 user_id = current_user_id()
 user_settings = settings_repo.get_user_settings(client, user_id)
+inject_global_styles(user_settings.theme)  # re-inject with the user's actual theme -- a later <style> tag wins
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -286,10 +286,20 @@ _CRITERION_FILTER_LABEL = {
     "criterion_c": "PEG <= threshold",
 }
 _active_criterion_label = _CRITERION_FILTER_LABEL.get(st.session_state["criterion_filter"])
-_subheader = f"Screener ({len(filtered)} of {len(df)} stocks)"
-if _active_criterion_label:
-    _subheader += f" — filtered to: {_active_criterion_label}"
-st.subheader(_subheader)
+_status_filter_active = sorted(st.session_state["status_filter"]) != sorted(ALL_STATUSES)
+_filter_active = bool(_active_criterion_label) or _status_filter_active
+
+subheader_col, clear_col = st.columns([5, 1])
+with subheader_col:
+    _subheader_html = f'<span class="text-xl font-semibold">Screener ({len(filtered)} of {len(df)} stocks)</span>'
+    if _active_criterion_label:
+        _subheader_html += " " + render_pill(f"filtered to: {_active_criterion_label}", theme=user_settings.theme)
+    st.markdown(_subheader_html, unsafe_allow_html=True)
+with clear_col:
+    if _filter_active and st.button("✕ Clear filter", use_container_width=True):
+        st.session_state["status_filter"] = list(ALL_STATUSES)
+        st.session_state["criterion_filter"] = None
+        st.rerun()
 
 display_rows = []
 for i, (_, r) in enumerate(filtered.iterrows(), start=1):

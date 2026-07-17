@@ -22,18 +22,18 @@ from src.repositories import (
 )
 from src.services.explanation import explain_classification
 from src.services.threshold_override import recompute_with_user_thresholds
-from src.utils.formatting import format_crores, format_inr, format_pct, pass_fail_badge
+from src.utils.formatting import alert_type_label, format_crores, format_inr, format_pct, pass_fail_badge, summarize_alert_config
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.timezones import format_ist, now_ist
-from src.utils.ui import buy_sell_label, inject_tailwind, plotly_template, render_disclaimer, status_badge
+from src.utils.ui import buy_sell_label, inject_global_styles, plotly_template, render_alert_row, render_disclaimer, render_stat_grid, status_badge
 
 st.set_page_config(page_title="Stock Detail | Nifty 50 Screener", page_icon="🔍", layout="wide")
-require_login()
-inject_tailwind()
+require_login()  # already injects Tailwind + the light-theme CSS design system
 
 client = get_user_client_cached()
 user_id = current_user_id()
 user_settings = settings_repo.get_user_settings(client, user_id)
+inject_global_styles(user_settings.theme)  # re-inject with the user's actual theme -- a later <style> tag wins
 
 st.title("🔍 Stock Detail")
 
@@ -189,12 +189,23 @@ with div_col:
 with fund_col:
     st.subheader("Fundamentals")
     fundamentals = fundamentals_repo.get_latest_fundamentals(client, symbol)
-    st.markdown(f"**PE ratio:** {row.pe_ratio:.2f}" if row.pe_ratio is not None else "**PE ratio:** N/A")
-    st.markdown(f"**PEG ratio:** {row.peg_ratio:.2f}" if row.peg_ratio is not None else "**PEG ratio:** N/A")
-    st.markdown(f"**TTM dividend yield:** {format_pct(row.ttm_dividend_yield, signed=False)}")
+    _fund_stats = [
+        ("PE ratio", f"{row.pe_ratio:.2f}" if row.pe_ratio is not None else "N/A", None),
+        ("PEG ratio", f"{row.peg_ratio:.2f}" if row.peg_ratio is not None else "N/A", None),
+        ("TTM dividend yield", format_pct(row.ttm_dividend_yield, signed=False), None),
+        (
+            "Market cap",
+            format_crores(fundamentals.market_cap) if fundamentals else "N/A",
+            None,
+        ),
+        (
+            "EPS",
+            format_inr(fundamentals.eps) if fundamentals and fundamentals.eps is not None else "N/A",
+            None,
+        ),
+    ]
+    st.markdown(render_stat_grid(_fund_stats, user_settings.theme, cols=2), unsafe_allow_html=True)
     if fundamentals:
-        st.markdown(f"**Market cap:** {format_crores(fundamentals.market_cap)}")
-        st.markdown(f"**EPS:** {format_inr(fundamentals.eps)}" if fundamentals.eps is not None else "**EPS:** N/A")
         st.caption(f"Fundamentals source: {fundamentals.source} · as of {fundamentals.as_of_date}" + (" (stale)" if fundamentals.is_stale else ""))
     else:
         st.caption("No fundamentals data stored yet.")
@@ -267,7 +278,13 @@ existing_alerts = [a for a in alerts_repo.list_alerts(client, user_id) if a.symb
 if existing_alerts:
     for a in existing_alerts:
         c1, c2 = st.columns([4, 1])
-        c1.markdown(f"**{a.alert_type}** · active={a.is_active} · cooldown={a.cooldown_minutes}min · config={a.config}")
+        c1.markdown(
+            render_alert_row(
+                alert_type_label(a.alert_type), summarize_alert_config(a.alert_type, a.config),
+                a.cooldown_minutes, a.is_active, user_settings.theme,
+            ),
+            unsafe_allow_html=True,
+        )
         if c2.button("Delete", key=f"del_{a.id}"):
             alerts_repo.delete_alert(client, user_id, a.id)
             st.rerun()
@@ -275,28 +292,31 @@ else:
     st.caption("No alerts configured for this stock yet.")
 
 with st.expander("➕ Create a new alert"):
-    alert_type = st.selectbox("Alert type", [t.value for t in AlertType if t != AlertType.REFRESH_FAILURE])
-    config: dict = {}
-    if alert_type == AlertType.PRICE_CROSS.value:
-        config["level"] = st.number_input("Price level (INR)", value=float(row.latest_price or 0))
-        config["direction"] = st.selectbox("Direction", ["above", "below"])
-    elif alert_type == AlertType.MOMENTUM_CROSS.value:
-        config["period"] = st.selectbox("Period", ["1d", "5d", "20d"])
-        config["direction"] = st.selectbox("Direction", ["above_zero", "below_zero"])
-    elif alert_type == AlertType.DIVIDEND_YIELD_CROSS.value:
-        config["threshold"] = st.number_input("Yield threshold (%)", value=3.0)
-        config["direction"] = st.selectbox("Direction", ["above", "below"])
-    elif alert_type == AlertType.PEG_CROSS.value:
-        config["threshold"] = st.number_input("PEG threshold", value=1.0)
-        config["direction"] = st.selectbox("Direction", ["above", "below"])
-    elif alert_type == AlertType.BUY_WATCH.value:
-        config["entry_price"] = st.number_input("Entry price (INR)", value=float(row.latest_price or 0))
-    elif alert_type == AlertType.SELL_WATCH.value:
-        config["target_price"] = st.number_input("Target price (INR, optional)", value=0.0) or None
-        config["stop_loss"] = st.number_input("Stop-loss price (INR, optional)", value=0.0) or None
+    with st.form("stock_detail_new_alert_form"):
+        alert_type = st.selectbox("Alert type", [t.value for t in AlertType if t != AlertType.REFRESH_FAILURE])
+        config: dict = {}
+        if alert_type == AlertType.PRICE_CROSS.value:
+            config["level"] = st.number_input("Price level (INR)", value=float(row.latest_price or 0))
+            config["direction"] = st.selectbox("Direction", ["above", "below"])
+        elif alert_type == AlertType.MOMENTUM_CROSS.value:
+            config["period"] = st.selectbox("Period", ["1d", "5d", "20d"])
+            config["direction"] = st.selectbox("Direction", ["above_zero", "below_zero"])
+        elif alert_type == AlertType.DIVIDEND_YIELD_CROSS.value:
+            config["threshold"] = st.number_input("Yield threshold (%)", value=3.0)
+            config["direction"] = st.selectbox("Direction", ["above", "below"])
+        elif alert_type == AlertType.PEG_CROSS.value:
+            config["threshold"] = st.number_input("PEG threshold", value=1.0)
+            config["direction"] = st.selectbox("Direction", ["above", "below"])
+        elif alert_type == AlertType.BUY_WATCH.value:
+            config["entry_price"] = st.number_input("Entry price (INR)", value=float(row.latest_price or 0))
+        elif alert_type == AlertType.SELL_WATCH.value:
+            config["target_price"] = st.number_input("Target price (INR, optional)", value=0.0) or None
+            config["stop_loss"] = st.number_input("Stop-loss price (INR, optional)", value=0.0) or None
 
-    cooldown = st.number_input("Cooldown (minutes)", value=60, min_value=1)
-    if st.button("Create alert"):
+        cooldown = st.number_input("Cooldown (minutes)", value=60, min_value=1)
+        create_submitted = st.form_submit_button("Create alert")
+
+    if create_submitted:
         alerts_repo.create_alert(
             client,
             Alert(user_id=user_id, symbol=symbol, alert_type=AlertType(alert_type), config=config, cooldown_minutes=cooldown),

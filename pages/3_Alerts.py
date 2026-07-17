@@ -5,17 +5,19 @@ import streamlit as st
 
 from src.models.alert import Alert
 from src.models.enums import AlertType
-from src.repositories import alerts_repo, companies_repo, notification_repo
+from src.repositories import alerts_repo, companies_repo, notification_repo, settings_repo
+from src.utils.formatting import alert_type_label, summarize_alert_config
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.timezones import format_ist
-from src.utils.ui import inject_tailwind, render_disclaimer
+from src.utils.ui import inject_global_styles, render_alert_row, render_disclaimer
 
 st.set_page_config(page_title="Alerts | Nifty 50 Screener", page_icon="🔔", layout="wide")
-require_login()
-inject_tailwind()
+require_login()  # already injects Tailwind + the light-theme CSS design system
 
 client = get_user_client_cached()
 user_id = current_user_id()
+user_settings = settings_repo.get_user_settings(client, user_id)
+inject_global_styles(user_settings.theme)  # re-inject with the user's actual theme -- a later <style> tag wins
 
 st.title("🔔 Alerts")
 render_disclaimer()
@@ -30,7 +32,13 @@ if alerts:
         with st.container(border=True):
             c1, c2, c3, c4 = st.columns([2, 3, 1, 1])
             c1.markdown(f"**{a.symbol or 'Portfolio-wide'}**")
-            c2.markdown(f"`{a.alert_type}` · config: `{a.config}` · cooldown {a.cooldown_minutes}min")
+            c2.markdown(
+                render_alert_row(
+                    alert_type_label(a.alert_type), summarize_alert_config(a.alert_type, a.config),
+                    a.cooldown_minutes, a.is_active, user_settings.theme,
+                ),
+                unsafe_allow_html=True,
+            )
             new_active = c3.checkbox("Active", value=a.is_active, key=f"active_{a.id}")
             if new_active != a.is_active:
                 alerts_repo.update_alert(client, a.id, {"is_active": new_active})

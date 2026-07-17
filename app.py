@@ -2,7 +2,7 @@ import streamlit as st
 
 from src.config import get_settings
 from src.utils.session import current_user_email, require_login, sign_out
-from src.utils.ui import inject_tailwind, render_disclaimer
+from src.utils.ui import render_card, render_disclaimer
 
 st.set_page_config(
     page_title="Nifty 50 Momentum & Dividend Screener",
@@ -10,8 +10,7 @@ st.set_page_config(
     layout="wide",
 )
 
-require_login()
-inject_tailwind()
+require_login()  # also injects Tailwind + the global CSS design system
 
 with st.sidebar:
     st.caption(f"Signed in as {current_user_email()}")
@@ -35,7 +34,6 @@ with col1:
     st.page_link("pages/3_Alerts.py", label="Manage alerts", icon="🔔")
     st.page_link("pages/4_Settings.py", label="Configure thresholds", icon="⚙️")
 with col2:
-    st.subheader("Data sources")
     _provider_notes = {
         "dhan": "Dhan (the configured live price vendor) does not expose PE, PEG, or dividend "
         "data -- see the README for the current fundamentals-coverage limitation.",
@@ -47,8 +45,13 @@ with col2:
         "mock": "Running on synthetic mock data (deterministic per symbol, not real market "
         "data) -- set `MARKET_DATA_PROVIDER`/`FUNDAMENTALS_PROVIDER` to switch providers.",
     }
-    st.markdown(
-        f"- **Prices**: `{settings.market_data_provider}` provider\n"
-        f"- **Fundamentals (PE/PEG/dividends)**: `{settings.fundamentals_provider}` provider\n\n"
-        + _provider_notes.get(settings.market_data_provider, "")
+    _note = _provider_notes.get(settings.market_data_provider, "")
+    _card_html = (
+        '<p class="font-semibold mb-2">Data sources</p>'
+        '<ul class="list-disc pl-5 text-sm space-y-1">'
+        f"<li><strong>Prices</strong>: <code>{settings.market_data_provider}</code> provider</li>"
+        f"<li><strong>Fundamentals (PE/PEG/dividends)</strong>: <code>{settings.fundamentals_provider}</code> provider</li>"
+        "</ul>"
+        f'<p class="text-sm mt-2">{_note}</p>'
     )
+    st.markdown(render_card(_card_html), unsafe_allow_html=True)

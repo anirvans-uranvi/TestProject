@@ -380,16 +380,23 @@ docker compose up               # + the APScheduler refresh daemon
 
 ## Limitations
 
-- **The Dashboard's screener table depends on a Tailwind CSS CDN link at
-  runtime** (`unpkg.com/tailwindcss@2.2.19`, loaded by `inject_tailwind()`
-  in `src/utils/ui.py`). Streamlit's own native widgets can't be styled by
-  an external CSS framework at all -- only the custom HTML we hand-render
-  (the screener table, status icons) uses it, giving it a mobile-friendly
-  card layout on phones and a normal table on wider screens. If that CDN
-  is unreachable (offline, a restrictive corporate firewall, etc.), the
-  table still renders and is still fully readable/functional, just
-  without the Tailwind styling -- see `docs/CODEBASE_GUIDE.md` for why a
-  `<link>` tag was used instead of Tailwind's more common CDN `<script>`.
+- **The app's custom-rendered HTML (screener table, status icons, stat
+  cards, alert badges) depends on a Tailwind CSS CDN link at runtime**
+  (`unpkg.com/tailwindcss@2.2.19`, loaded by `inject_tailwind()` in
+  `src/utils/ui.py`). Streamlit's own native widgets (buttons, inputs,
+  forms, sidebar, tabs) can't be styled by an external CSS framework at
+  all -- those are instead reskinned by a separate, self-contained global
+  `<style>` override (`inject_global_styles()`, no CDN dependency) that
+  ships with the app and doesn't depend on any network request, so
+  buttons/inputs/forms/sidebar keep their design-system styling even if
+  the Tailwind CDN is unreachable (offline, a restrictive corporate
+  firewall, etc.) -- only the Tailwind-classed custom HTML (the screener
+  table's mobile card layout, stat cards, badges) would fall back to
+  unstyled markup in that case, and everything still renders and is fully
+  readable/functional either way. See `docs/CODEBASE_GUIDE.md`'s "design
+  system" section for why a `<link>` tag is used for Tailwind instead of
+  its more common CDN `<script>`, and how the two styling mechanisms
+  divide responsibility.
 - **No officially licensed source for PE / PEG / dividend data was
   available in scope.** DhanHQ v2 (a licensed broker) only exposes prices
   -- no PE, PEG, EPS, market cap, or dividend data. NSE itself has no

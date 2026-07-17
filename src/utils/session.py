@@ -11,7 +11,9 @@ import streamlit as st
 from supabase import Client
 
 from src.config import get_settings
+from src.models.enums import Theme
 from src.repositories.supabase_client import get_anon_client, get_user_client
+from src.utils.ui import inject_design_system
 
 
 def _auth_client() -> Client:
@@ -163,7 +165,20 @@ def _render_set_new_password_form() -> None:
 def require_login() -> None:
     """Call at the top of every page. Renders a login/sign-up/forgot-
     password form (or, mid-recovery, a mandatory set-new-password form)
-    and st.stop()s the page if there's no usable active session."""
+    and st.stop()s the page if there's no usable active session.
+
+    Injects Tailwind + the global CSS design system here, before anything
+    else -- every page previously called inject_tailwind() itself, but
+    only *after* require_login(), which meant the unauthenticated login/
+    signup/forgot-password screen (and the mandatory post-recovery
+    set-new-password screen) rendered with none of it loaded. This is now
+    the single enforcement point instead of relying on every page to
+    order its own calls correctly. Uses the light theme unconditionally
+    here since there's no signed-in user yet to read a Theme preference
+    from; logged-in pages re-inject with the user's actual Theme setting
+    afterwards (a later <style> tag wins the cascade)."""
+    inject_design_system(Theme.LIGHT)
+
     if is_password_recovery_pending():
         _render_set_new_password_form()
         st.stop()

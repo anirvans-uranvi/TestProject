@@ -7,20 +7,20 @@ from src.models.enums import Theme
 from src.models.user import UserSettings
 from src.repositories import settings_repo
 from src.utils.session import current_user_email, current_user_id, get_user_client_cached, require_login, set_new_password
-from src.utils.ui import inject_tailwind, render_disclaimer
+from src.utils.ui import inject_global_styles, render_disclaimer, render_pill
 
 st.set_page_config(page_title="Settings | Nifty 50 Screener", page_icon="⚙️", layout="wide")
-require_login()
-inject_tailwind()
+require_login()  # already injects Tailwind + the light-theme CSS design system
 
 client = get_user_client_cached()
 user_id = current_user_id()
 app_settings = get_settings()
 
+current = settings_repo.get_user_settings(client, user_id)
+inject_global_styles(current.theme)  # re-inject with the user's actual theme -- a later <style> tag wins
+
 st.title("⚙️ Settings")
 render_disclaimer()
-
-current = settings_repo.get_user_settings(client, user_id)
 
 st.subheader("Screening thresholds")
 st.caption("These control what counts as a passing criterion for you. Changes apply immediately across the app.")
@@ -59,9 +59,11 @@ st.divider()
 st.subheader("Notification channels")
 st.caption("In-app notifications are always on. Other channels are extension points -- see README.")
 st.checkbox("In-app (Streamlit + notification history)", value=True, disabled=True)
-st.checkbox("Email", value=False, disabled=True, help="Not implemented yet -- see src/notifications/email_adapter.py")
-st.checkbox("Telegram", value=False, disabled=True, help="Not implemented yet -- see src/notifications/telegram_adapter.py")
-st.checkbox("Slack", value=False, disabled=True, help="Not implemented yet -- see src/notifications/slack_adapter.py")
+_coming_soon = " ".join(
+    render_pill(f"{name} · coming soon", tone="neutral", theme=current.theme)
+    for name in ("Email", "Telegram", "Slack")
+)
+st.markdown(_coming_soon, unsafe_allow_html=True)
 
 st.divider()
 st.subheader("Account")
