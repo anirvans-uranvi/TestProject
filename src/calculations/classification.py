@@ -46,6 +46,24 @@ def criterion_c(peg_ratio: float | None, threshold: float = 1.0) -> bool | None:
     return peg_ratio <= threshold
 
 
+def criterion_52w_high(latest_price: float | None, week_52_high: float | None, threshold: float = 0.9) -> bool | None:
+    """Display-only proximity check (not part of the Green/Amber/Red
+    engine above): passes when price is comfortably below its 52-week
+    high, i.e. latest_price < threshold * week_52_high."""
+    if latest_price is None or week_52_high is None:
+        return None
+    return latest_price < threshold * week_52_high
+
+
+def criterion_52w_low(latest_price: float | None, week_52_low: float | None, threshold: float = 1.1) -> bool | None:
+    """Display-only proximity check (not part of the Green/Amber/Red
+    engine above): passes when price has moved comfortably above its
+    52-week low, i.e. latest_price > threshold * week_52_low."""
+    if latest_price is None or week_52_low is None:
+        return None
+    return latest_price > threshold * week_52_low
+
+
 def classify(
     a: bool | None,
     b: bool | None,

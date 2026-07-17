@@ -14,6 +14,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
   buildClassification,
   carryForwardFields,
+  criterion52wHigh,
+  criterion52wLow,
   type FundamentalsRow,
   returnNTradingDaysAgo,
   ttmDividendYield,
@@ -122,6 +124,8 @@ async function refreshOneSymbol(
     if (fundamentals.pegRatio !== null) fundamentalsPayload.peg_ratio = fundamentals.pegRatio;
     if (fundamentals.eps !== null) fundamentalsPayload.eps = fundamentals.eps;
     if (fundamentals.marketCap !== null) fundamentalsPayload.market_cap = fundamentals.marketCap;
+    if (fundamentals.week52High !== null) fundamentalsPayload.week_52_high = fundamentals.week52High;
+    if (fundamentals.week52Low !== null) fundamentalsPayload.week_52_low = fundamentals.week52Low;
     const { error: fundErr } = await serviceClient
       .from("fundamental_snapshots")
       .upsert(fundamentalsPayload, { onConflict: "symbol,as_of_date" });
@@ -133,7 +137,7 @@ async function refreshOneSymbol(
     // does in Python. See calculations.ts::carryForwardFields.
     const { data: recentFundamentals, error: histErr } = await serviceClient
       .from("fundamental_snapshots")
-      .select("pe_ratio,peg_ratio,eps,market_cap")
+      .select("pe_ratio,peg_ratio,eps,market_cap,week_52_high,week_52_low")
       .eq("symbol", symbol)
       .order("as_of_date", { ascending: false })
       .limit(FUNDAMENTALS_LOOKBACK_ROWS);
@@ -145,6 +149,8 @@ async function refreshOneSymbol(
         pegRatio: r.peg_ratio,
         eps: r.eps,
         marketCap: r.market_cap,
+        week52High: r.week_52_high,
+        week52Low: r.week_52_low,
       })),
     );
 
@@ -178,6 +184,8 @@ async function refreshOneSymbol(
       latestPrice,
       peRatio: carried.peRatio,
     });
+    const c52wHigh = criterion52wHigh(latestPrice, carried.week52High);
+    const c52wLow = criterion52wLow(latestPrice, carried.week52Low);
 
     const { error: snapshotErr } = await serviceClient
       .from("daily_screener_snapshots")
@@ -192,9 +200,13 @@ async function refreshOneSymbol(
           ttm_dividend_yield: ttmYield,
           pe_ratio: carried.peRatio,
           peg_ratio: carried.pegRatio,
+          week_52_high: carried.week52High,
+          week_52_low: carried.week52Low,
           criterion_a: classification.criterionA,
           criterion_b: classification.criterionB,
           criterion_c: classification.criterionC,
+          criterion_52w_high: c52wHigh,
+          criterion_52w_low: c52wLow,
           status: classification.status,
           data_quality: classification.dataQuality,
         },

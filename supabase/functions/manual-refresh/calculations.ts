@@ -140,6 +140,24 @@ export function criterionC(pegRatio: number | null, threshold = 1.0): boolean | 
   return pegRatio <= threshold;
 }
 
+/** Display-only proximity check (not part of the Green/Amber/Red engine
+ * above): passes when price is comfortably below its 52-week high, i.e.
+ * latestPrice < threshold * week52High. Mirrors
+ * classification.py::criterion_52w_high. */
+export function criterion52wHigh(latestPrice: number | null, week52High: number | null, threshold = 0.9): boolean | null {
+  if (latestPrice === null || week52High === null) return null;
+  return latestPrice < threshold * week52High;
+}
+
+/** Display-only proximity check (not part of the Green/Amber/Red engine
+ * above): passes when price has moved comfortably above its 52-week
+ * low, i.e. latestPrice > threshold * week52Low. Mirrors
+ * classification.py::criterion_52w_low. */
+export function criterion52wLow(latestPrice: number | null, week52Low: number | null, threshold = 1.1): boolean | null {
+  if (latestPrice === null || week52Low === null) return null;
+  return latestPrice > threshold * week52Low;
+}
+
 /** Missing (null) criteria always short-circuit to "unavailable" before
  * pass/fail counting -- never conflated with a failed criterion. Mirrors
  * classification.py::classify. */
@@ -214,9 +232,13 @@ export interface FundamentalsRow {
   pegRatio: number | null;
   eps: number | null;
   marketCap: number | null;
+  week52High: number | null;
+  week52Low: number | null;
 }
 
-const CARRY_FORWARD_FIELDS: (keyof FundamentalsRow)[] = ["peRatio", "pegRatio", "eps", "marketCap"];
+const CARRY_FORWARD_FIELDS: (keyof FundamentalsRow)[] = [
+  "peRatio", "pegRatio", "eps", "marketCap", "week52High", "week52Low",
+];
 
 /** rows must be ordered newest-first. Carries each field forward
  * independently from the most recent row where it was actually
@@ -225,7 +247,9 @@ const CARRY_FORWARD_FIELDS: (keyof FundamentalsRow)[] = ["peRatio", "pegRatio", 
  * null) even when an older snapshot has a real value. Mirrors
  * fundamentals_repo.py::carry_forward_fields exactly. */
 export function carryForwardFields(rows: Partial<FundamentalsRow>[]): FundamentalsRow {
-  const carried: FundamentalsRow = { peRatio: null, pegRatio: null, eps: null, marketCap: null };
+  const carried: FundamentalsRow = {
+    peRatio: null, pegRatio: null, eps: null, marketCap: null, week52High: null, week52Low: null,
+  };
   for (const row of rows) {
     for (const field of CARRY_FORWARD_FIELDS) {
       const value = row[field];

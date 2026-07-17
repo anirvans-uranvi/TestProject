@@ -151,6 +151,8 @@ class YFinanceFundamentalsProvider(FundamentalsDataProvider):
             peg_ratio=info.get("pegRatio") or info.get("trailingPegRatio"),
             eps=info.get("trailingEps"),
             market_cap=info.get("marketCap"),
+            week_52_high=info.get("fiftyTwoWeekHigh"),
+            week_52_low=info.get("fiftyTwoWeekLow"),
             source=self.name,
             is_stale=False,
         )

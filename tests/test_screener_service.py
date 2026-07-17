@@ -84,6 +84,55 @@ class TestComputeScreenerRow:
         assert row.status == ScreenerStatus.UNAVAILABLE
         assert row.data_quality.is_stale is True
 
+    def test_52w_high_low_criteria_computed(self):
+        closes = [3900.0] * 20
+        row = compute_screener_row(
+            symbol="TCS",
+            latest_price=4100.0,
+            historical_closes=closes,
+            dividend_events=[],
+            pe_ratio=25.0,
+            peg_ratio=1.8,
+            as_of_date=date(2026, 7, 11),
+            week_52_high=5000.0,  # 4100 < 0.9*5000=4500 -> pass
+            week_52_low=3000.0,  # 4100 > 1.1*3000=3300 -> pass
+        )
+        assert row.week_52_high == 5000.0
+        assert row.week_52_low == 3000.0
+        assert row.criterion_52w_high is True
+        assert row.criterion_52w_low is True
+
+    def test_52w_high_low_criteria_fail_near_high_and_low(self):
+        closes = [3900.0] * 20
+        row = compute_screener_row(
+            symbol="TCS",
+            latest_price=4100.0,
+            historical_closes=closes,
+            dividend_events=[],
+            pe_ratio=25.0,
+            peg_ratio=1.8,
+            as_of_date=date(2026, 7, 11),
+            week_52_high=4300.0,  # 4100 >= 0.9*4300=3870 -> fail
+            week_52_low=4000.0,  # 4100 <= 1.1*4000=4400 -> fail
+        )
+        assert row.criterion_52w_high is False
+        assert row.criterion_52w_low is False
+
+    def test_52w_high_low_missing_returns_none_not_fail(self):
+        closes = [3900.0] * 20
+        row = compute_screener_row(
+            symbol="TCS",
+            latest_price=4100.0,
+            historical_closes=closes,
+            dividend_events=[],
+            pe_ratio=25.0,
+            peg_ratio=1.8,
+            as_of_date=date(2026, 7, 11),
+        )
+        assert row.week_52_high is None
+        assert row.criterion_52w_high is None
+        assert row.criterion_52w_low is None
+
     def test_custom_thresholds(self):
         closes = [3900.0] * 20
         row = compute_screener_row(

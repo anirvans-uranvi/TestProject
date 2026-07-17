@@ -7,6 +7,8 @@ import {
   buildClassification,
   carryForwardFields,
   classify,
+  criterion52wHigh,
+  criterion52wLow,
   criterionA,
   criterionB,
   criterionC,
@@ -139,6 +141,24 @@ Deno.test("criterionC - PEG passes AT OR BELOW threshold (reversed direction)", 
   assertEquals(criterionC(-0.5, 1.0), true); // negative PEG passes literally (<=)
 });
 
+// --- criterion52wHigh / criterion52wLow -----------------------------------
+
+Deno.test("criterion52wHigh - below/at/above 90pct of high, missing", () => {
+  assertEquals(criterion52wHigh(890.0, 1000.0), true);
+  assertEquals(criterion52wHigh(900.0, 1000.0), false); // exactly-at-threshold fails
+  assertEquals(criterion52wHigh(950.0, 1000.0), false);
+  assertEquals(criterion52wHigh(null, 1000.0), null);
+  assertEquals(criterion52wHigh(900.0, null), null);
+});
+
+Deno.test("criterion52wLow - above/at/below 110pct of low, missing", () => {
+  assertEquals(criterion52wLow(660.0, 500.0), true);
+  assertEquals(criterion52wLow(550.0, 500.0), false); // exactly-at-threshold fails
+  assertEquals(criterion52wLow(520.0, 500.0), false);
+  assertEquals(criterion52wLow(null, 500.0), null);
+  assertEquals(criterion52wLow(520.0, null), null);
+});
+
 // --- classify ------------------------------------------------------------
 
 Deno.test("classify - all pass is green, none pass is red", () => {
@@ -226,7 +246,19 @@ Deno.test("carryForwardFields - each field carried forward independently", () =>
     { peRatio: 20.0, pegRatio: null, eps: null, marketCap: null },
     { peRatio: null, pegRatio: null, eps: 8.0, marketCap: 3e10 },
   ];
-  assertEquals(carryForwardFields(rows), { peRatio: 20.0, pegRatio: 0.9, eps: 8.0, marketCap: 3e10 });
+  assertEquals(carryForwardFields(rows), {
+    peRatio: 20.0, pegRatio: 0.9, eps: 8.0, marketCap: 3e10, week52High: null, week52Low: null,
+  });
+});
+
+Deno.test("carryForwardFields - 52w high/low carried forward independently", () => {
+  const rows = [
+    { week52High: null, week52Low: 850.0 },
+    { week52High: 1600.0, week52Low: null },
+  ];
+  const result = carryForwardFields(rows);
+  assertEquals(result.week52High, 1600.0);
+  assertEquals(result.week52Low, 850.0);
 });
 
 Deno.test("carryForwardFields - field never available stays null", () => {
@@ -238,5 +270,7 @@ Deno.test("carryForwardFields - field never available stays null", () => {
 
 Deno.test("carryForwardFields - empty rows returns all null", () => {
   const result = carryForwardFields([]);
-  assertEquals(result, { peRatio: null, pegRatio: null, eps: null, marketCap: null });
+  assertEquals(result, {
+    peRatio: null, pegRatio: null, eps: null, marketCap: null, week52High: null, week52Low: null,
+  });
 });

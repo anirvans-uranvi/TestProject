@@ -121,7 +121,11 @@ settings.
   `0004_fix_constituents_fk_and_view_defaults.sql` (adds the
   `nifty50_constituents -> companies` FK PostgREST needs for embedded
   queries, and defaults `status`/`data_quality` to Unavailable/`{}`
-  instead of `NULL` for constituents with no snapshot yet).
+  instead of `NULL` for constituents with no snapshot yet) and
+  `0006_add_52week_high_low.sql` (adds 52-week high/low columns + the
+  matching `criterion_52w_high`/`criterion_52w_low` display flags -- see
+  its comments for a real `42P16` error hit while writing it: `create or
+  replace view` can only append new columns, never insert them mid-list).
 - **Password reset uses a 6-digit code, not the email's magic link.**
   Supabase's recovery link puts the session token in the URL fragment
   (`#access_token=...`), which no server (including ours) ever receives,
@@ -256,6 +260,22 @@ user's thresholds to the server-computed `daily_screener_snapshots` row at
 read time, so the persisted audit trail always reflects the system-default
 thresholds while the UI reflects the viewer's own.
 
+**52-week high/low (display-only, not part of Green/Amber/Red).** The
+Dashboard's **52W High**/**52W Low** columns each show the fetched price
+plus a pass/fail tick, using two separate proximity checks that are
+deliberately *not* wired into the A/B/C classification engine above --
+they don't affect a stock's overall status:
+
+```
+criterion_52w_high = latest_price < 0.90 x week_52_high   (pass = comfortably below the high)
+criterion_52w_low  = latest_price > 1.10 x week_52_low    (pass = comfortably above the low)
+```
+
+Same missing-data rule as A/B/C: if either the price or the 52-week
+figure is unavailable, the check evaluates to `None` (shown as `N/A`),
+never a fail. See `criterion_52w_high`/`criterion_52w_low` in
+`src/calculations/classification.py`.
+
 ## Running tests
 
 ```bash
@@ -328,10 +348,21 @@ earlier in this README):
 
 ```bash
 npm install -g supabase   # or: scoop install supabase
+# no npm/scoop? download the CLI binary directly from
+# https://github.com/supabase/cli/releases (a windows_amd64.zip asset)
 supabase login
 supabase link --project-ref <your-project-ref>
 supabase functions deploy manual-refresh
 ```
+
+`supabase login` opens an interactive browser OAuth flow -- if you're
+running these commands somewhere that can't complete that (a headless
+shell, an agent session), generate a personal access token instead from
+https://supabase.com/dashboard/account/tokens and export it as
+`SUPABASE_ACCESS_TOKEN` before running `link`/`functions deploy`; the CLI
+picks it up automatically and skips the browser flow entirely. Treat that
+token as a credential -- revoke it from the same page once you're done
+deploying.
 
 `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` are
 automatically available to the function at runtime -- Supabase injects

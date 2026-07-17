@@ -138,9 +138,9 @@ All migrations live in `supabase/migrations/`, applied in numeric order
 
 **Market data** (written by `refresh_service` / provider scripts, read-only to the app):
 - `price_history` — daily OHLCV, one row per symbol per trade_date
-- `fundamental_snapshots` — PE/PEG/EPS/market cap, one row per symbol per as_of_date
+- `fundamental_snapshots` — PE/PEG/EPS/market cap/52-week high/52-week low, one row per symbol per as_of_date
 - `dividend_events` — individual ex-dividend cash amounts
-- `daily_screener_snapshots` — the calculated audit trail: one row per symbol per day with the computed returns, TTM yield, criteria A/B/C, and status. This is what the classification-history chart on Stock Detail reads.
+- `daily_screener_snapshots` — the calculated audit trail: one row per symbol per day with the computed returns, TTM yield, criteria A/B/C, the two 52-week high/low proximity flags, and status. This is what the classification-history chart on Stock Detail reads.
 - `provider_fetch_log` — success/failure log for every provider call, used for the Dashboard's "data freshness" indicator and for retry/backoff auditing
 
 **Per-user data** (RLS-scoped to `auth.uid() = user_id`):
@@ -152,7 +152,7 @@ All migrations live in `supabase/migrations/`, applied in numeric order
 
 Two generated helpers, defined in `0003_views_functions.sql` (and patched
 in `0004`):
-- `latest_screener_view` — one joined row per current constituent (companies + its latest daily_screener_snapshot). This is what the Dashboard queries in a single call instead of joining client-side. `0004` added `coalesce(status, 'unavailable')` / `coalesce(data_quality, '{}')` here because a constituent with no snapshot yet would otherwise return `NULL` for those columns, which fails Pydantic validation on the `ScreenerRow` model.
+- `latest_screener_view` — one joined row per current constituent (companies + its latest daily_screener_snapshot). This is what the Dashboard queries in a single call instead of joining client-side. `0004` added `coalesce(status, 'unavailable')` / `coalesce(data_quality, '{}')` here because a constituent with no snapshot yet would otherwise return `NULL` for those columns, which fails Pydantic validation on the `ScreenerRow` model. `0006` added `week_52_high`/`week_52_low`/`criterion_52w_high`/`criterion_52w_low` — **a real deploy-time error hit here**: `create or replace view` can only *append* new output columns; inserting them positionally in the middle of the existing `select` list (as the first draft of `0006` did) makes Postgres think you're renaming the columns that got pushed down a slot, and it fails with `42P16: cannot change name of view column ... HINT: Use ALTER VIEW ... RENAME COLUMN ... instead`. The fix is to always append new columns at the very end of the `select` list in any future `create or replace view` migration, never insert them mid-list — column *order* doesn't matter to the app since every read is by name (`ScreenerRow.model_validate(dict)`), so this costs nothing.
 - `get_classification_history(symbol, days)` — a SQL function returning one symbol's snapshot history, used by the Stock Detail status-over-time chart.
 
 RLS (`0002_rls_policies.sql`): shared tables are `SELECT`-only for the
@@ -186,7 +186,7 @@ test exhaustively.
 
 - **`returns.py`**: `pct_return(latest, base)` and `return_1d/5d/20d(latest_price, historical_closes)`. `historical_closes` must be ordered oldest→newest and must NOT include the day `latest_price` came from — see the note on `screener_service.py` under [Services](#services-srcservices) for a real bug this exact boundary caused.
 - **`dividends.py`**: `ttm_dividend_sum`/`ttm_dividend_yield(events, as_of_date, latest_price)`. An empty `dividend_events` list sums to `0.0` (a confirmed-zero yield), not `None` — missing-vs-zero is a distinction the *caller* (the provider/repo layer) is responsible for, based on whether a fundamentals fetch actually succeeded.
-- **`classification.py`**: `criterion_a/b/c()` each return `bool | None` (`None` = missing input, never a fail). `criterion_a`/`criterion_b` pass strictly *above* their threshold; `criterion_c` (PEG) passes *at or below* its threshold — the direction is deliberately reversed for PEG, since a lower PEG is the conventionally desirable side. `classify(a, b, c, is_stale)` short-circuits to `UNAVAILABLE` if `is_stale` or any criterion is `None`, before ever checking pass/fail counts — this ordering is the whole point of the "missing is never a failure" rule. `build_classification(...)` is the one-stop version that also assembles the `DataQuality` record.
+- **`classification.py`**: `criterion_a/b/c()` each return `bool | None` (`None` = missing input, never a fail). `criterion_a`/`criterion_b` pass strictly *above* their threshold; `criterion_c` (PEG) passes *at or below* its threshold — the direction is deliberately reversed for PEG, since a lower PEG is the conventionally desirable side. `classify(a, b, c, is_stale)` short-circuits to `UNAVAILABLE` if `is_stale` or any criterion is `None`, before ever checking pass/fail counts — this ordering is the whole point of the "missing is never a failure" rule. `build_classification(...)` is the one-stop version that also assembles the `DataQuality` record. `criterion_52w_high(latest_price, week_52_high)`/`criterion_52w_low(latest_price, week_52_low)` are separate, **display-only** functions — deliberately *not* threaded into `build_classification`/`classify`, so they have zero effect on Green/Amber/Red status. `criterion_52w_high` passes when price is below 90% of the 52-week high (`latest_price < 0.9 * week_52_high`); `criterion_52w_low` passes when price is above 110% of the 52-week low (`latest_price > 1.1 * week_52_low`). Both return `None` (not a fail) when either input is missing.
 - **`moving_averages.py`**: `moving_average_series()` (pandas, for the Stock Detail chart, `min_periods=window` so a partial window renders as `NaN` not a misleading partial average) and `latest_moving_average()` (scalar, for scorecards).
 
 `tests/test_calculations_*.py` specifically cover the boundary cases:
@@ -261,7 +261,7 @@ does, defeating RLS entirely.
 
 `fundamentals_repo.get_latest_fundamentals()` does NOT simply return the
 single most recent `fundamental_snapshots` row. Each field (`pe_ratio`,
-`peg_ratio`, `eps`, `market_cap`) is carried forward **independently**
+`peg_ratio`, `eps`, `market_cap`, `week_52_high`, `week_52_low`) is carried forward **independently**
 from the most recent row where that specific field was actually non-null
 (`carry_forward_fields()`, a pure helper directly unit-tested in
 `tests/test_fundamentals_repo.py`). This matters because a single day's
@@ -305,7 +305,7 @@ Forgot password tabs and `st.stop()`s.
 
 - **`1_Dashboard.py`** — loads `latest_screener_view` via `snapshot_repo.get_latest_screener()`, applies the signed-in user's thresholds via `threshold_override.apply_user_thresholds()`, renders metric cards (also usable as quick filters, wired through `st.session_state["status_filter"]`), sidebar filters, and the screener table (rendered as an HTML table via `.to_html()` so status icons can use colored spans/SVGs — `st.dataframe` doesn't support arbitrary per-cell HTML). The Status sidebar filter is a `st.multiselect` over `ALL_STATUSES = ["Green", "Amber", "Red", "Unavailable"]` — `status_filter` is always a *list* (any combination, not one-or-all), and the final row filter is a single `df["status"].isin([...])`, so selecting all four is equivalent to no filter at all. Saved filter presets normalize old single-string `"status"` values (from before this was a multiselect) into a list on load for backward compatibility. The "Minimum dividend yield" / "Minimum PEG" sidebar filters default to `0.0`, **not** `user_settings.dividend_yield_threshold`/`peg_threshold` — they're a separate display filter from the criterion A/C pass/fail thresholds, and defaulting them to the threshold value silently hid every stock below it on first load (a real bug, since fixed). Keep these two concepts distinct if you touch this page: the Settings-page thresholds decide Green/Amber/Red/Unavailable; these sidebar inputs just additionally hide rows below a value the user dials in themselves, and should default to "show everything."
 
-  **Screener table columns**, left to right: `#` (serial number, just `enumerate()` over the current filtered/sorted rows — always 1..N of what's on screen, not a stored ID, so it renumbers on every filter/sort change), `Stock` (company name only — no symbol/sector; a hidden `Symbol` key in each `display_rows` dict still carries the ticker for the "Open in Stock Detail" selectbox below the table), `Latest price`, `1D`/`5D`/`20D` (arrow + percentage only), `Momentum` (a single `pass_fail_icon(criterion_b)` — despite the name it's specifically criterion B, not a combined A/B/C view; that used to be a column called `Criteria` showing all three, moved/renamed/simplified across a few iterations), `Dividend yield` and `PEG` (value + `pass_fail_icon` for criteria A and C respectively), and `Status` last (`status_dot()`, see below). Default sort is alphabetical by company name ascending (`sort_map["Stock"] = "name"`, `sort_desc` defaults to `False`) rather than by Status.
+  **Screener table columns**, left to right: `#` (serial number, just `enumerate()` over the current filtered/sorted rows — always 1..N of what's on screen, not a stored ID, so it renumbers on every filter/sort change), `Stock` (company name only — no symbol/sector; a hidden `Symbol` key in each `display_rows` dict still carries the ticker for the "Open in Stock Detail" selectbox below the table), `Latest price`, `52W High`/`52W Low` (value + `pass_fail_icon` for `criterion_52w_high`/`criterion_52w_low` — display-only proximity checks, **not** part of Green/Amber/Red; see `classification.py` above), `1D`/`5D`/`20D` (arrow + percentage only), `Momentum` (a single `pass_fail_icon(criterion_b)` — despite the name it's specifically criterion B, not a combined A/B/C view; that used to be a column called `Criteria` showing all three, moved/renamed/simplified across a few iterations), `Dividend yield` and `PEG` (value + `pass_fail_icon` for criteria A and C respectively), and `Status` last (`status_dot()`, see below). Default sort is alphabetical by company name ascending (`sort_map["Stock"] = "name"`, `sort_desc` defaults to `False`) rather than by Status.
 
   The table itself is rendered by `render_screener_table()` (`src/utils/ui.py`), not `pandas.DataFrame.to_html()` — see the Tailwind CSS note under Utils below for why, and for how the mobile layout works.
 
@@ -400,20 +400,27 @@ not Python.
   `deno test supabase/functions/manual-refresh/calculations.test.ts`.
 - **`yahoo.ts`** — `fetchChartData()` (price history + dividend events,
   one Yahoo endpoint, no auth needed) and `fetchFundamentals()` (PE/PEG/
-  EPS/market cap, a *different* Yahoo endpoint that needs a session
-  cookie + "crumb" token obtained via a separate handshake — real added
-  fragility beyond what Python's `yfinance` package already manages for
-  the cron-refresh side of this project; see README "Limitations"). Both
-  endpoint shapes were confirmed with live `curl` requests before this
-  was written, not assumed from documentation (there isn't any — both are
-  unofficial).
+  EPS/market cap/52-week high/52-week low, a *different* Yahoo endpoint
+  that needs a session cookie + "crumb" token obtained via a separate
+  handshake — real added fragility beyond what Python's `yfinance`
+  package already manages for the cron-refresh side of this project; see
+  README "Limitations"). The 52-week high/low come off the same
+  `summaryDetail` module already being requested for PE/market cap
+  (`fiftyTwoWeekHigh.raw`/`fiftyTwoWeekLow.raw`) — no extra API call
+  needed. Both endpoint shapes were confirmed with live `curl` requests
+  before this was written, not assumed from documentation (there isn't
+  any — both are unofficial).
 - **`index.ts`** — the HTTP handler: verifies the caller's JWT (any
   logged-in user may trigger this — it refreshes shared data, not
   anything per-user), checks a 5-minute cooldown against
   `provider_fetch_log` (`provider_name = 'manual_edge'`, `fetch_type =
   'all'` — `'all'` had to be added to that column's CHECK constraint in
   `0005_add_manual_refresh_fetch_type.sql`, since none of the existing
-  per-mode values fit a single combined refresh), then processes
+  per-mode values fit a single combined refresh; `week_52_high`/
+  `week_52_low`/`criterion_52w_high`/`criterion_52w_low` columns were
+  added later in `0006_add_52week_high_low.sql`, mirroring the same
+  columns added to `fundamental_snapshots`/`daily_screener_snapshots` on
+  the Python side), then processes
   constituents in concurrency-limited batches of 8, and logs one summary
   row plus returns `{succeeded, failed, total, symbolsFailed}` as JSON.
   One symbol's failure doesn't abort the batch (each symbol's pipeline is

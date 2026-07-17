@@ -91,6 +91,9 @@ class MockFundamentalsProvider(FundamentalsDataProvider):
         peg = round(rng.uniform(0.3, 3.5), 2)
         eps = round(rng.uniform(5, 400), 2)
         market_cap = round(rng.uniform(50_000, 2_000_000) * 1e7, 2)  # crore -> rupees
+        base_price = _base_price_for(symbol)
+        week_52_high = round(base_price * rng.uniform(1.05, 1.4), 2)
+        week_52_low = round(base_price * rng.uniform(0.6, 0.95), 2)
         return FundamentalSnapshot(
             symbol=symbol,
             as_of_date=as_of,
@@ -98,6 +101,8 @@ class MockFundamentalsProvider(FundamentalsDataProvider):
             peg_ratio=peg,
             eps=eps,
             market_cap=market_cap,
+            week_52_high=week_52_high,
+            week_52_low=week_52_low,
             source=self.name,
             is_stale=False,
         )

@@ -46,6 +46,8 @@ class FundamentalSnapshot(BaseModel):
     peg_ratio: float | None = None
     eps: float | None = None
     market_cap: float | None = None
+    week_52_high: float | None = None
+    week_52_low: float | None = None
     source: str = "unknown"
     is_stale: bool = False
 

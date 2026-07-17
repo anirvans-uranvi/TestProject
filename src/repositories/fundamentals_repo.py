@@ -10,7 +10,7 @@ def upsert_fundamental_snapshot(client: Client, snapshot: FundamentalSnapshot) -
     client.table("fundamental_snapshots").upsert(payload, on_conflict="symbol,as_of_date").execute()
 
 
-_CARRY_FORWARD_FIELDS = ("pe_ratio", "peg_ratio", "eps", "market_cap")
+_CARRY_FORWARD_FIELDS = ("pe_ratio", "peg_ratio", "eps", "market_cap", "week_52_high", "week_52_low")
 
 
 def carry_forward_fields(rows: list[dict]) -> dict[str, object]:
@@ -59,6 +59,8 @@ def get_latest_fundamentals(client: Client, symbol: str, lookback_rows: int = 20
         peg_ratio=carried["peg_ratio"],
         eps=carried["eps"],
         market_cap=carried["market_cap"],
+        week_52_high=carried["week_52_high"],
+        week_52_low=carried["week_52_low"],
         source=latest["source"],
         is_stale=latest["is_stale"],
     )

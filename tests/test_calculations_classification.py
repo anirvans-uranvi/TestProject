@@ -1,6 +1,14 @@
 import pytest
 
-from src.calculations.classification import build_classification, classify, criterion_a, criterion_b, criterion_c
+from src.calculations.classification import (
+    build_classification,
+    classify,
+    criterion_a,
+    criterion_b,
+    criterion_c,
+    criterion_52w_high,
+    criterion_52w_low,
+)
 from src.models.enums import ScreenerStatus
 
 
@@ -58,6 +66,40 @@ class TestCriterionC:
 
     def test_negative_peg_passes(self):
         assert criterion_c(-0.5, 1.0) is True
+
+
+class TestCriterion52wHigh:
+    def test_below_90pct_of_high_passes(self):
+        assert criterion_52w_high(890.0, 1000.0) is True
+
+    def test_exactly_at_90pct_fails(self):
+        assert criterion_52w_high(900.0, 1000.0) is False
+
+    def test_above_90pct_fails(self):
+        assert criterion_52w_high(950.0, 1000.0) is False
+
+    def test_missing_price_returns_none(self):
+        assert criterion_52w_high(None, 1000.0) is None
+
+    def test_missing_high_returns_none(self):
+        assert criterion_52w_high(900.0, None) is None
+
+
+class TestCriterion52wLow:
+    def test_above_110pct_of_low_passes(self):
+        assert criterion_52w_low(660.0, 500.0) is True
+
+    def test_exactly_at_110pct_fails(self):
+        assert criterion_52w_low(550.0, 500.0) is False
+
+    def test_below_110pct_fails(self):
+        assert criterion_52w_low(520.0, 500.0) is False
+
+    def test_missing_price_returns_none(self):
+        assert criterion_52w_low(None, 500.0) is None
+
+    def test_missing_low_returns_none(self):
+        assert criterion_52w_low(520.0, None) is None
 
 
 class TestClassify:

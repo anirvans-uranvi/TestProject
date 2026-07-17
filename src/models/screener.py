@@ -57,9 +57,13 @@ class ScreenerRow(BaseModel):
     ttm_dividend_yield: float | None = None
     pe_ratio: float | None = None
     peg_ratio: float | None = None
+    week_52_high: float | None = None
+    week_52_low: float | None = None
     criterion_a: bool | None = None
     criterion_b: bool | None = None
     criterion_c: bool | None = None
+    criterion_52w_high: bool | None = None
+    criterion_52w_low: bool | None = None
     status: ScreenerStatus = ScreenerStatus.UNAVAILABLE
     data_quality: DataQuality = DataQuality()
 
@@ -78,9 +82,13 @@ class DailyScreenerSnapshot(BaseModel):
     ttm_dividend_yield: float | None = None
     pe_ratio: float | None = None
     peg_ratio: float | None = None
+    week_52_high: float | None = None
+    week_52_low: float | None = None
     criterion_a: bool | None = None
     criterion_b: bool | None = None
     criterion_c: bool | None = None
+    criterion_52w_high: bool | None = None
+    criterion_52w_low: bool | None = None
     status: ScreenerStatus
     data_quality: DataQuality = DataQuality()
     created_at: datetime | None = None

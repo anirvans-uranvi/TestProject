@@ -124,6 +124,8 @@ export interface FundamentalsRaw {
   pegRatio: number | null;
   eps: number | null;
   marketCap: number | null;
+  week52High: number | null;
+  week52Low: number | null;
 }
 
 async function requestFundamentals(symbol: string, session: CrumbSession): Promise<FundamentalsRaw | null> {
@@ -142,6 +144,8 @@ async function requestFundamentals(symbol: string, session: CrumbSession): Promi
     pegRatio: keyStats.pegRatio?.raw ?? null,
     eps: keyStats.trailingEps?.raw ?? null,
     marketCap: summaryDetail.marketCap?.raw ?? null,
+    week52High: summaryDetail.fiftyTwoWeekHigh?.raw ?? null,
+    week52Low: summaryDetail.fiftyTwoWeekLow?.raw ?? null,
   };
 }
 

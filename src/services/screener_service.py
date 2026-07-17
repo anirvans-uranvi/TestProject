@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta
 
 from supabase import Client
 
-from src.calculations.classification import build_classification
+from src.calculations.classification import build_classification, criterion_52w_high, criterion_52w_low
 from src.calculations.dividends import ttm_dividend_yield
 from src.calculations.returns import return_1d, return_5d, return_20d
 from src.models.market_data import DividendEvent
@@ -35,12 +35,16 @@ def compute_screener_row(
     peg_threshold: float = 1.0,
     is_stale: bool = False,
     stale_minutes: float | None = None,
+    week_52_high: float | None = None,
+    week_52_low: float | None = None,
 ) -> DailyScreenerSnapshot:
     """Pure calculation step -- no I/O, fully unit-testable."""
     r1 = return_1d(latest_price, historical_closes)
     r5 = return_5d(latest_price, historical_closes)
     r20 = return_20d(latest_price, historical_closes)
     ttm_yield = ttm_dividend_yield(dividend_events, as_of_date, latest_price)
+    c_52w_high = criterion_52w_high(latest_price, week_52_high)
+    c_52w_low = criterion_52w_low(latest_price, week_52_low)
 
     classification = build_classification(
         ttm_dividend_yield=ttm_yield,
@@ -66,9 +70,13 @@ def compute_screener_row(
         ttm_dividend_yield=ttm_yield,
         pe_ratio=pe_ratio,
         peg_ratio=peg_ratio,
+        week_52_high=week_52_high,
+        week_52_low=week_52_low,
         criterion_a=classification.criterion_a,
         criterion_b=classification.criterion_b,
         criterion_c=classification.criterion_c,
+        criterion_52w_high=c_52w_high,
+        criterion_52w_low=c_52w_low,
         status=classification.status,
         data_quality=classification.data_quality,
     )
@@ -120,6 +128,8 @@ def refresh_screener_row_for_symbol(
     fundamentals = fundamentals_repo.get_latest_fundamentals(client, symbol)
     pe_ratio = fundamentals.pe_ratio if fundamentals else None
     peg_ratio = fundamentals.peg_ratio if fundamentals else None
+    week_52_high = fundamentals.week_52_high if fundamentals else None
+    week_52_low = fundamentals.week_52_low if fundamentals else None
     if fundamentals and fundamentals.is_stale:
         is_stale = True
 
@@ -138,6 +148,8 @@ def refresh_screener_row_for_symbol(
         peg_threshold=peg_threshold,
         is_stale=is_stale,
         stale_minutes=stale_minutes,
+        week_52_high=week_52_high,
+        week_52_low=week_52_low,
     )
     snapshot_repo.upsert_daily_snapshot(client, row)
     return row
