@@ -36,9 +36,19 @@ with col1:
     st.page_link("pages/4_Settings.py", label="Configure thresholds", icon="⚙️")
 with col2:
     st.subheader("Data sources")
+    _provider_notes = {
+        "dhan": "Dhan (the configured live price vendor) does not expose PE, PEG, or dividend "
+        "data -- see the README for the current fundamentals-coverage limitation.",
+        "yfinance": "yfinance is an unofficial Yahoo Finance client covering prices, dividends, "
+        "and fundamentals in one provider -- see the README's Limitations for the caveats "
+        "that come with that (unofficial API, no uptime/rate-limit guarantee).",
+        "manual": "Fundamentals are read from hand-curated CSVs in `data/` -- see the README "
+        "for the CSV schema.",
+        "mock": "Running on synthetic mock data (deterministic per symbol, not real market "
+        "data) -- set `MARKET_DATA_PROVIDER`/`FUNDAMENTALS_PROVIDER` to switch providers.",
+    }
     st.markdown(
         f"- **Prices**: `{settings.market_data_provider}` provider\n"
         f"- **Fundamentals (PE/PEG/dividends)**: `{settings.fundamentals_provider}` provider\n\n"
-        "Dhan (the configured live price vendor) does not expose PE, PEG, or dividend data -- "
-        "see the README for the current fundamentals-coverage limitation."
+        + _provider_notes.get(settings.market_data_provider, "")
     )
