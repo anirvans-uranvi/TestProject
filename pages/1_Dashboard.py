@@ -327,10 +327,18 @@ else:
     st.markdown(render_screener_table(display_rows, user_settings.theme), unsafe_allow_html=True)
 
 st.divider()
-selected_symbol = st.selectbox("Open in Stock Detail →", table_df["Symbol"] if not table_df.empty else [])
-if selected_symbol and st.button("View stock detail"):
-    st.session_state["selected_symbol"] = selected_symbol
-    st.switch_page("pages/2_Stock_Detail.py")
+open_symbols = table_df["Symbol"] if not table_df.empty else []
+detail_col, options_col = st.columns(2)
+with detail_col:
+    selected_symbol = st.selectbox("Open in Stock Detail →", open_symbols)
+    if selected_symbol and st.button("View stock detail"):
+        st.session_state["selected_symbol"] = selected_symbol
+        st.switch_page("pages/2_Stock_Detail.py")
+with options_col:
+    fo_symbol = st.selectbox("Open in Options →", open_symbols, key="dashboard_fo_symbol")
+    if fo_symbol and st.button("📊 View F&O / options"):
+        st.session_state["fo_symbol"] = fo_symbol
+        st.switch_page("pages/5_Options.py")
 
 st.download_button(
     "⬇️ Download filtered results (CSV)",

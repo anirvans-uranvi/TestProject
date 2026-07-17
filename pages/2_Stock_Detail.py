@@ -70,6 +70,10 @@ with col3:
 
 render_disclaimer()
 
+if st.button("📊 View F&O / options for this stock"):
+    st.session_state["fo_symbol"] = symbol
+    st.switch_page("pages/5_Options.py")
+
 st.info(explain_classification(row))
 
 st.subheader("Pass / fail scorecard")

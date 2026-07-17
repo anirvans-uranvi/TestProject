@@ -23,6 +23,14 @@ class DividendType(StrEnum):
     SPECIAL = "special"
 
 
+class OptionType(StrEnum):
+    """NSE option right: CE = call, PE = put (as used in the F&O bhavcopy's
+    OptnTp column)."""
+
+    CE = "CE"
+    PE = "PE"
+
+
 class AlertType(StrEnum):
     STATUS_CHANGE = "status_change"
     ENTERS_GREEN = "enters_green"

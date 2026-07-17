@@ -23,6 +23,7 @@ operations; that doc covers the code itself.
 - [Running tests](#running-tests)
 - [Scheduled refresh](#scheduled-refresh)
 - [On-demand refresh (Dashboard "Manual refresh" button)](#on-demand-refresh-dashboard-manual-refresh-button)
+- [Futures & Options (F&O) data](#futures--options-fo-data)
 - [Docker](#docker)
 - [Limitations](#limitations)
 
@@ -371,6 +372,32 @@ needed. No changes are required on the Streamlit side beyond having
 `SUPABASE_URL` set (already required for everything else) -- the
 function's URL is derived from it.
 
+## Futures & Options (F&O) data
+
+The **Options** page (`pages/5_Options.py`) shows, per stock, the futures
+term structure and the option chain (CE | strike | PE, with open interest,
+change in OI, volume, and LTP; ATM strike highlighted). Open it from the
+Dashboard's "Open in Options →" section or the "View F&O / options" button
+on Stock Detail.
+
+**Data source:** the NSE F&O UDiFF **bhavcopy** (one zip per trading day),
+the only reliable free source for NSE derivatives — yfinance has none, and
+NSE's live option-chain API returns empty JSON to scripts. Load it with:
+
+```bash
+python scripts/fetch_fo_data.py            # backfill last 60 trading days
+python scripts/fetch_fo_data.py --days 20  # fewer days
+python scripts/fetch_fo_data.py --date 2026-07-16   # one specific day
+python scripts/fetch_fo_data.py --mock     # synthetic data, no network
+```
+
+Requires `SUPABASE_SERVICE_ROLE_KEY` (writes shared market data, bypasses
+RLS), and migration `0007` applied first. `scripts/seed_mock_data.py` also
+seeds ~30 days of synthetic F&O so the Options screen works locally with no
+network. This is **end-of-day** data (NSE publishes the file ~6pm IST after
+close); re-run the script daily (or via the same schedulers as the cash
+data) to keep it current — see [Limitations](#limitations).
+
 ## Docker
 
 ```bash
@@ -487,3 +514,15 @@ docker compose up               # + the APScheduler refresh daemon
   hours), not a separate tick-level table -- sufficient for the "latest
   price" and return calculations required here, but not a full order-book
   or tick history.
+- **F&O data is end-of-day only, and greeks/implied volatility are not
+  stored.** The Options screen is built on the NSE F&O bhavcopy (published
+  ~6pm IST after close), the only reliable free NSE-derivatives source:
+  yfinance has none, and NSE's live option-chain API returns empty JSON to
+  scripts. So "latest price" for a contract is the last trading day's
+  close/settlement, not a live/intraday quote, and history builds forward
+  from the first `fetch_fo_data.py` run (backfill limited to what NSE's
+  archive still serves). Greeks and IV are **not** in the bhavcopy (or any
+  free source) and were intentionally left out -- the option tables are
+  shaped to gain those columns later (via a Black-Scholes helper) without a
+  migration reshape. Index F&O (NIFTY/BANKNIFTY) is out of scope; only the
+  50 equity underlyings are ingested.

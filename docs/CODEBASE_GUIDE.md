@@ -106,6 +106,7 @@ pages/
   2_Stock_Detail.py               Price/volume/dividend charts, scorecard, alerts, position notes
   3_Alerts.py                     Alert CRUD + notification history
   4_Settings.py                    Per-user thresholds, theme, change password
+  5_Options.py                     F&O: futures term structure + option chain per stock
 src/
   config.py                       Pydantic Settings, reads .env
   models/                          Pydantic domain models + enums
@@ -117,8 +118,9 @@ src/
   utils/                           Formatting, timezones, Streamlit session/auth, shared UI, logging
 scripts/
   fetch_nifty50_constituents.py   Refresh companies/nifty50_constituents from a maintained symbol list
-  seed_mock_data.py                Backfill synthetic prices/fundamentals/dividends/snapshots (local dev)
+  seed_mock_data.py                Backfill synthetic prices/fundamentals/dividends/snapshots + mock F&O (local dev)
   import_screener_csv.py           Import a screener.in CSV export as fundamentals data
+  fetch_fo_data.py                  Backfill NSE F&O bhavcopy (futures + options) into Supabase (--days 60)
   run_refresh.py                    CLI entrypoint for cron/GitHub Actions/APScheduler
 supabase/
   migrations/                      Schema, RLS policies, views/functions, in numbered order
@@ -130,7 +132,7 @@ tests/                             Pytest suite -- almost entirely calculations/
 ## Database schema
 
 All migrations live in `supabase/migrations/`, applied in numeric order
-(`0001` → `0004`). Twelve tables, in three groups:
+(`0001` → `0007`). Sixteen tables, in three groups:
 
 **Reference data** (written by `scripts/fetch_nifty50_constituents.py` /
 `seed.sql`, read-only to the app):
@@ -143,6 +145,7 @@ All migrations live in `supabase/migrations/`, applied in numeric order
 - `dividend_events` — individual ex-dividend cash amounts
 - `daily_screener_snapshots` — the calculated audit trail: one row per symbol per day with the computed returns, TTM yield, criteria A/B/C, the two 52-week high/low proximity flags, and status. This is what the classification-history chart on Stock Detail reads.
 - `provider_fetch_log` — success/failure log for every provider call, used for the Dashboard's "data freshness" indicator and for retry/backoff auditing
+- `futures_contracts` / `futures_daily_prices` / `option_contracts` / `option_daily_prices` — NSE F&O derivatives (migration `0007`), written by `scripts/fetch_fo_data.py`. See the Futures & Options section for the contract-dimension vs daily-price-fact split and why the source is the EOD bhavcopy.
 
 **Per-user data** (RLS-scoped to `auth.uid() = user_id`):
 - `user_settings` — thresholds, theme
@@ -155,6 +158,11 @@ Two generated helpers, defined in `0003_views_functions.sql` (and patched
 in `0004`):
 - `latest_screener_view` — one joined row per current constituent (companies + its latest daily_screener_snapshot). This is what the Dashboard queries in a single call instead of joining client-side. `0004` added `coalesce(status, 'unavailable')` / `coalesce(data_quality, '{}')` here because a constituent with no snapshot yet would otherwise return `NULL` for those columns, which fails Pydantic validation on the `ScreenerRow` model. `0006` added `week_52_high`/`week_52_low`/`criterion_52w_high`/`criterion_52w_low` — **a real deploy-time error hit here**: `create or replace view` can only *append* new output columns; inserting them positionally in the middle of the existing `select` list (as the first draft of `0006` did) makes Postgres think you're renaming the columns that got pushed down a slot, and it fails with `42P16: cannot change name of view column ... HINT: Use ALTER VIEW ... RENAME COLUMN ... instead`. The fix is to always append new columns at the very end of the `select` list in any future `create or replace view` migration, never insert them mid-list — column *order* doesn't matter to the app since every read is by name (`ScreenerRow.model_validate(dict)`), so this costs nothing.
 - `get_classification_history(symbol, days)` — a SQL function returning one symbol's snapshot history, used by the Stock Detail status-over-time chart.
+
+Migration `0007` adds two more views on the same `DISTINCT ON` pattern:
+`latest_futures_view` and `latest_option_chain_view` — the newest daily
+row per open futures / option contract, so the Options page loads the
+current term structure / chain in one query.
 
 RLS (`0002_rls_policies.sql`): shared tables are `SELECT`-only for the
 `authenticated` role (writes only happen via the service-role key, which
@@ -169,10 +177,13 @@ tables via that syntax.
 ## Domain models (`src/models/`)
 
 Pydantic v2 models, one file per concern (`company.py`, `market_data.py`,
-`screener.py`, `user.py`, `alert.py`, `fetch_log.py`), plus `enums.py` for
-every `StrEnum` (`ScreenerStatus`, `MarketState`, `AlertType`,
-`NotificationChannel`, `Theme`, `FetchType`, `FetchStatus`,
-`DividendType`). Everything is re-exported from `src/models/__init__.py`.
+`screener.py`, `user.py`, `alert.py`, `fetch_log.py`, `fo.py`), plus
+`enums.py` for every `StrEnum` (`ScreenerStatus`, `MarketState`,
+`AlertType`, `NotificationChannel`, `Theme`, `FetchType`, `FetchStatus`,
+`DividendType`, `OptionType`). Everything is re-exported from
+`src/models/__init__.py`. `fo.py` holds the four F&O models
+(`FuturesContract`, `FuturesDailyPrice`, `OptionContract`,
+`OptionDailyPrice`) — see the Futures & Options section.
 
 Worth knowing:
 - `PricePoint.effective_close` prefers `adjusted_close` over `close` — every return calculation goes through this property, not the raw fields directly.
@@ -297,6 +308,73 @@ docstring describing exactly what to wire up (credentials needed, what
 API call to make). Extending notifications means implementing one of
 these, not touching `alert_service.py`.
 
+## Futures & Options (F&O) data
+
+A separate, self-contained subsystem for NSE derivatives on the 50
+constituents — futures + option chains — feeding the Options screen
+(`pages/5_Options.py`). It does **not** go through the
+`PriceDataProvider`/`FundamentalsDataProvider` ABCs; F&O has its own shape.
+
+**Data source — and why it's the only viable one** (settled empirically):
+- **yfinance carries no NSE derivatives** — `Ticker("RELIANCE.NS").options`
+  is empty. Yahoo does not list NSE options/futures.
+- **NSE's live option-chain API** (`/api/option-chain-equities`) returns
+  HTTP 200 with hollow JSON (`expiryDates: None`) to non-interactive
+  sessions — its anti-bot layer. Unusable from a script.
+- **NSE F&O UDiFF bhavcopy** — the reliable source. One zip per trading
+  day at `https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_YYYYMMDD_F_0000.csv.zip`,
+  downloads with just a browser User-Agent (no cookie handshake — note
+  the `nsearchives` host; the older `archives.nseindia.com` host is now
+  bot-blocked and serves a PDF). Each row is one contract's full trading
+  day: OHLC, LTP, prev close, settlement, underlying (spot), open interest
+  + change, volume, turnover, trades, expiry, strike, CE/PE, lot size.
+  Instrument types: `STF` = stock future, `STO` = stock option (index
+  `IDF`/`IDO` are ignored). **This is end-of-day data** (published ~6pm
+  IST) — "latest price" means the most recent close/settlement, never an
+  intraday live quote. There is no free live/intraday F&O feed.
+
+**Greeks / implied volatility are intentionally NOT stored** — not in the
+bhavcopy (or any free source), and computing them was scoped out. The
+tables can gain those columns + a `greeks.py` later without reshaping.
+
+**Schema (migration `0007_add_fo_tables.sql`) — four tables + two views.**
+Futures and options are separate instruments, and each splits into a
+*contract dimension* (the open-contracts registry, with expiry) and a flat
+*daily-price fact* table (OHLC history, natural-key like `price_history`):
+- `futures_contracts` / `futures_daily_prices`
+- `option_contracts` / `option_daily_prices` (options carry `strike_price`
+  + `option_type` CE/PE that futures don't)
+- `latest_futures_view` / `latest_option_chain_view` — `DISTINCT ON` the
+  newest daily row per open contract, so a page loads the current term
+  structure / option chain in one query (mirrors `latest_screener_view`).
+All four use the shared-market-data RLS pattern from `0002` (authenticated
+read; writes only via the service-role key, which bypasses RLS). `is_open`
+can't be derived from any single file (a contract appears in the bhavcopy
+only while live, so expiry ≥ that file's date always holds); it's finalized
+against the real calendar once per run by `fo_repo.refresh_open_flags`.
+
+**Code layout:**
+- `src/models/fo.py` — the four Pydantic models; `OptionType` (CE/PE) in
+  `enums.py`.
+- `src/data_providers/nse_fo_provider.py` — `fetch_fo_bhavcopy(trade_date,
+  universe)` (download + parse); `parse_fo_bhavcopy(csv_text, ...)` is
+  split out and pure so it's unit-tested against an inline fixture
+  (`tests/test_nse_fo_provider.py`) with no network.
+- `src/data_providers/mock_provider.py::MockFOProvider` — synthetic
+  futures (3 monthly expiries) + option chains (strikes stepped around a
+  spot), shaped as the same `FOBhavcopy` object, so the ingest path,
+  Options screen and tests run offline.
+- `src/repositories/fo_repo.py` — natural-key upserts (chunked, since one
+  day is ~9k option rows), `refresh_open_flags`, and reads off the views.
+- `src/services/fo_service.py` — `ingest_fo_day(client, book)` persists a
+  parsed day; `shape_option_chain` / `option_chain_summary` /
+  `futures_term_structure` are pure presentation helpers (tested in
+  `tests/test_fo_service.py`).
+- `scripts/fetch_fo_data.py` — service-role backfill (`--days 60` default,
+  `--date`, `--mock`), run by the operator (like the other seed scripts);
+  processes oldest→newest then calls `refresh_open_flags(today)`.
+  `scripts/seed_mock_data.py` also seeds ~30 mock F&O days for local dev.
+
 ## Streamlit app (`app.py`, `pages/`)
 
 `app.py` is the landing page (Streamlit's "Home" in the sidebar nav,
@@ -310,9 +388,10 @@ Forgot password tabs and `st.stop()`s.
   **Screener table columns**, left to right: `#` (serial number, just `enumerate()` over the current filtered/sorted rows — always 1..N of what's on screen, not a stored ID, so it renumbers on every filter/sort change), `Stock` (the NSE ticker symbol, e.g. `ADANIENT` — not the full company name; a redundant hidden `Symbol` key is still carried in each `display_rows` dict for the "Open in Stock Detail" selectbox below the table, but since `Stock` moved to the symbol too, `Symbol` is now just an alias of the same value, kept because `render_screener_table()`/the selectbox already depend on that key existing), `Latest price`, `52W High`/`52W Low` (value + `pass_fail_icon` for `criterion_52w_high`/`criterion_52w_low` — display-only proximity checks, **not** part of Green/Amber/Red; see `classification.py` above), `1D`/`5D`/`20D` (arrow + percentage only), `Momentum` (a single `pass_fail_icon(criterion_b)` — despite the name it's specifically criterion B, not a combined A/B/C view; that used to be a column called `Criteria` showing all three, moved/renamed/simplified across a few iterations), and `Dividend yield`/`PEG` last (value + `pass_fail_icon` for criteria A and C respectively). Default sort is by ticker symbol ascending (`sort_map["Stock"] = "symbol"`, `sort_desc` defaults to `False`) — the sidebar "Sort by" dropdown no longer has a separate `Symbol` entry, since it would now sort identically to `Stock`. There is deliberately no dedicated `Status` column anymore — it duplicated the per-criterion tick/cross columns already on screen without adding information, so it was dropped; the underlying `status` field is still sortable/filterable (sidebar "Sort by"/multiselect), just not rendered as its own column. `status_badge()` (colored text badge, e.g. "🟢 Green") is still used standalone on Stock Detail's header, where the status needs to stand alone rather than sit in a row with other context — the SVG-icon variant that used to serve this table (`status_dot()`/`_STATUS_SVG` in `ui.py`) was deleted once nothing referenced it, rather than left as dead code.
 
   The table itself is rendered by `render_screener_table()` (`src/utils/ui.py`), not `pandas.DataFrame.to_html()` — see the Tailwind CSS note under Utils below for why, and for how the mobile layout works. `render_screener_table()`'s mobile card header only renders a status icon span if the row dict actually has a `"Status"` key (`"Status" in row`) — so it stays generically reusable for any future caller that does want a per-row status icon, without assuming one is always present.
-- **`2_Stock_Detail.py`** — the most feature-dense page: Plotly candlestick (falls back to a line chart if OHLC is incomplete) with volume subplot, moving averages, entry/target/stop-loss lines, dividend timeline, classification-history chart, position notes form, and inline alert creation. The Fundamentals column is rendered via `render_stat_grid()` instead of stacked `st.markdown` lines; the alert list uses `render_alert_row()` (see below) instead of printing the alert's raw Python `config` dict; the "Create a new alert" expander's inputs are now wrapped in an `st.form` (previously plain buttons), bringing it to parity with `3_Alerts.py`'s create-alert form, which already used this pattern.
+- **`2_Stock_Detail.py`** — the most feature-dense page: Plotly candlestick (falls back to a line chart if OHLC is incomplete) with volume subplot, moving averages, entry/target/stop-loss lines, dividend timeline, classification-history chart, position notes form, and inline alert creation. The Fundamentals column is rendered via `render_stat_grid()` instead of stacked `st.markdown` lines; the alert list uses `render_alert_row()` (see below) instead of printing the alert's raw Python `config` dict; the "Create a new alert" expander's inputs are now wrapped in an `st.form` (previously plain buttons), bringing it to parity with `3_Alerts.py`'s create-alert form, which already used this pattern. A "📊 View F&O / options" button hands the current symbol to `5_Options.py` via `st.session_state["fo_symbol"]` + `st.switch_page`.
 - **`3_Alerts.py`** — alert CRUD (including portfolio-wide alerts, `symbol IS NULL`) and notification history. Alert rows use `render_alert_row()` (shared with Stock Detail — one formatting implementation, two call sites) instead of a raw dict dump. Notification history stays `st.dataframe`-only on every viewport, deliberately not given a Tailwind mobile-card alternative — see the design-system note under Utils for why.
 - **`4_Settings.py`** — per-user thresholds, theme, change-password. The three permanently-disabled Email/Telegram/Slack notification checkboxes were collapsed into a single row of `render_pill()` "coming soon" badges next to the one real (In-app) checkbox, removing dead-weight disabled UI for unimplemented channels.
+- **`5_Options.py`** — the F&O / Options screen for one stock (see the Futures & Options section above for the data pipeline). Symbol selector defaults to `st.session_state["fo_symbol"]` (set by the Dashboard's "Open in Options →" block or Stock Detail's button), falling back to `selected_symbol`. Renders: summary tiles (spot / ATM strike / total CE OI / total PE OI / Put-Call ratio) via `render_stat_grid`; a futures term-structure table (near/next/far, with basis vs spot) + a near-month daily-close Plotly chart; and a classic CE | Strike | PE option chain for the chosen expiry, as a styled `st.dataframe` with the ATM strike row highlighted (a dense numeric grid stays `st.dataframe` for the same reason the notification history does — native sort/scroll, no reliable Tailwind mobile-card alternative). Shaping is done by `fo_service.shape_option_chain`/`option_chain_summary`/`futures_term_structure`, not in the page.
 
 ## Auth: a non-obvious quirk
 

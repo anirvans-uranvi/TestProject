@@ -18,15 +18,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.data_providers.mock_provider import MockFundamentalsProvider, MockPriceProvider  # noqa: E402
+from src.data_providers.mock_provider import (  # noqa: E402
+    MockFOProvider,
+    MockFundamentalsProvider,
+    MockPriceProvider,
+)
 from src.repositories import (  # noqa: E402
     companies_repo,
     dividends_repo,
+    fo_repo,
     fundamentals_repo,
     price_repo,
     snapshot_repo,
 )
 from src.repositories.supabase_client import get_service_client  # noqa: E402
+from src.services.fo_service import ingest_fo_day  # noqa: E402
 from src.services.screener_service import compute_screener_row  # noqa: E402
 from src.utils.logging import get_logger  # noqa: E402
 
@@ -35,6 +41,24 @@ logger = get_logger(__name__)
 PRICE_LOOKBACK_DAYS = 400
 DIVIDEND_LOOKBACK_DAYS = 400
 SNAPSHOT_BACKFILL_DAYS = 60
+FO_BACKFILL_DAYS = 30
+
+
+def seed_mock_fo(client, symbols: list[str], today: date, days: int = FO_BACKFILL_DAYS) -> None:
+    """Seed synthetic futures + option-chain history so the Options screen has
+    data locally without hitting NSE."""
+    provider = MockFOProvider()
+    universe = set(symbols)
+    seeded = 0
+    d = today
+    while seeded < days:
+        if d.weekday() < 5:  # Mon-Fri
+            book = provider.fetch_day(d, universe=universe)
+            ingest_fo_day(client, book)
+            seeded += 1
+        d -= timedelta(days=1)
+    fo_repo.refresh_open_flags(client, today)
+    logger.info("seeded mock F&O: %d trading days for %d symbols", days, len(symbols))
 
 
 def main() -> None:
@@ -86,6 +110,8 @@ def main() -> None:
             snapshot_count += 1
 
         logger.info("seeded %s: %d price points, %d dividends, %d daily snapshots", symbol, len(points), len(dividends), snapshot_count)
+
+    seed_mock_fo(client, symbols, today)
 
     logger.info("mock data seeding complete for %d symbols", len(symbols))
 

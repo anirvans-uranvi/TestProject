@@ -7,10 +7,17 @@ from src.models.enums import (
     FetchType,
     MarketState,
     NotificationChannel,
+    OptionType,
     ScreenerStatus,
     Theme,
 )
 from src.models.fetch_log import ProviderFetchLog
+from src.models.fo import (
+    FuturesContract,
+    FuturesDailyPrice,
+    OptionContract,
+    OptionDailyPrice,
+)
 from src.models.market_data import DividendEvent, FundamentalSnapshot, PricePoint, Quote
 from src.models.screener import ClassificationResult, DailyScreenerSnapshot, DataQuality, ScreenerRow
 from src.models.user import SavedFilter, UserPosition, UserSettings
@@ -27,9 +34,14 @@ __all__ = [
     "FetchType",
     "MarketState",
     "NotificationChannel",
+    "OptionType",
     "ScreenerStatus",
     "Theme",
     "ProviderFetchLog",
+    "FuturesContract",
+    "FuturesDailyPrice",
+    "OptionContract",
+    "OptionDailyPrice",
     "DividendEvent",
     "FundamentalSnapshot",
     "PricePoint",
