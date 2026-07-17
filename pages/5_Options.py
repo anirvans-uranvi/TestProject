@@ -5,6 +5,7 @@ from datetime import date, timedelta
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from postgrest.exceptions import APIError
 
 from src.repositories import companies_repo, fo_repo, settings_repo
 from src.services import fo_service
@@ -34,7 +35,19 @@ def _fmt_int(value) -> str:
 # Symbol selector -- defaults to whatever the Dashboard / Stock Detail
 # handed off via session state.
 # ---------------------------------------------------------------------
-fo_symbols = fo_repo.list_fo_symbols(client)
+try:
+    fo_symbols = fo_repo.list_fo_symbols(client)
+except APIError:
+    # The F&O tables/views (migration 0007) don't exist yet -- PostgREST
+    # raises rather than returning an empty result. Show a setup hint
+    # instead of a redacted crash page.
+    st.info(
+        "F&O data isn't set up yet. Apply migration "
+        "`supabase/migrations/0007_add_fo_tables.sql`, then load data with "
+        "`python scripts/fetch_fo_data.py --days 60`."
+    )
+    st.stop()
+
 if not fo_symbols:
     fo_symbols = sorted(c.symbol for c in companies_repo.list_current_constituents(client))
 if not fo_symbols:
