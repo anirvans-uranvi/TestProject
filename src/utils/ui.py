@@ -297,7 +297,13 @@ def render_alert_row(alert_type_label: str, config_summary: str, cooldown_minute
     return f'<div class="flex flex-wrap items-center gap-2">{pill}<span class="{c["card_text"]} text-sm">{config_summary}</span><span class="{c["muted"]} text-xs">· cooldown {cooldown_minutes}min</span>{inactive}</div>'
 
 
-def render_screener_table(rows: list[dict], theme: Theme | str = Theme.SYSTEM) -> str:
+def render_screener_table(
+    rows: list[dict],
+    theme: Theme | str = Theme.SYSTEM,
+    sortable_columns: dict[str, str] | None = None,
+    active_sort_key: str | None = None,
+    sort_desc: bool = False,
+) -> str:
     """Tailwind-classed HTML for the Dashboard screener table: a normal
     table on tablet/desktop (md: and up, >=768px), and a stacked list of
     cards on phones (below md:) -- CSS-only responsive switch (`hidden
@@ -311,18 +317,43 @@ def render_screener_table(rows: list[dict], theme: Theme | str = Theme.SYSTEM) -
     viewport it either overflowed the page or squeezed unreadably. The
     desktop table below is also wrapped in `overflow-x-auto` as a safety
     net even at wider sizes.
+
+    `sortable_columns` maps a column label to the underlying sort key the
+    caller understands (e.g. {"Latest price": "latest_price"}); columns
+    not in this dict render as plain headers. Clicking a sortable header
+    is a plain `<a href="?sort=...&dir=...">` link -- no JS bridge exists
+    between this hand-rendered HTML and Python, so the click is carried as
+    a normal query-string navigation, which the caller reads back via
+    `st.query_params` on the next run. The target direction is baked into
+    the href at render time (ascending on a first click, otherwise the
+    opposite of whatever's currently active) so the caller doesn't need
+    any click-side toggle logic, just to apply the href's own sort/dir.
     """
     c = _table_theme_classes(theme)
     if not rows:
         return ""
 
     columns = [k for k in rows[0] if k != "Symbol"]
+    sortable_columns = sortable_columns or {}
 
-    header_cells = "".join(
-        f'<th class="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide '
-        f'whitespace-nowrap border-b {c["wrapper_border"]}">{col}</th>'
-        for col in columns
-    )
+    def _header_cell(col: str) -> str:
+        key = sortable_columns.get(col)
+        if key is None:
+            return (
+                f'<th class="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide '
+                f'whitespace-nowrap border-b {c["wrapper_border"]}">{col}</th>'
+            )
+        is_active = key == active_sort_key
+        next_dir = "desc" if (is_active and not sort_desc) else "asc"
+        arrow = (" ▼" if sort_desc else " ▲") if is_active else ""
+        return (
+            f'<th class="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide '
+            f'whitespace-nowrap border-b {c["wrapper_border"]}">'
+            f'<a href="?sort={key}&dir={next_dir}" class="hover:underline cursor-pointer" '
+            f'style="color:inherit;text-decoration:none;">{col}{arrow}</a></th>'
+        )
+
+    header_cells = "".join(_header_cell(col) for col in columns)
     body_rows = []
     for i, row in enumerate(rows):
         stripe = c["row_odd"] if i % 2 == 0 else c["row_even"]

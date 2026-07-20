@@ -164,6 +164,46 @@ df["future_price"] = df["symbol"].map(lambda s: (near_month.get(s) or {}).get("p
 df["csp_5pct"] = df["symbol"].map(lambda s: (csp_map.get(s) or {}).get("csp_pct"))
 
 # ---------------------------------------------------------------------
+# Sorting -- single source of truth shared by the sidebar "Sort by"
+# controls and the screener table's clickable column headers, so the two
+# can never disagree about what's currently sorted. Column labels here
+# match the table's rendered headers exactly (built from this same list),
+# excluding "#" (row number -- sorting by it is a no-op).
+# ---------------------------------------------------------------------
+SORT_COLUMNS: list[tuple[str, str]] = [
+    ("Stock", "symbol"),
+    ("Latest price", "latest_price"),
+    ("52W High", "week_52_high"),
+    ("52W Low", "week_52_low"),
+    ("1D", "return_1d"),
+    ("5D", "return_5d"),
+    ("20D", "return_20d"),
+    ("Momentum", "criterion_b"),
+    (future_col_label, "future_price"),
+    ("5% CSP", "csp_5pct"),
+    ("Dividend yield", "ttm_dividend_yield"),
+    ("PE", "pe_ratio"),
+    ("PEG", "peg_ratio"),
+]
+SORT_LABEL_TO_KEY = dict(SORT_COLUMNS)
+SORT_KEY_TO_LABEL = {key: label for label, key in SORT_COLUMNS}
+
+if "dashboard_sort_label" not in st.session_state:
+    st.session_state["dashboard_sort_label"] = "Stock"
+if "dashboard_sort_desc" not in st.session_state:
+    st.session_state["dashboard_sort_desc"] = False
+
+# A header click lands here as a normal `?sort=...&dir=...` navigation
+# (see render_screener_table's docstring) -- apply it to the shared sort
+# state, then clear the query string so it doesn't keep re-forcing this
+# sort on every later rerun (e.g. changing an unrelated filter).
+_clicked_sort_key = st.query_params.get("sort")
+if _clicked_sort_key in SORT_KEY_TO_LABEL:
+    st.session_state["dashboard_sort_label"] = SORT_KEY_TO_LABEL[_clicked_sort_key]
+    st.session_state["dashboard_sort_desc"] = st.query_params.get("dir") == "desc"
+    st.query_params.clear()
+
+# ---------------------------------------------------------------------
 # Metric cards (also usable as quick filters via session_state)
 # ---------------------------------------------------------------------
 ALL_STATUSES = ["Green", "Amber", "Red", "Unavailable"]
@@ -244,12 +284,8 @@ with st.sidebar:
 
     complete_only = st.checkbox("Complete data only (hide Unavailable)")
 
-    sort_col = st.selectbox(
-        "Sort by",
-        ["Stock", "Status", "Latest price", future_col_label, "5% CSP", "1D return", "5D return", "20D return", "Dividend yield", "PEG"],
-        index=0,
-    )
-    sort_desc = st.checkbox("Descending", value=False)
+    sort_col = st.selectbox("Sort by", [label for label, _ in SORT_COLUMNS], key="dashboard_sort_label")
+    sort_desc = st.checkbox("Descending", key="dashboard_sort_desc")
 
     st.divider()
     st.subheader("Saved filter presets")
@@ -324,21 +360,7 @@ filtered = filtered[_momentum_mask(filtered["return_20d"], mom_20d)]
 if complete_only:
     filtered = filtered[filtered["status"] != "unavailable"]
 
-sort_map = {
-    "Stock": "symbol",
-    "Status": "status",
-    "Latest price": "latest_price",
-    "52W High": "week_52_high",
-    "52W Low": "week_52_low",
-    future_col_label: "future_price",
-    "5% CSP": "csp_5pct",
-    "1D return": "return_1d",
-    "5D return": "return_5d",
-    "20D return": "return_20d",
-    "Dividend yield": "ttm_dividend_yield",
-    "PEG": "peg_ratio",
-}
-filtered = filtered.sort_values(sort_map[sort_col], ascending=not sort_desc, na_position="last")
+filtered = filtered.sort_values(SORT_LABEL_TO_KEY[sort_col], ascending=not sort_desc, na_position="last")
 
 # ---------------------------------------------------------------------
 # Screener table
@@ -390,7 +412,16 @@ table_df = pd.DataFrame(display_rows)
 if table_df.empty:
     st.info("No stocks match your current filters. Try loosening the sidebar filters (e.g. minimum dividend yield/PEG) or confirm screener data has been seeded/refreshed.")
 else:
-    st.markdown(render_screener_table(display_rows, user_settings.theme), unsafe_allow_html=True)
+    st.markdown(
+        render_screener_table(
+            display_rows,
+            user_settings.theme,
+            sortable_columns=SORT_LABEL_TO_KEY,
+            active_sort_key=SORT_LABEL_TO_KEY[sort_col],
+            sort_desc=sort_desc,
+        ),
+        unsafe_allow_html=True,
+    )
 
 st.divider()
 open_symbols = table_df["Symbol"] if not table_df.empty else []
