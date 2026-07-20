@@ -71,7 +71,7 @@ with header_col3:
         st.rerun()
 with header_col4:
     if st.button("📊 F&O Data Refresh", use_container_width=True):
-        with st.spinner("Checking NSE for a newer F&O bhavcopy -- this can take up to a minute..."):
+        with st.spinner("Checking NSE for a newer F&O bhavcopy -- this can take up to a few minutes..."):
             try:
                 fo_summary = edge_refresh.trigger_fo_refresh(st.session_state["sb_access_token"])
             except edge_refresh.ManualRefreshError as exc:

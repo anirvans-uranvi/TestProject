@@ -1,7 +1,7 @@
 // Tests for bhavcopy.ts's zip reader + CSV parser. Run with:
 //   deno test supabase/functions/fo-refresh/bhavcopy.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { bhavcopyUrl, extractFirstZipEntry, looksLikeZipContentType, parseFoBhavcopy } from "./bhavcopy.ts";
+import { bhavcopyUrl, extractFirstZipEntry, fetchBhavcopyText, looksLikeZipContentType, parseFoBhavcopy } from "./bhavcopy.ts";
 
 // --- zip reader --------------------------------------------------------
 
@@ -144,6 +144,37 @@ Deno.test("looksLikeZipContentType - rejects plain text", () => {
 
 Deno.test("looksLikeZipContentType - does not reject on a missing content-type (NSE doesn't always set one)", () => {
   assert(looksLikeZipContentType(null));
+});
+
+// --- fetch resilience (real incident this fixed: a hung/failed connection
+// to NSE, with no timeout at all, blocked the whole Edge Function
+// invocation for far longer than any client timeout could catch, leaving
+// the Streamlit app stuck spinning until it needed a full reboot) --------
+
+Deno.test("fetchBhavcopyText - a network failure is treated like unavailable (null), not a crash", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.reject(new DOMException("The signal has been aborted", "TimeoutError"));
+  try {
+    const result = await fetchBhavcopyText("2026-07-20");
+    assertEquals(result, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("fetchBhavcopyText - passes a bounded AbortSignal to fetch (so a hang can't be unbounded)", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedInit: RequestInit | undefined;
+  globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+    capturedInit = init;
+    return Promise.resolve(new Response("", { status: 404 }));
+  }) as typeof fetch;
+  try {
+    await fetchBhavcopyText("2026-07-20");
+    assert(capturedInit?.signal instanceof AbortSignal, "expected an AbortSignal to be passed to fetch()");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 // --- URL building --------------------------------------------------------

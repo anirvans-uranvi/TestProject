@@ -619,6 +619,36 @@ maybe-ingest, not an unconditional refresh:
   text snippet of the actual body — so a future failure is
   self-diagnosing from the Streamlit page's error message alone, without
   needing `supabase functions logs`.
+
+  **A second real bug, right after the first was fixed**: on the very
+  next live click, the Streamlit app's tab spun indefinitely and needed a
+  full app reboot to recover — worse than a clean error, because
+  `fetchBhavcopyText`'s `fetch()` call had **no timeout at all**.
+  `findLatestAvailableBhavcopy()` walks back up to `MAX_LOOKBACK_DAYS` (7)
+  days looking for the latest published bhavcopy; if even one of those
+  requests to NSE hangs (its bot-detection layer, already known from the
+  first bug to behave unusually toward this function's network origin,
+  could plausibly stall a connection rather than cleanly rejecting it),
+  the whole Edge Function invocation blocks indefinitely — far longer
+  than `edge_refresh.py`'s own client-side timeout was originally sized
+  for, and apparently long enough that whatever came back (or didn't) left
+  the Streamlit process itself stuck rather than surfacing a clean
+  exception. Fixed by giving every NSE request a bounded
+  `AbortSignal.timeout(FETCH_TIMEOUT_MS)` (15s — generous headroom over
+  the sub-second response times seen in all live testing), and by
+  treating a timed-out/failed fetch **the same as a 404** (return `null`,
+  let the walk-back try the previous day) rather than throwing — so one
+  bad day (most likely today's not-yet-published file, checked first)
+  can't block discovery of an already-available earlier day, and the
+  loop's total worst-case runtime is now bounded at
+  `maxLookback * FETCH_TIMEOUT_MS` (~105s) instead of unbounded.
+  `edge_refresh.py::FO_TIMEOUT_SECONDS` was raised from 120s to 180s to
+  keep comfortable headroom above that new, now-real worst case (walk-back
+  time plus ingest time for a genuinely new day). `bhavcopy.test.ts`
+  covers this by monkey-patching `globalThis.fetch` to reject like a hung
+  connection would, confirming `fetchBhavcopyText` returns `null` rather
+  than throwing, and confirming an `AbortSignal` is actually passed to
+  `fetch()`.
 - **`index.ts`** — same auth/cooldown pattern as `manual-refresh/index.ts`
   (`provider_name = 'fo_edge'`, `fetch_type = 'fo'` — added to
   `provider_fetch_log`'s CHECK constraint by

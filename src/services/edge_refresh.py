@@ -65,7 +65,13 @@ def trigger_manual_refresh(access_token: str) -> dict:
 
 # Downloading + unzipping + parsing one day's ~7MB F&O bhavcopy (and
 # upserting ~9,000 rows) is heavier than the cash-market refresh above.
-FO_TIMEOUT_SECONDS = 120.0
+# The Edge Function walks back through up to a week of NSE dates looking
+# for the latest published bhavcopy, each bounded to 15s (bhavcopy.ts's
+# FETCH_TIMEOUT_MS) since a hung connection to NSE previously caused the
+# whole invocation to hang far longer than any client timeout could catch
+# -- worst case is ~7*15s=105s of walking back plus ingest time for a
+# genuinely new day, so this needs real headroom above that.
+FO_TIMEOUT_SECONDS = 180.0
 
 
 def trigger_fo_refresh(access_token: str) -> dict:

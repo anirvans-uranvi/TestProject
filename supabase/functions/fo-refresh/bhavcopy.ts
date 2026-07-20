@@ -30,6 +30,17 @@ const REQUEST_HEADERS: Record<string, string> = {
 };
 const SOURCE_NAME = "nse_fo_bhavcopy_edge";
 
+// The original fetch() call here had NO timeout at all -- a real incident
+// this caused: findLatestAvailableBhavcopy() walks back up to
+// MAX_LOOKBACK_DAYS days, and a single hung connection to NSE (its
+// bot-detection layer is known to behave unusually -- see the
+// looksLikeZipContentType note below) blocked the whole Edge Function
+// invocation indefinitely, well past the Streamlit client's own request
+// timeout, in a way that left the browser tab spinning and required a
+// full app reboot to clear rather than surfacing a clean error. Every
+// fetch to NSE is now bounded by this timeout.
+const FETCH_TIMEOUT_MS = 15_000;
+
 const EOCD_SIGNATURE = 0x06054b50;
 const CENTRAL_DIR_SIGNATURE = 0x02014b50;
 const LOCAL_FILE_SIGNATURE = 0x04034b50;
@@ -119,7 +130,20 @@ export function looksLikeZipContentType(contentType: string | null): boolean {
  * machine), and a bare zip-parse failure gives no way to tell that apart
  * from a genuinely corrupt download. */
 export async function fetchBhavcopyText(isoDate: string): Promise<string | null> {
-  const resp = await fetch(bhavcopyUrl(isoDate), { headers: REQUEST_HEADERS });
+  let resp: Response;
+  try {
+    resp = await fetch(bhavcopyUrl(isoDate), { headers: REQUEST_HEADERS, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  } catch (err) {
+    // A hung/refused connection is treated the same as a 404 -- "this day
+    // isn't reachable, try the previous one" -- so one bad day (a
+    // transient NSE stall, most likely on today's not-yet-published file)
+    // can't block discovery of an earlier, genuinely available day. This
+    // bounds findLatestAvailableBhavcopy()'s total worst-case runtime to
+    // roughly maxLookback * FETCH_TIMEOUT_MS instead of hanging.
+    const reason = err instanceof Error ? err.message : String(err);
+    console.warn(`bhavcopy fetch for ${isoDate} timed out or failed (${reason}); treating as unavailable`);
+    return null;
+  }
   if (resp.status === 404) return null;
   if (!resp.ok) throw new Error(`bhavcopy fetch failed for ${isoDate}: HTTP ${resp.status}`);
 
