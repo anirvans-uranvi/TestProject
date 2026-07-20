@@ -193,3 +193,58 @@ class TestCsp5PctMap:
         rows = self._rows() + [{"symbol": "RELIANCE", "option_type": "CE", "strike_price": 950.0, "expiry_date": "2026-07-28", "last_price": 999.0}]
         result = fo_service.csp_5pct_map(rows, {"RELIANCE": 1000.0})
         assert result["RELIANCE"]["put_price"] == 25.0  # unaffected by the CE row
+
+
+class TestItmPmcc5PctMap:
+    EXPIRY = "2026-07-28"
+
+    def _rows(self, symbol="RELIANCE"):
+        # spot 1000 -> ITM CE closest to spot (strike < 1000) is 950;
+        # 5% below 950 (902.5) is closest to strike 900.
+        return [
+            {"symbol": symbol, "option_type": "CE", "strike_price": 900.0, "expiry_date": self.EXPIRY, "last_price": 110.0},
+            {"symbol": symbol, "option_type": "CE", "strike_price": 950.0, "expiry_date": self.EXPIRY, "last_price": 60.0},
+            {"symbol": symbol, "option_type": "CE", "strike_price": 1000.0, "expiry_date": self.EXPIRY, "last_price": 20.0},
+            {"symbol": symbol, "option_type": "PE", "strike_price": 900.0, "expiry_date": self.EXPIRY, "last_price": 5.0},
+            {"symbol": symbol, "option_type": "PE", "strike_price": 950.0, "expiry_date": self.EXPIRY, "last_price": 25.0},
+            {"symbol": symbol, "option_type": "PE", "strike_price": 1000.0, "expiry_date": self.EXPIRY, "last_price": 60.0},
+            # a farther expiry that must NOT be used even for the same strikes
+            {"symbol": symbol, "option_type": "CE", "strike_price": 950.0, "expiry_date": "2026-08-25", "last_price": 999.0},
+            {"symbol": symbol, "option_type": "PE", "strike_price": 950.0, "expiry_date": "2026-08-25", "last_price": 999.0},
+        ]
+
+    def test_picks_itm_ce_closest_to_spot(self):
+        result = fo_service.itm_pmcc_5pct_map(self._rows(), {"RELIANCE": 1000.0})
+        assert result["RELIANCE"]["itm_ce_strike"] == 950.0
+
+    def test_picks_ce_strike_nearest_5pct_below_the_itm_ce(self):
+        # 5% below 950 is 902.5 -> nearest available CE strike is 900
+        result = fo_service.itm_pmcc_5pct_map(self._rows(), {"RELIANCE": 1000.0})
+        assert result["RELIANCE"]["otm_ce_strike"] == 900.0
+
+    def test_net_credit_and_percentage(self):
+        # net credit = PE(950) sell 25 + CE(900) sell 110 - CE(950) buy 60 = 75
+        # pct = 75 / 950 * 100
+        result = fo_service.itm_pmcc_5pct_map(self._rows(), {"RELIANCE": 1000.0})
+        assert abs(result["RELIANCE"]["net_credit"] - 75.0) < 1e-9
+        assert abs(result["RELIANCE"]["pmcc_pct"] - (75.0 / 950.0 * 100)) < 1e-9
+
+    def test_restricts_to_nearest_expiry_only(self):
+        # far-expiry legs are priced at 999 -- if they leaked in, net credit
+        # would be wildly different
+        result = fo_service.itm_pmcc_5pct_map(self._rows(), {"RELIANCE": 1000.0})
+        assert abs(result["RELIANCE"]["net_credit"] - 75.0) < 1e-9
+
+    def test_symbol_without_spot_is_excluded(self):
+        result = fo_service.itm_pmcc_5pct_map(self._rows(), {})
+        assert "RELIANCE" not in result
+
+    def test_no_itm_ce_excludes_symbol(self):
+        # spot below every CE strike -> no CE is ITM
+        result = fo_service.itm_pmcc_5pct_map(self._rows(), {"RELIANCE": 850.0})
+        assert "RELIANCE" not in result
+
+    def test_missing_pe_at_itm_strike_excludes_symbol(self):
+        rows = [r for r in self._rows() if not (r["option_type"] == "PE" and r["strike_price"] == 950.0 and r["expiry_date"] == self.EXPIRY)]
+        result = fo_service.itm_pmcc_5pct_map(rows, {"RELIANCE": 1000.0})
+        assert "RELIANCE" not in result

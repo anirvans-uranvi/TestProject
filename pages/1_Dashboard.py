@@ -4,7 +4,6 @@ import pandas as pd
 import streamlit as st
 from postgrest.exceptions import APIError
 
-from src.models.enums import OptionType
 from src.models.user import SavedFilter
 from src.repositories import fetch_log_repo, fo_repo, settings_repo, snapshot_repo
 from src.services import edge_refresh, fo_service
@@ -44,12 +43,13 @@ def _load_last_fo_fetch(_client, _cache_bust: int):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_fo_data(_client, _cache_bust: int):
-    """Every open future (all symbols) + every open PE leg (all symbols) in
-    two bulk queries, for the near-month future / 5% CSP columns. Cached
-    like the screener rows above -- Streamlit reruns this whole script on
-    every widget interaction, and each of these queries is thousands of
-    rows."""
-    return fo_repo.get_all_open_futures(_client), fo_repo.get_all_open_options(_client, OptionType.PE)
+    """Every open future (all symbols) + every open option leg -- both CE
+    and PE, since the 5% ITM PMCC column needs calls for its two CE legs
+    as well as the put -- in two bulk queries, for the near-month future /
+    5% CSP / 5% ITM PMCC columns. Cached like the screener rows above --
+    Streamlit reruns this whole script on every widget interaction, and
+    each of these queries is thousands of rows."""
+    return fo_repo.get_all_open_futures(_client), fo_repo.get_all_open_options(_client)
 
 
 if "dashboard_cache_bust" not in st.session_state:
@@ -151,17 +151,19 @@ df = pd.DataFrame([r.model_dump() for r in rows])
 # pages/5_Options.py.
 # ---------------------------------------------------------------------
 try:
-    futures_rows, put_rows = _load_fo_data(client, st.session_state["dashboard_cache_bust"])
+    futures_rows, option_rows = _load_fo_data(client, st.session_state["dashboard_cache_bust"])
 except APIError:
-    futures_rows, put_rows = [], []
+    futures_rows, option_rows = [], []
 
 near_month = fo_service.near_month_futures_map(futures_rows)
 future_col_label = fo_service.near_month_column_label(near_month)
 spot_by_symbol = dict(zip(df["symbol"], df["latest_price"]))
-csp_map = fo_service.csp_5pct_map(put_rows, spot_by_symbol)
+csp_map = fo_service.csp_5pct_map(option_rows, spot_by_symbol)
+pmcc_map = fo_service.itm_pmcc_5pct_map(option_rows, spot_by_symbol)
 
 df["future_price"] = df["symbol"].map(lambda s: (near_month.get(s) or {}).get("price"))
 df["csp_5pct"] = df["symbol"].map(lambda s: (csp_map.get(s) or {}).get("csp_pct"))
+df["itm_pmcc_5pct"] = df["symbol"].map(lambda s: (pmcc_map.get(s) or {}).get("pmcc_pct"))
 
 # ---------------------------------------------------------------------
 # Sorting -- a single "Sort By" dropdown (+ Descending checkbox) rendered
@@ -398,6 +400,7 @@ for i, (_, r) in enumerate(filtered.iterrows(), start=1):
             "Momentum": pass_fail_icon(r["criterion_b"]),
             future_col_label: format_inr(r["future_price"]) if pd.notna(r["future_price"]) else "N/A",
             "5% CSP": format_pct(r["csp_5pct"], signed=False) if pd.notna(r["csp_5pct"]) else "N/A",
+            "5% ITM PMCC": format_pct(r["itm_pmcc_5pct"], signed=False) if pd.notna(r["itm_pmcc_5pct"]) else "N/A",
             "Dividend yield": f"{format_pct(r['ttm_dividend_yield'], signed=False)} {pass_fail_icon(r['criterion_a'])}",
             "PE": f"{r['pe_ratio']:.1f}" if pd.notna(r["pe_ratio"]) else "N/A",
             "PEG": f"{r['peg_ratio']:.2f} {pass_fail_icon(r['criterion_c'])}" if pd.notna(r["peg_ratio"]) else "N/A",

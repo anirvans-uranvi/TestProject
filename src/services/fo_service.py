@@ -200,3 +200,78 @@ def csp_5pct_map(put_rows: list[dict], spot_by_symbol: dict[str, float | None]) 
         csp_pct = (put_price / strike * 100) if (put_price is not None and strike) else None
         result[symbol] = {"strike": strike, "put_price": put_price, "csp_pct": csp_pct}
     return result
+
+
+def itm_pmcc_5pct_map(option_rows: list[dict], spot_by_symbol: dict[str, float | None]) -> dict[str, dict]:
+    """Pure: for each symbol's CE+PE legs (from
+    `fo_repo.get_all_open_options()`, every symbol/expiry/type mixed
+    together), restricts to that symbol's own nearest available expiry and
+    builds the "5% ITM PMCC" column:
+
+    1. Buy 1 lot of the ITM CE closest to spot (largest strike < spot).
+    2. Sell 1 lot of the PE at that *same* strike.
+    3. Sell 1 lot of the CE whose strike is closest to 95% of the bought
+       CE's strike (a further-ITM call).
+    4. Net credit = PE sell price + CE sell price - CE buy price.
+    5. `pmcc_pct` = net credit / the bought CE's strike * 100.
+
+    As with `csp_5pct_map`, `strike * lot_size` cancels out of both the
+    premiums and this ratio (each leg is 1 lot), so lot size never needs
+    to appear here. Returns `{symbol: {"itm_ce_strike", "otm_ce_strike",
+    "net_credit", "pmcc_pct"}}`; a symbol is omitted if there's no ITM CE,
+    no PE at that strike, or a price is missing for any leg.
+    """
+    by_symbol: dict[str, list[dict]] = {}
+    for r in option_rows:
+        symbol = r.get("symbol")
+        if not symbol:
+            continue
+        by_symbol.setdefault(symbol, []).append(r)
+
+    def _price(r: dict) -> float | None:
+        return _num(r.get("last_price")) or _num(r.get("close")) or _num(r.get("settlement_price"))
+
+    result: dict[str, dict] = {}
+    for symbol, rows in by_symbol.items():
+        spot = spot_by_symbol.get(symbol)
+        if spot is None:
+            continue
+        expiries = {r.get("expiry_date") for r in rows if r.get("expiry_date")}
+        if not expiries:
+            continue
+        near_expiry = min(expiries)
+        near_rows = [r for r in rows if r.get("expiry_date") == near_expiry and r.get("strike_price") is not None]
+        ce_rows = [r for r in near_rows if str(r.get("option_type")) == "CE"]
+        pe_rows = [r for r in near_rows if str(r.get("option_type")) == "PE"]
+        if not ce_rows or not pe_rows:
+            continue
+
+        itm_ce_candidates = [r for r in ce_rows if _num(r["strike_price"]) < spot]
+        if not itm_ce_candidates:
+            continue
+        buy_ce = max(itm_ce_candidates, key=lambda r: _num(r["strike_price"]))
+        itm_strike = _num(buy_ce["strike_price"])
+        buy_ce_price = _price(buy_ce)
+
+        pe_same_strike = [r for r in pe_rows if _num(r["strike_price"]) == itm_strike]
+        if not pe_same_strike:
+            continue
+        sell_pe_price = _price(pe_same_strike[0])
+
+        target = itm_strike * 0.95
+        sell_ce = min(ce_rows, key=lambda r: abs(_num(r["strike_price"]) - target))
+        otm_strike = _num(sell_ce["strike_price"])
+        sell_ce_price = _price(sell_ce)
+
+        if buy_ce_price is None or sell_pe_price is None or sell_ce_price is None or not itm_strike:
+            continue
+
+        net_credit = sell_pe_price + sell_ce_price - buy_ce_price
+        pmcc_pct = net_credit / itm_strike * 100
+        result[symbol] = {
+            "itm_ce_strike": itm_strike,
+            "otm_ce_strike": otm_strike,
+            "net_credit": net_credit,
+            "pmcc_pct": pmcc_pct,
+        }
+    return result
