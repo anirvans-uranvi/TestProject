@@ -165,10 +165,20 @@ df["csp_5pct"] = df["symbol"].map(lambda s: (csp_map.get(s) or {}).get("csp_pct"
 
 # ---------------------------------------------------------------------
 # Sorting -- single source of truth shared by the sidebar "Sort by"
-# controls and the screener table's clickable column headers, so the two
-# can never disagree about what's currently sorted. Column labels here
-# match the table's rendered headers exactly (built from this same list),
-# excluding "#" (row number -- sorting by it is a no-op).
+# controls and the native sort-button row rendered next to the table
+# (see below), so the two can never disagree about what's currently
+# sorted. Column labels here match the table's rendered headers exactly
+# (built from this same list), excluding "#" (row number -- sorting by
+# it is a no-op).
+#
+# `dashboard_sort_label`/`dashboard_sort_desc` are plain session_state
+# entries, deliberately never bound as a widget's `key=` -- the sidebar
+# widgets below write to them manually after being read, and the
+# sort-button row (near the table) also writes to them directly from a
+# button's on_click branch. Both would raise
+# `StreamlitAPIException: ... cannot be modified after the widget ... is
+# instantiated` if either widget owned these keys directly, since the
+# button row runs later in the same script pass as the sidebar widgets.
 # ---------------------------------------------------------------------
 SORT_COLUMNS: list[tuple[str, str]] = [
     ("Stock", "symbol"),
@@ -185,23 +195,13 @@ SORT_COLUMNS: list[tuple[str, str]] = [
     ("PE", "pe_ratio"),
     ("PEG", "peg_ratio"),
 ]
+SORT_LABELS = [label for label, _ in SORT_COLUMNS]
 SORT_LABEL_TO_KEY = dict(SORT_COLUMNS)
-SORT_KEY_TO_LABEL = {key: label for label, key in SORT_COLUMNS}
 
 if "dashboard_sort_label" not in st.session_state:
     st.session_state["dashboard_sort_label"] = "Stock"
 if "dashboard_sort_desc" not in st.session_state:
     st.session_state["dashboard_sort_desc"] = False
-
-# A header click lands here as a normal `?sort=...&dir=...` navigation
-# (see render_screener_table's docstring) -- apply it to the shared sort
-# state, then clear the query string so it doesn't keep re-forcing this
-# sort on every later rerun (e.g. changing an unrelated filter).
-_clicked_sort_key = st.query_params.get("sort")
-if _clicked_sort_key in SORT_KEY_TO_LABEL:
-    st.session_state["dashboard_sort_label"] = SORT_KEY_TO_LABEL[_clicked_sort_key]
-    st.session_state["dashboard_sort_desc"] = st.query_params.get("dir") == "desc"
-    st.query_params.clear()
 
 # ---------------------------------------------------------------------
 # Metric cards (also usable as quick filters via session_state)
@@ -284,8 +284,10 @@ with st.sidebar:
 
     complete_only = st.checkbox("Complete data only (hide Unavailable)")
 
-    sort_col = st.selectbox("Sort by", [label for label, _ in SORT_COLUMNS], key="dashboard_sort_label")
-    sort_desc = st.checkbox("Descending", key="dashboard_sort_desc")
+    sort_col = st.selectbox("Sort by", SORT_LABELS, index=SORT_LABELS.index(st.session_state["dashboard_sort_label"]))
+    sort_desc = st.checkbox("Descending", value=st.session_state["dashboard_sort_desc"])
+    st.session_state["dashboard_sort_label"] = sort_col
+    st.session_state["dashboard_sort_desc"] = sort_desc
 
     st.divider()
     st.subheader("Saved filter presets")
@@ -412,6 +414,29 @@ table_df = pd.DataFrame(display_rows)
 if table_df.empty:
     st.info("No stocks match your current filters. Try loosening the sidebar filters (e.g. minimum dividend yield/PEG) or confirm screener data has been seeded/refreshed.")
 else:
+    # Native buttons, not literal clickable <th> headers -- see
+    # render_screener_table's docstring for why a real link can't be used
+    # here without logging the user out. First click on a column sorts it
+    # ascending; clicking the already-active column toggles direction;
+    # clicking any other column switches to it ascending. This is the
+    # same session_state pair the sidebar "Sort by" controls read/write,
+    # so the two always agree on the current sort.
+    st.caption("Sort by (click a column again to reverse):")
+    _SORT_BUTTON_ROW_SIZE = 5
+    for _row_start in range(0, len(SORT_COLUMNS), _SORT_BUTTON_ROW_SIZE):
+        _row_cols = st.columns(min(_SORT_BUTTON_ROW_SIZE, len(SORT_COLUMNS) - _row_start))
+        for _btn_col, (_label, _key) in zip(_row_cols, SORT_COLUMNS[_row_start : _row_start + _SORT_BUTTON_ROW_SIZE]):
+            with _btn_col:
+                _is_active = _label == sort_col
+                _arrow = (" ▼" if sort_desc else " ▲") if _is_active else ""
+                if st.button(f"{_label}{_arrow}", key=f"sort_btn_{_key}", use_container_width=True):
+                    if _is_active:
+                        st.session_state["dashboard_sort_desc"] = not sort_desc
+                    else:
+                        st.session_state["dashboard_sort_label"] = _label
+                        st.session_state["dashboard_sort_desc"] = False
+                    st.rerun()
+
     st.markdown(
         render_screener_table(
             display_rows,

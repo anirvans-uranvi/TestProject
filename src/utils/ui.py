@@ -319,24 +319,17 @@ def render_screener_table(
     net even at wider sizes.
 
     `sortable_columns` maps a column label to the underlying sort key the
-    caller understands (e.g. {"Latest price": "latest_price"}); columns
-    not in this dict render as plain headers. Clicking a sortable header
-    is a plain `<a href="?sort=...&dir=...">` link -- no JS bridge exists
-    between this hand-rendered HTML and Python, so the click is carried as
-    a normal query-string navigation, which the caller reads back via
-    `st.query_params` on the next run. The target direction is baked into
-    the href at render time (ascending on a first click, otherwise the
-    opposite of whatever's currently active) so the caller doesn't need
-    any click-side toggle logic, just to apply the href's own sort/dir.
-    `target="_self"` is required: Streamlit's markdown renderer forces
-    `target="_blank"` on any `<a>` with no explicit target (opening a
-    fresh, logged-out tab instead of sorting in place). `target="_top"`
-    was tried first and is wrong for the opposite reason -- Streamlit
-    Community Cloud serves the app inside its own wrapper iframe, and
-    "_top" breaks out to that wrapper's URL, which doesn't forward the
-    sort/dir query string back into the app. "_self" always means "the
-    frame that already holds this link" -- correct whether or not that
-    frame happens to be the browser's actual top window.
+    caller understands, purely to decide which header gets the ▲/▼ arrow
+    for `active_sort_key`/`sort_desc` -- headers are NOT clickable links.
+    An `<a href="?sort=...">` was tried and reverted: this table is
+    hand-rendered HTML with no JS bridge back to Python, so a click would
+    have to be a real browser navigation -- but this app deliberately
+    keeps the Supabase auth session only in `st.session_state` (never a
+    cookie/localStorage, see session.py's docstring), so any real
+    navigation starts a brand-new, logged-out session. The actual sort
+    interaction is native `st.button()`s rendered next to this table
+    (Dashboard's sort-button row), which stay on the same WebSocket
+    session; this function just mirrors their state visually.
     """
     c = _table_theme_classes(theme)
     if not rows:
@@ -347,19 +340,11 @@ def render_screener_table(
 
     def _header_cell(col: str) -> str:
         key = sortable_columns.get(col)
-        if key is None:
-            return (
-                f'<th class="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide '
-                f'whitespace-nowrap border-b {c["wrapper_border"]}">{col}</th>'
-            )
-        is_active = key == active_sort_key
-        next_dir = "desc" if (is_active and not sort_desc) else "asc"
+        is_active = key is not None and key == active_sort_key
         arrow = (" ▼" if sort_desc else " ▲") if is_active else ""
         return (
             f'<th class="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide '
-            f'whitespace-nowrap border-b {c["wrapper_border"]}">'
-            f'<a href="?sort={key}&dir={next_dir}" target="_self" class="hover:underline cursor-pointer" '
-            f'style="color:inherit;text-decoration:none;">{col}{arrow}</a></th>'
+            f'whitespace-nowrap border-b {c["wrapper_border"]}">{col}{arrow}</th>'
         )
 
     header_cells = "".join(_header_cell(col) for col in columns)
