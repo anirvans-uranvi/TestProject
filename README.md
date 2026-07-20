@@ -451,8 +451,12 @@ docker compose up               # + the APScheduler refresh daemon
   inflated one stock's TTM dividend yield roughly 27x (1.13% shown vs.
   ~0.04% actual) until it was found and deleted. Before trusting numbers
   on a project that has ever run `seed_mock_data.py` and later switched
-  providers, delete rows where `source = 'mock'` from both tables, then
-  re-run `run_refresh.py --mode=screener`.
+  providers, run `python scripts/cleanup_mock_data.py` (dry run -- prints
+  counts of `source = 'mock'` rows in `price_history`,
+  `fundamental_snapshots`, and `dividend_events`, deletes nothing) then
+  `python scripts/cleanup_mock_data.py --confirm` to actually delete them,
+  followed by `run_refresh.py --mode=screener` to recompute
+  `daily_screener_snapshots` from the now-clean inputs.
 - **`yfinance` is an unofficial Yahoo Finance client, not a licensed
   feed.** It wraps Yahoo's internal JSON API rather than scraping HTML,
   and is a stable, widely-used library, but Yahoo's terms restrict

@@ -121,6 +121,7 @@ scripts/
   seed_mock_data.py                Backfill synthetic prices/fundamentals/dividends/snapshots + mock F&O (local dev)
   import_screener_csv.py           Import a screener.in CSV export as fundamentals data
   fetch_fo_data.py                  Backfill NSE F&O bhavcopy (futures + options) into Supabase (--days 60)
+  cleanup_mock_data.py               Delete leftover source='mock' rows (dry-run by default, --confirm to delete)
   run_refresh.py                    CLI entrypoint for cron/GitHub Actions/APScheduler
 supabase/
   migrations/                      Schema, RLS policies, views/functions, in numbered order
