@@ -164,6 +164,10 @@ Deno.serve(async (req: Request) => {
   }
 
   if (latestLoaded !== null && found.isoDate <= latestLoaded) {
+    // Still a successful refresh -- we reached NSE and confirmed there's
+    // nothing newer -- so it should count for the Dashboard's "Last F&O
+    // refresh" timestamp, not just runs that ingested new rows.
+    await logFetch(serviceClient, startedAt, new Date(), "success", null);
     return jsonResponse({
       updated: false,
       message: `Already up to date -- latest NSE bhavcopy (${found.isoDate}) is not newer than what's loaded (${latestLoaded}).`,
