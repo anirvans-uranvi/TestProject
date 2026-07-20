@@ -97,6 +97,48 @@ def get_open_futures(client: Client, symbol: str) -> list[dict]:
     return resp.data or []
 
 
+def _paginate(query_builder, page_size: int = 1000) -> list[dict]:
+    """Runs `query_builder` (a callable that returns a fresh query for a
+    given offset) across all pages. PostgREST caps a single response at a
+    server-configured max (commonly 1000 rows) regardless of how many rows
+    actually match -- a call site that expects "every row" and doesn't
+    paginate silently gets truncated with no error, which is exactly what
+    happened here: get_all_open_options() returned precisely 1000 rows for
+    what should have been ~4,500+ PE legs, and whichever symbols fell
+    outside that window (most of the universe, including RELIANCE/TCS/
+    HDFCBANK) were silently missing -- not "no data", just gone."""
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page = query_builder().range(offset, offset + page_size - 1).execute().data or []
+        rows.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+    return rows
+
+
+def get_all_open_futures(client: Client) -> list[dict]:
+    """Every open futures contract across every symbol -- one (paginated)
+    query for the whole universe, used by the Dashboard's near-month
+    future price column rather than 50 separate per-symbol calls."""
+    return _paginate(lambda: client.table("latest_futures_view").select("*"))
+
+
+def get_all_open_options(client: Client, option_type: OptionType | None = None) -> list[dict]:
+    """Every open option leg across every symbol/expiry/strike, optionally
+    filtered to one option_type -- used by the Dashboard's 5% CSP column
+    (only needs PE legs, roughly halving the rows fetched). Paginated --
+    see _paginate()'s docstring for the real bug this fixes."""
+    def _query():
+        q = client.table("latest_option_chain_view").select("*")
+        if option_type is not None:
+            q = q.eq("option_type", option_type.value)
+        return q
+
+    return _paginate(_query)
+
+
 def get_futures_daily(
     client: Client, symbol: str, expiry_date: date, from_date: date, to_date: date
 ) -> list[FuturesDailyPrice]:

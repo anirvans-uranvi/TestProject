@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+from postgrest.exceptions import APIError
 
+from src.models.enums import OptionType
 from src.models.user import SavedFilter
-from src.repositories import fetch_log_repo, settings_repo, snapshot_repo
-from src.services import edge_refresh
+from src.repositories import fetch_log_repo, fo_repo, settings_repo, snapshot_repo
+from src.services import edge_refresh, fo_service
 from src.services.market_calendar import get_market_state
 from src.services.threshold_override import apply_user_thresholds
 from src.utils.formatting import direction_arrow, format_inr, format_pct, pass_fail_icon
@@ -33,6 +35,16 @@ def _load_last_fetch(_client, _cache_bust: int):
     # entry -- included so the header reflects it, not just the cron
     # path's per-mode "intraday_price" entries.
     return fetch_log_repo.get_last_successful_fetch(_client, ["intraday_price", "all"])
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_fo_data(_client, _cache_bust: int):
+    """Every open future (all symbols) + every open PE leg (all symbols) in
+    two bulk queries, for the near-month future / 5% CSP columns. Cached
+    like the screener rows above -- Streamlit reruns this whole script on
+    every widget interaction, and each of these queries is thousands of
+    rows."""
+    return fo_repo.get_all_open_futures(_client), fo_repo.get_all_open_options(_client, OptionType.PE)
 
 
 if "dashboard_cache_bust" not in st.session_state:
@@ -124,6 +136,26 @@ if not rows:
 df = pd.DataFrame([r.model_dump() for r in rows])
 
 # ---------------------------------------------------------------------
+# F&O-derived columns (near-month future price, 5% CSP) -- a separate data
+# source from latest_screener_view (the F&O tables), joined in by symbol.
+# Degrades to "N/A" for both columns, not a crash, if migration 0007 /
+# F&O data hasn't been loaded yet -- same APIError-catching pattern as
+# pages/5_Options.py.
+# ---------------------------------------------------------------------
+try:
+    futures_rows, put_rows = _load_fo_data(client, st.session_state["dashboard_cache_bust"])
+except APIError:
+    futures_rows, put_rows = [], []
+
+near_month = fo_service.near_month_futures_map(futures_rows)
+future_col_label = fo_service.near_month_column_label(near_month)
+spot_by_symbol = dict(zip(df["symbol"], df["latest_price"]))
+csp_map = fo_service.csp_5pct_map(put_rows, spot_by_symbol)
+
+df["future_price"] = df["symbol"].map(lambda s: (near_month.get(s) or {}).get("price"))
+df["csp_5pct"] = df["symbol"].map(lambda s: (csp_map.get(s) or {}).get("csp_pct"))
+
+# ---------------------------------------------------------------------
 # Metric cards (also usable as quick filters via session_state)
 # ---------------------------------------------------------------------
 ALL_STATUSES = ["Green", "Amber", "Red", "Unavailable"]
@@ -206,7 +238,7 @@ with st.sidebar:
 
     sort_col = st.selectbox(
         "Sort by",
-        ["Stock", "Status", "Latest price", "1D return", "5D return", "20D return", "Dividend yield", "PEG"],
+        ["Stock", "Status", "Latest price", future_col_label, "5% CSP", "1D return", "5D return", "20D return", "Dividend yield", "PEG"],
         index=0,
     )
     sort_desc = st.checkbox("Descending", value=False)
@@ -290,6 +322,8 @@ sort_map = {
     "Latest price": "latest_price",
     "52W High": "week_52_high",
     "52W Low": "week_52_low",
+    future_col_label: "future_price",
+    "5% CSP": "csp_5pct",
     "1D return": "return_1d",
     "5D return": "return_5d",
     "20D return": "return_20d",
@@ -335,6 +369,8 @@ for i, (_, r) in enumerate(filtered.iterrows(), start=1):
             "5D": f"{direction_arrow(r['return_5d'])} {format_pct(r['return_5d'])}",
             "20D": f"{direction_arrow(r['return_20d'])} {format_pct(r['return_20d'])}",
             "Momentum": pass_fail_icon(r["criterion_b"]),
+            future_col_label: format_inr(r["future_price"]) if pd.notna(r["future_price"]) else "N/A",
+            "5% CSP": format_pct(r["csp_5pct"], signed=False) if pd.notna(r["csp_5pct"]) else "N/A",
             "Dividend yield": f"{format_pct(r['ttm_dividend_yield'], signed=False)} {pass_fail_icon(r['criterion_a'])}",
             "PE": f"{r['pe_ratio']:.1f}" if pd.notna(r["pe_ratio"]) else "N/A",
             "PEG": f"{r['peg_ratio']:.2f} {pass_fail_icon(r['criterion_c'])}" if pd.notna(r["peg_ratio"]) else "N/A",

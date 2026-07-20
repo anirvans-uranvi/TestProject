@@ -124,3 +124,72 @@ class TestFuturesTermStructure:
         assert [r["expiry_date"] for r in term] == ["2026-07-28", "2026-08-25"]
         assert term[0]["basis"] == 2.0  # 102 - 100
         assert term[1]["basis"] == 5.0  # 105 - 100
+
+
+class TestNearMonthFuturesMap:
+    def test_picks_earliest_expiry_per_symbol(self):
+        rows = [
+            {"symbol": "RELIANCE", "expiry_date": "2026-08-25", "last_price": 1330.0},
+            {"symbol": "RELIANCE", "expiry_date": "2026-07-28", "last_price": 1300.0},
+            {"symbol": "TCS", "expiry_date": "2026-07-28", "last_price": 3800.0},
+        ]
+        result = fo_service.near_month_futures_map(rows)
+        assert result["RELIANCE"] == {"expiry_date": "2026-07-28", "price": 1300.0}
+        assert result["TCS"] == {"expiry_date": "2026-07-28", "price": 3800.0}
+
+    def test_price_fallback_last_then_close_then_settlement(self):
+        rows = [{"symbol": "RELIANCE", "expiry_date": "2026-07-28", "last_price": None, "close": None, "settlement_price": 1299.1}]
+        assert fo_service.near_month_futures_map(rows)["RELIANCE"]["price"] == 1299.1
+
+    def test_rows_missing_symbol_or_expiry_are_skipped(self):
+        rows = [{"symbol": None, "expiry_date": "2026-07-28", "last_price": 100.0}, {"symbol": "X", "expiry_date": None, "last_price": 100.0}]
+        assert fo_service.near_month_futures_map(rows) == {}
+
+
+class TestNearMonthColumnLabel:
+    def test_label_from_most_common_expiry_month(self):
+        near_month = {
+            "RELIANCE": {"expiry_date": "2026-07-28", "price": 1300.0},
+            "TCS": {"expiry_date": "2026-07-28", "price": 3800.0},
+            "HDFCBANK": {"expiry_date": "2026-08-25", "price": 800.0},  # a rare outlier
+        }
+        assert fo_service.near_month_column_label(near_month) == "Jul Future"
+
+    def test_empty_map_returns_generic_label(self):
+        assert fo_service.near_month_column_label({}) == "Future"
+
+
+class TestCsp5PctMap:
+    def _rows(self):
+        return [
+            {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 900.0, "expiry_date": "2026-07-28", "last_price": 5.0},
+            {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 950.0, "expiry_date": "2026-07-28", "last_price": 25.0},
+            {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 1000.0, "expiry_date": "2026-07-28", "last_price": 60.0},
+            # a farther expiry that must NOT be used even though it's closer in strike terms
+            {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 950.0, "expiry_date": "2026-08-25", "last_price": 40.0},
+        ]
+
+    def test_finds_strike_nearest_5pct_below_spot(self):
+        # spot 1000 -> target 950 -> strike 950 is an exact match
+        result = fo_service.csp_5pct_map(self._rows(), {"RELIANCE": 1000.0})
+        assert result["RELIANCE"]["strike"] == 950.0
+
+    def test_computes_premium_over_strike_percentage(self):
+        result = fo_service.csp_5pct_map(self._rows(), {"RELIANCE": 1000.0})
+        assert abs(result["RELIANCE"]["put_price"] - 25.0) < 1e-9
+        assert abs(result["RELIANCE"]["csp_pct"] - (25.0 / 950.0 * 100)) < 1e-9
+
+    def test_restricts_to_nearest_expiry_only(self):
+        # the near (July) expiry's 950 strike (premium 25) must win, not the
+        # farther (August) expiry's 950 strike (premium 40)
+        result = fo_service.csp_5pct_map(self._rows(), {"RELIANCE": 1000.0})
+        assert result["RELIANCE"]["put_price"] == 25.0
+
+    def test_symbol_without_spot_is_excluded(self):
+        result = fo_service.csp_5pct_map(self._rows(), {})
+        assert "RELIANCE" not in result
+
+    def test_ce_rows_are_ignored_even_if_mixed_in(self):
+        rows = self._rows() + [{"symbol": "RELIANCE", "option_type": "CE", "strike_price": 950.0, "expiry_date": "2026-07-28", "last_price": 999.0}]
+        result = fo_service.csp_5pct_map(rows, {"RELIANCE": 1000.0})
+        assert result["RELIANCE"]["put_price"] == 25.0  # unaffected by the CE row

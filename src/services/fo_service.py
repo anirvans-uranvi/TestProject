@@ -7,6 +7,7 @@ screen renders, so they're unit-testable without Streamlit or a live DB.
 """
 from __future__ import annotations
 
+from collections import Counter
 from datetime import date
 
 from supabase import Client
@@ -120,3 +121,82 @@ def futures_term_structure(futures_rows: list[dict]) -> list[dict]:
             }
         )
     return shaped
+
+
+def near_month_futures_map(futures_rows: list[dict]) -> dict[str, dict]:
+    """Pure: groups open-futures rows (from `fo_repo.get_all_open_futures`,
+    every symbol/expiry mixed together) by symbol, keeping only each
+    symbol's nearest (earliest) expiry -- the "near month" contract used
+    for the Dashboard's near-month future price column. Returns
+    `{symbol: {"expiry_date": ..., "price": ...}}`."""
+    best: dict[str, dict] = {}
+    for r in futures_rows:
+        symbol = r.get("symbol")
+        expiry = r.get("expiry_date")
+        if not symbol or not expiry:
+            continue
+        if symbol not in best or expiry < best[symbol]["expiry_date"]:
+            price = _num(r.get("last_price")) or _num(r.get("close")) or _num(r.get("settlement_price"))
+            best[symbol] = {"expiry_date": expiry, "price": price}
+    return best
+
+
+def near_month_column_label(near_month_map: dict[str, dict]) -> str:
+    """The Dashboard's near-month future column header, e.g. "Jul Future".
+    NSE's monthly F&O cycle means every symbol's near-month expiry is
+    normally the same calendar month, so the most common expiry across the
+    map stands in for the whole column (falls back to a generic "Future"
+    if no F&O data is loaded at all)."""
+    expiries = [v["expiry_date"] for v in near_month_map.values() if v.get("expiry_date")]
+    if not expiries:
+        return "Future"
+    most_common = Counter(expiries).most_common(1)[0][0]
+    d = most_common if isinstance(most_common, date) else date.fromisoformat(str(most_common)[:10])
+    return f"{d.strftime('%b')} Future"
+
+
+def csp_5pct_map(put_rows: list[dict], spot_by_symbol: dict[str, float | None]) -> dict[str, dict]:
+    """Pure: for each symbol's PE legs (from
+    `fo_repo.get_all_open_options(OptionType.PE)`, every symbol/expiry
+    mixed together), restricts to that symbol's own nearest available
+    expiry, finds the strike closest to 95% of spot, and returns
+    `{symbol: {"strike": ..., "put_price": ..., "csp_pct": ...}}`.
+
+    "5% CSP" is a cash-secured-put yield: the premium for the strike
+    nearest 5% below spot, as a percentage of that strike (the full
+    notional a CSP seller sets aside per lot) -- i.e. `put_price / strike *
+    100`. Deliberately NOT divided by exchange margin: SPAN margin isn't
+    available from NSE as a simple published per-contract figure (it's a
+    licensed multi-scenario risk calculation, not a downloadable
+    percentage) -- see docs/CODEBASE_GUIDE.md's F&O section for the
+    research trail. `strike * lot_size` cancels out of both the premium
+    and this ratio, so lot size doesn't need to appear here at all.
+    """
+    by_symbol: dict[str, list[dict]] = {}
+    for r in put_rows:
+        if str(r.get("option_type")) != "PE":
+            continue
+        symbol = r.get("symbol")
+        if not symbol:
+            continue
+        by_symbol.setdefault(symbol, []).append(r)
+
+    result: dict[str, dict] = {}
+    for symbol, rows in by_symbol.items():
+        spot = spot_by_symbol.get(symbol)
+        if spot is None:
+            continue
+        expiries = {r.get("expiry_date") for r in rows if r.get("expiry_date")}
+        if not expiries:
+            continue
+        near_expiry = min(expiries)
+        near_rows = [r for r in rows if r.get("expiry_date") == near_expiry and r.get("strike_price") is not None]
+        if not near_rows:
+            continue
+        target = spot * 0.95
+        best_row = min(near_rows, key=lambda r: abs(_num(r["strike_price"]) - target))
+        strike = _num(best_row["strike_price"])
+        put_price = _num(best_row.get("last_price")) or _num(best_row.get("close")) or _num(best_row.get("settlement_price"))
+        csp_pct = (put_price / strike * 100) if (put_price is not None and strike) else None
+        result[symbol] = {"strike": strike, "put_price": put_price, "csp_pct": csp_pct}
+    return result
