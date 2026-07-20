@@ -12,8 +12,22 @@
 // Edge Runtime, so no third-party dependency is needed for a format this
 // constrained (one file, standard DEFLATE).
 
-const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+// Matches src/data_providers/nse_fo_provider.py's _BROWSER_HEADERS exactly
+// -- the Python version (confirmed working live, run from a normal dev
+// machine) sends Accept/Accept-Language alongside User-Agent; this
+// TypeScript port originally sent User-Agent only, and NSE's bot-detection
+// treated requests from Supabase's Edge Runtime infrastructure (a
+// different network origin than a dev machine) as suspicious enough to
+// serve an HTML challenge/block page instead of the real zip -- which
+// then failed zip parsing with a confusing "not a valid zip" error rather
+// than a clear "you got blocked" one. Matching Python's header set is a
+// low-risk fix; the content-type/snippet check below is the real
+// safety net that makes the next failure (if any) self-diagnosing.
+const REQUEST_HEADERS: Record<string, string> = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+  "Accept": "*/*",
+  "Accept-Language": "en-US,en;q=0.9",
+};
 const SOURCE_NAME = "nse_fo_bhavcopy_edge";
 
 const EOCD_SIGNATURE = 0x06054b50;
@@ -85,18 +99,53 @@ function isoDateMinusDays(isoDate: string, days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+export function looksLikeZipContentType(contentType: string | null): boolean {
+  if (!contentType) return true; // NSE doesn't always set one; don't reject on absence alone
+  const ct = contentType.toLowerCase();
+  return ct.includes("zip") || ct.includes("octet-stream") || ct.includes("binary");
+}
+
 /** Downloads + unzips one day's bhavcopy. Null on a 404 (weekend/holiday/
  * not yet published) or an implausibly small response (NSE occasionally
  * serves a small HTML/PDF error body with a 200), so callers can walk
- * back to the previous trading day. */
+ * back to the previous trading day.
+ *
+ * Throws a diagnostic error (status, content-type, byte length, and a
+ * text snippet of the body) rather than a bare "not a valid zip" when the
+ * response clearly isn't one -- NSE's bot-detection can serve an HTML
+ * challenge/block page with a 200 status to requests it doesn't like
+ * (confirmed: this happened for this exact function's Edge Runtime
+ * origin even though the identical request worked fine from a normal dev
+ * machine), and a bare zip-parse failure gives no way to tell that apart
+ * from a genuinely corrupt download. */
 export async function fetchBhavcopyText(isoDate: string): Promise<string | null> {
-  const resp = await fetch(bhavcopyUrl(isoDate), { headers: { "User-Agent": USER_AGENT } });
+  const resp = await fetch(bhavcopyUrl(isoDate), { headers: REQUEST_HEADERS });
   if (resp.status === 404) return null;
   if (!resp.ok) throw new Error(`bhavcopy fetch failed for ${isoDate}: HTTP ${resp.status}`);
+
+  const contentType = resp.headers.get("content-type");
   const buf = new Uint8Array(await resp.arrayBuffer());
   if (buf.length < 1000) return null;
-  const csvBytes = await extractFirstZipEntry(buf);
-  return new TextDecoder("utf-8").decode(csvBytes);
+
+  if (!looksLikeZipContentType(contentType)) {
+    const snippet = new TextDecoder("utf-8", { fatal: false }).decode(buf.slice(0, 200)).replace(/\s+/g, " ").trim();
+    throw new Error(
+      `NSE did not return a zip file for ${isoDate} (likely blocked the request) -- ` +
+        `HTTP ${resp.status}, content-type "${contentType}", ${buf.length} bytes. Body starts: "${snippet}"`,
+    );
+  }
+
+  try {
+    const csvBytes = await extractFirstZipEntry(buf);
+    return new TextDecoder("utf-8").decode(csvBytes);
+  } catch (err) {
+    const snippet = new TextDecoder("utf-8", { fatal: false }).decode(buf.slice(0, 200)).replace(/\s+/g, " ").trim();
+    const cause = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Failed to unzip bhavcopy for ${isoDate}: ${cause} -- ` +
+        `HTTP ${resp.status}, content-type "${contentType}", ${buf.length} bytes. Body starts: "${snippet}"`,
+    );
+  }
 }
 
 export interface FoundBhavcopy {

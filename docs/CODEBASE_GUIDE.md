@@ -594,6 +594,31 @@ maybe-ingest, not an unconditional refresh:
   NSE bhavcopy** (not just the synthetic fixture) during development,
   confirming it correctly extracted and parsed all 50 symbols' futures and
   options from an actual current-day file before being considered done.
+
+  **A real bug hit in production, worth understanding if this fails
+  again**: the very first deploy failed with `"Could not reach NSE: Not a
+  valid zip file (End Of Central Directory record not found)"`, even
+  though the identical URL/logic had just been verified working from a
+  normal dev machine. Root cause: `fetchBhavcopyText`'s original request
+  sent only a `User-Agent` header, while the working Python provider
+  (`nse_fo_provider.py::_BROWSER_HEADERS`) also sends `Accept` and
+  `Accept-Language` — and NSE's bot-detection served a 200-status HTML
+  challenge/block page (not the zip) to requests from Supabase's Edge
+  Runtime network origin, which is a different source than a dev
+  machine's. The thin header set made this function look more
+  bot-like, and the (still-passing) `buf.length < 1000` size guard didn't
+  catch it since a full HTML page is easily over 1000 bytes — so it fell
+  through to `extractFirstZipEntry`, which correctly failed on genuinely-
+  not-zip bytes but with no way to tell "blocked" from "corrupted
+  download". Fixed two ways: (1) `REQUEST_HEADERS` now matches Python's
+  header set exactly; (2) defense in depth — `fetchBhavcopyText` checks
+  the response's `content-type` via `looksLikeZipContentType()` (confirmed
+  live: a real bhavcopy is `application/zip`) *before* attempting to parse
+  it, and on either a bad content-type or a zip-parse failure, throws an
+  error that includes the HTTP status, content-type, byte length, and a
+  text snippet of the actual body — so a future failure is
+  self-diagnosing from the Streamlit page's error message alone, without
+  needing `supabase functions logs`.
 - **`index.ts`** — same auth/cooldown pattern as `manual-refresh/index.ts`
   (`provider_name = 'fo_edge'`, `fetch_type = 'fo'` — added to
   `provider_fetch_log`'s CHECK constraint by

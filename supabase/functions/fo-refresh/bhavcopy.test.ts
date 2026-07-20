@@ -1,7 +1,7 @@
 // Tests for bhavcopy.ts's zip reader + CSV parser. Run with:
 //   deno test supabase/functions/fo-refresh/bhavcopy.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { bhavcopyUrl, extractFirstZipEntry, parseFoBhavcopy } from "./bhavcopy.ts";
+import { bhavcopyUrl, extractFirstZipEntry, looksLikeZipContentType, parseFoBhavcopy } from "./bhavcopy.ts";
 
 // --- zip reader --------------------------------------------------------
 
@@ -120,6 +120,31 @@ async function assertRejects(fn: () => Promise<unknown>): Promise<void> {
   }
   assert(threw, "expected the promise to reject");
 }
+
+// --- bot-block detection (real bug this fixed: NSE served an HTML
+// challenge page with a 200 status to this function's Edge Runtime
+// origin, which then failed zip parsing with a confusing error) --------
+
+Deno.test("looksLikeZipContentType - accepts real NSE bhavcopy content-type (confirmed live: application/zip)", () => {
+  assert(looksLikeZipContentType("application/zip"));
+});
+
+Deno.test("looksLikeZipContentType - accepts octet-stream and binary variants", () => {
+  assert(looksLikeZipContentType("application/octet-stream"));
+  assert(looksLikeZipContentType("binary/octet-stream; charset=binary"));
+});
+
+Deno.test("looksLikeZipContentType - rejects an HTML block/challenge page", () => {
+  assertEquals(looksLikeZipContentType("text/html;charset=UTF-8"), false);
+});
+
+Deno.test("looksLikeZipContentType - rejects plain text", () => {
+  assertEquals(looksLikeZipContentType("text/plain"), false);
+});
+
+Deno.test("looksLikeZipContentType - does not reject on a missing content-type (NSE doesn't always set one)", () => {
+  assert(looksLikeZipContentType(null));
+});
 
 // --- URL building --------------------------------------------------------
 
