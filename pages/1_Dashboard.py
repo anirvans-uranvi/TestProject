@@ -38,6 +38,11 @@ def _load_last_fetch(_client, _cache_bust: int):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
+def _load_last_fo_fetch(_client, _cache_bust: int):
+    return fetch_log_repo.get_last_successful_fetch(_client, "fo")
+
+
+@st.cache_data(ttl=60, show_spinner=False)
 def _load_fo_data(_client, _cache_bust: int):
     """Every open future (all symbols) + every open PE leg (all symbols) in
     two bulk queries, for the near-month future / 5% CSP columns. Cached
@@ -55,13 +60,16 @@ st.title("📈 Nifty 50 Momentum & Dividend Screener")
 header_col1, header_col2, header_col3, header_col4 = st.columns([2, 1, 1, 1])
 last_fetch = _load_last_fetch(client, st.session_state["dashboard_cache_bust"])
 last_fetch_at = last_fetch.finished_at if last_fetch else None
+last_fo_fetch = _load_last_fo_fetch(client, st.session_state["dashboard_cache_bust"])
+last_fo_fetch_at = last_fo_fetch.finished_at if last_fo_fetch else None
 market_state = get_market_state(
     now=now_ist(),
     last_successful_fetch_at=last_fetch_at,
     stale_threshold_minutes=user_settings.stale_data_threshold_minutes,
 )
 with header_col1:
-    st.markdown(f"**Last refresh:** {format_ist(last_fetch_at)}")
+    st.markdown(f"**Last stock refresh:** {format_ist(last_fetch_at)}")
+    st.markdown(f"**Last F&O refresh:** {format_ist(last_fo_fetch_at)}")
     st.markdown(f"**Market state:** {market_state_label(market_state)}")
 with header_col2:
     if last_fetch_at is None:
