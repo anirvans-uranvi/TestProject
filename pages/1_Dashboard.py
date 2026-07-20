@@ -40,7 +40,7 @@ if "dashboard_cache_bust" not in st.session_state:
 
 st.title("📈 Nifty 50 Momentum & Dividend Screener")
 
-header_col1, header_col2, header_col3 = st.columns([2, 1, 1])
+header_col1, header_col2, header_col3, header_col4 = st.columns([2, 1, 1, 1])
 last_fetch = _load_last_fetch(client, st.session_state["dashboard_cache_bust"])
 last_fetch_at = last_fetch.finished_at if last_fetch else None
 market_state = get_market_state(
@@ -58,7 +58,7 @@ with header_col2:
         age_min = (now_ist() - last_fetch_at.astimezone(now_ist().tzinfo)).total_seconds() / 60
         st.markdown(f"**Data freshness:** {age_min:.0f} min ago")
 with header_col3:
-    if st.button("🔄 Manual refresh", use_container_width=True):
+    if st.button("🔄 Stock Data Refresh", use_container_width=True):
         with st.spinner("Refreshing live data from Yahoo Finance -- this can take up to a minute..."):
             try:
                 summary = edge_refresh.trigger_manual_refresh(st.session_state["sb_access_token"])
@@ -69,8 +69,18 @@ with header_col3:
         st.session_state["dashboard_cache_bust"] += 1
         st.cache_data.clear()
         st.rerun()
+with header_col4:
+    if st.button("📊 F&O Data Refresh", use_container_width=True):
+        with st.spinner("Checking NSE for a newer F&O bhavcopy -- this can take up to a minute..."):
+            try:
+                fo_summary = edge_refresh.trigger_fo_refresh(st.session_state["sb_access_token"])
+            except edge_refresh.ManualRefreshError as exc:
+                st.session_state["last_fo_refresh_summary"] = {"error": str(exc)}
+            else:
+                st.session_state["last_fo_refresh_summary"] = fo_summary
+        st.rerun()
 
-# Shown once, right after the rerun triggered by the button above (a
+# Shown once, right after the rerun triggered by the buttons above (a
 # message set and then immediately st.rerun()-ed away would never
 # actually render, so this is stashed in session_state and displayed on
 # the next script run instead).
@@ -86,6 +96,18 @@ if st.session_state.get("last_manual_refresh_summary"):
             f"Refreshed {summary['succeeded']} of {summary['total']} stocks -- "
             f"{summary['failed']} failed: {failed_symbols}"
         )
+
+if st.session_state.get("last_fo_refresh_summary"):
+    fo_summary = st.session_state.pop("last_fo_refresh_summary")
+    if fo_summary.get("error"):
+        st.error(fo_summary["error"])
+    elif fo_summary.get("updated"):
+        st.success(
+            f"✅ Loaded F&O bhavcopy for {fo_summary['tradeDate']}: "
+            f"{fo_summary['futuresRows']} futures + {fo_summary['optionRows']} option rows."
+        )
+    else:
+        st.info(fo_summary.get("message", "F&O data is already up to date."))
 
 render_disclaimer()
 

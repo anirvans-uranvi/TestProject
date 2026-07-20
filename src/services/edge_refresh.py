@@ -61,3 +61,48 @@ def trigger_manual_refresh(access_token: str) -> dict:
         raise ManualRefreshError(f"Refresh failed: {detail}")
 
     return resp.json()
+
+
+# Downloading + unzipping + parsing one day's ~7MB F&O bhavcopy (and
+# upserting ~9,000 rows) is heavier than the cash-market refresh above.
+FO_TIMEOUT_SECONDS = 120.0
+
+
+def trigger_fo_refresh(access_token: str) -> dict:
+    """POSTs to the fo-refresh Edge Function (supabase/functions/fo-refresh),
+    which checks whether NSE has published a newer F&O bhavcopy than what's
+    already loaded and, if so, downloads + ingests it. Returns its JSON
+    summary: either {updated: false, message, latestAvailable, latestLoaded}
+    when already current, or {updated: true, tradeDate, futuresRows,
+    optionRows, ...} after a real ingest. Raises ManualRefreshError on
+    failure (reused rather than a parallel exception type, since the
+    calling convention -- cooldown/4xx/5xx handling -- is identical)."""
+    settings = get_settings()
+    if not settings.supabase_url:
+        raise ManualRefreshError("SUPABASE_URL is not configured")
+
+    url = f"{settings.supabase_url}/functions/v1/fo-refresh"
+    try:
+        resp = httpx.post(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=FO_TIMEOUT_SECONDS,
+        )
+    except httpx.HTTPError as exc:
+        raise ManualRefreshError(f"Could not reach the F&O refresh function: {exc}") from exc
+
+    if resp.status_code == 429:
+        try:
+            detail = resp.json().get("message", "Please wait before refreshing again.")
+        except ValueError:
+            detail = "Please wait before refreshing again."
+        raise ManualRefreshError(detail, retriable=True)
+
+    if resp.status_code >= 400:
+        try:
+            detail = resp.json().get("error", resp.text)
+        except ValueError:
+            detail = resp.text
+        raise ManualRefreshError(f"F&O refresh failed: {detail}")
+
+    return resp.json()

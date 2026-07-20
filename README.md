@@ -22,7 +22,7 @@ operations; that doc covers the code itself.
 - [Calculation logic](#calculation-logic)
 - [Running tests](#running-tests)
 - [Scheduled refresh](#scheduled-refresh)
-- [On-demand refresh (Dashboard "Manual refresh" button)](#on-demand-refresh-dashboard-manual-refresh-button)
+- [On-demand refresh (Dashboard refresh buttons)](#on-demand-refresh-dashboard-refresh-buttons)
 - [Futures & Options (F&O) data](#futures--options-fo-data)
 - [Docker](#docker)
 - [Limitations](#limitations)
@@ -312,19 +312,23 @@ retry transient provider failures with exponential backoff
 (`tenacity`, in `src/services/refresh_service.py` and
 `src/data_providers/dhan_provider.py`).
 
-## On-demand refresh (Dashboard "Manual refresh" button)
+## On-demand refresh (Dashboard refresh buttons)
 
 The scheduled mechanisms above run independently of the Streamlit app.
-The Dashboard's **Manual refresh** button is a separate, fourth path that
-does an actual live fetch on click, implemented as a **Supabase Edge
-Function** (`supabase/functions/manual-refresh/`) rather than in
+The Dashboard has two on-demand buttons that do an actual live fetch on
+click, each implemented as a **Supabase Edge Function** rather than in
 Streamlit page code -- a real fetch-and-write needs the Supabase
 service-role key (bypasses RLS), which must never live in Streamlit page
 code since Streamlit Cloud runs that code in every logged-in user's own
-browser session. The Edge Function holds the key safely as a
+browser session. Each Edge Function holds the key safely as a
 Supabase-injected environment variable (runs server-side inside
 Supabase's infrastructure); Streamlit only ever sends the *calling user's
 own* access token (`src/services/edge_refresh.py`), never any secret.
+
+- **🔄 Stock Data Refresh** -- cash-market data (prices, dividends,
+  fundamentals, screener recompute), via `supabase/functions/manual-refresh/`.
+- **📊 F&O Data Refresh** -- futures + options, via
+  `supabase/functions/fo-refresh/` (see below).
 
 It reimplements price/dividend/fundamentals fetching (via Yahoo Finance,
 unofficial endpoints, see [Limitations](#limitations)) and the
@@ -372,6 +376,39 @@ needed. No changes are required on the Streamlit side beyond having
 `SUPABASE_URL` set (already required for everything else) -- the
 function's URL is derived from it.
 
+### F&O Data Refresh button (`supabase/functions/fo-refresh/`)
+
+The Dashboard's **📊 F&O Data Refresh** button checks whether NSE has
+published a newer F&O bhavcopy than what's already in Supabase
+(`max(trade_date)` in `futures_daily_prices`) and, only if so, downloads +
+ingests that one day -- so clicking it when nothing new is available is
+cheap (a handful of HTTP requests, no writes) and returns "Already up to
+date" instead of silently doing nothing or re-fetching data you already
+have.
+
+Deploy it the same way as `manual-refresh` (same CLI, same one-time
+`login`/`link` setup):
+
+```bash
+supabase functions deploy fo-refresh
+```
+
+It reimplements the bhavcopy zip download + parse **in TypeScript**
+(`supabase/functions/fo-refresh/bhavcopy.ts`) -- the same
+duplicated-business-logic tradeoff `manual-refresh` already accepts, for
+the same reason (a truly instant on-demand path). Since Deno's Edge
+Runtime has no zip library built in and pulling a third-party one felt
+like overkill for a single-entry archive, it reads the ZIP directly via
+the Central Directory record and the Web Streams API's native
+`DecompressionStream("deflate-raw")` -- no external dependency. Verified
+against a real, live NSE bhavcopy (not just a synthetic test fixture)
+before this was considered done; run `deno test
+supabase/functions/fo-refresh/bhavcopy.test.ts` to check it.
+
+Same 5-minute cross-user cooldown as `manual-refresh` (`provider_fetch_log`,
+`provider_name = 'fo_edge'`, `fetch_type = 'fo'` -- added to the allowed
+`fetch_type` values by migration `0008_add_fo_fetch_type.sql`).
+
 ## Futures & Options (F&O) data
 
 The **Options** page (`pages/5_Options.py`) shows, per stock, the futures
@@ -397,6 +434,12 @@ seeds ~30 days of synthetic F&O so the Options screen works locally with no
 network. This is **end-of-day** data (NSE publishes the file ~6pm IST after
 close); re-run the script daily (or via the same schedulers as the cash
 data) to keep it current — see [Limitations](#limitations).
+
+Day-to-day, once the initial backfill is done, the Dashboard's **📊 F&O
+Data Refresh** button (see [On-demand refresh](#on-demand-refresh-dashboard-refresh-buttons)
+above) is the easier way to pick up each new trading day's bhavcopy --
+no terminal/service-role key needed, and it's a no-op if nothing new is
+published yet.
 
 ## Docker
 

@@ -67,6 +67,7 @@ class FetchType(StrEnum):
     ALL = "all"  # logged by the on-demand manual-refresh Edge Function,
     # which does price+dividend+fundamentals+screener in one invocation
     # rather than the Python cron path's separate --mode values
+    FO = "fo"  # logged by the on-demand fo-refresh Edge Function
 
 
 class FetchStatus(StrEnum):

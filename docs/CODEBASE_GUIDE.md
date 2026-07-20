@@ -126,14 +126,17 @@ scripts/
 supabase/
   migrations/                      Schema, RLS policies, views/functions, in numbered order
   seed.sql                          Current Nifty 50 constituents + companies (reference data only)
-  functions/manual-refresh/         Edge Function (Deno/TypeScript) behind the Dashboard's on-demand refresh
+  functions/manual-refresh/         Edge Function (Deno/TypeScript) behind "Stock Data Refresh"
+  functions/fo-refresh/              Edge Function (Deno/TypeScript) behind "F&O Data Refresh"
 tests/                             Pytest suite -- almost entirely calculations/services, no network
 ```
 
 ## Database schema
 
 All migrations live in `supabase/migrations/`, applied in numeric order
-(`0001` → `0007`). Sixteen tables, in three groups:
+(`0001` → `0008`). Sixteen tables, in three groups (`0008` doesn't add a
+table -- it just extends `provider_fetch_log.fetch_type`'s CHECK
+constraint with `'fo'`, for the `fo-refresh` Edge Function's logging):
 
 **Reference data** (written by `scripts/fetch_nifty50_constituents.py` /
 `seed.sql`, read-only to the app):
@@ -376,6 +379,15 @@ against the real calendar once per run by `fo_repo.refresh_open_flags`.
   processes oldest→newest then calls `refresh_open_flags(today)`.
   `scripts/seed_mock_data.py` also seeds ~30 mock F&O days for local dev.
 
+**On-demand refresh**: the Dashboard's "📊 F&O Data Refresh" button hits a
+second Edge Function, `supabase/functions/fo-refresh/` (see the Edge
+Functions section below) — a TypeScript port of the same bhavcopy
+fetch+parse, but only for the single most recent day and only if NSE has
+actually published something newer than what's already loaded (checked via
+`max(trade_date)` in `futures_daily_prices`), so a click when nothing's
+new is a cheap read-only no-op rather than a silent re-fetch. It has no
+external zip-library dependency — see the Edge Functions section for why.
+
 ## Streamlit app (`app.py`, `pages/`)
 
 `app.py` is the landing page (Streamlit's "Home" in the sidebar nav,
@@ -384,7 +396,7 @@ titled "app"). Every page in `pages/` starts with
 proceed (a valid session exists) or renders the Sign in / Create account /
 Forgot password tabs and `st.stop()`s.
 
-- **`1_Dashboard.py`** — loads `latest_screener_view` via `snapshot_repo.get_latest_screener()`, applies the signed-in user's thresholds via `threshold_override.apply_user_thresholds()`, renders metric cards (also usable as quick filters, wired through `st.session_state["status_filter"]`), sidebar filters, and the screener table (rendered as an HTML table via `.to_html()` so status icons can use colored spans/SVGs — `st.dataframe` doesn't support arbitrary per-cell HTML). The Status sidebar filter is a `st.multiselect` over `ALL_STATUSES = ["Green", "Amber", "Red", "Unavailable"]` — `status_filter` is always a *list* (any combination, not one-or-all), and the final row filter is a single `df["status"].isin([...])`, so selecting all four is equivalent to no filter at all. Saved filter presets normalize old single-string `"status"` values (from before this was a multiselect) into a list on load for backward compatibility. The "Minimum dividend yield" / "Minimum PEG" sidebar filters default to `0.0`, **not** `user_settings.dividend_yield_threshold`/`peg_threshold` — they're a separate display filter from the criterion A/C pass/fail thresholds, and defaulting them to the threshold value silently hid every stock below it on first load (a real bug, since fixed). Keep these two concepts distinct if you touch this page: the Settings-page thresholds decide Green/Amber/Red/Unavailable; these sidebar inputs just additionally hide rows below a value the user dials in themselves, and should default to "show everything."
+- **`1_Dashboard.py`** — loads `latest_screener_view` via `snapshot_repo.get_latest_screener()`, applies the signed-in user's thresholds via `threshold_override.apply_user_thresholds()`, renders metric cards (also usable as quick filters, wired through `st.session_state["status_filter"]`), sidebar filters, and the screener table (rendered as an HTML table via `.to_html()` so status icons can use colored spans/SVGs — `st.dataframe` doesn't support arbitrary per-cell HTML). The Status sidebar filter is a `st.multiselect` over `ALL_STATUSES = ["Green", "Amber", "Red", "Unavailable"]` — `status_filter` is always a *list* (any combination, not one-or-all), and the final row filter is a single `df["status"].isin([...])`, so selecting all four is equivalent to no filter at all. Saved filter presets normalize old single-string `"status"` values (from before this was a multiselect) into a list on load for backward compatibility. The "Minimum dividend yield" / "Minimum PEG" sidebar filters default to `0.0`, **not** `user_settings.dividend_yield_threshold`/`peg_threshold` — they're a separate display filter from the criterion A/C pass/fail thresholds, and defaulting them to the threshold value silently hid every stock below it on first load (a real bug, since fixed). Keep these two concepts distinct if you touch this page: the Settings-page thresholds decide Green/Amber/Red/Unavailable; these sidebar inputs just additionally hide rows below a value the user dials in themselves, and should default to "show everything." The header has two on-demand refresh buttons, each hitting its own Edge Function (see [Edge Functions](#edge-functions-supabasefunctions) below): "🔄 Stock Data Refresh" (cash market, `manual-refresh`) and "📊 F&O Data Refresh" (futures/options, `fo-refresh` — a no-op with an "already up to date" message if NSE hasn't published anything newer than what's loaded).
 
   **Screener table columns**, left to right: `#` (serial number, just `enumerate()` over the current filtered/sorted rows — always 1..N of what's on screen, not a stored ID, so it renumbers on every filter/sort change), `Stock` (the NSE ticker symbol, e.g. `ADANIENT` — not the full company name; a redundant hidden `Symbol` key is still carried in each `display_rows` dict for the "Open in Stock Detail" selectbox below the table, but since `Stock` moved to the symbol too, `Symbol` is now just an alias of the same value, kept because `render_screener_table()`/the selectbox already depend on that key existing), `Latest price`, `52W High`/`52W Low` (value + `pass_fail_icon` for `criterion_52w_high`/`criterion_52w_low` — display-only proximity checks, **not** part of Green/Amber/Red; see `classification.py` above), `1D`/`5D`/`20D` (arrow + percentage only), `Momentum` (a single `pass_fail_icon(criterion_b)` — despite the name it's specifically criterion B, not a combined A/B/C view; that used to be a column called `Criteria` showing all three, moved/renamed/simplified across a few iterations), and `Dividend yield`/`PEG` last (value + `pass_fail_icon` for criteria A and C respectively). Default sort is by ticker symbol ascending (`sort_map["Stock"] = "symbol"`, `sort_desc` defaults to `False`) — the sidebar "Sort by" dropdown no longer has a separate `Symbol` entry, since it would now sort identically to `Stock`. There is deliberately no dedicated `Status` column anymore — it duplicated the per-criterion tick/cross columns already on screen without adding information, so it was dropped; the underlying `status` field is still sortable/filterable (sidebar "Sort by"/multiselect), just not rendered as its own column. `status_badge()` (colored text badge, e.g. "🟢 Green") is still used standalone on Stock Detail's header, where the status needs to stand alone rather than sit in a row with other context — the SVG-icon variant that used to serve this table (`status_dot()`/`_STATUS_SVG` in `ui.py`) was deleted once nothing referenced it, rather than left as dead code.
 
@@ -553,6 +565,55 @@ test-and-typecheck this code before ever deploying it (`deno test`,
 project's Edge Functions from this development environment directly, so
 `deno test`/`deno check` are as far as verification goes without the
 user actually deploying and clicking the button themselves.
+
+`fo-refresh/` backs the Dashboard's "📊 F&O Data Refresh" button, same
+reasoning and runtime as `manual-refresh/` above (real writes need the
+service-role key, must run server-side). Structurally it's a check-then-
+maybe-ingest, not an unconditional refresh:
+
+- **`bhavcopy.ts`** — `bhavcopyUrl(isoDate)`, `fetchBhavcopyText(isoDate)`
+  (null on 404, mirroring the Python provider's walk-back-friendly
+  contract), `findLatestAvailableBhavcopy(onOrBefore, maxLookback=7)`, and
+  `parseFoBhavcopy(csvText, universe)` — a TypeScript port of
+  `src/data_providers/nse_fo_provider.py`'s parsing (same column mapping,
+  same STF/STO instrument-type filter, same universe filter). **The zip
+  extraction is hand-rolled**, not via a library: Deno's Edge Runtime has
+  no zip module built in, and the bhavcopy is always a single-entry
+  archive, so `extractFirstZipEntry()` reads the ZIP's End-Of-Central-
+  Directory + Central-Directory records (robust regardless of whether the
+  local file header used a trailing "data descriptor", which makes the
+  *local* header's own size fields unreliable — the central directory's
+  are always authoritative) to locate the one entry's compressed bytes,
+  then decompresses with the Web Streams API's native
+  `DecompressionStream("deflate-raw")` — zero external dependencies for a
+  format this constrained. `bhavcopy.test.ts` round-trips a hand-built
+  synthetic zip through the extractor (proving the container-parsing logic
+  independent of any real file) and separately verifies the CSV parsing
+  against the same fixture rows `tests/test_nse_fo_provider.py` uses in
+  Python. **Beyond the unit tests, this was also run against a real, live
+  NSE bhavcopy** (not just the synthetic fixture) during development,
+  confirming it correctly extracted and parsed all 50 symbols' futures and
+  options from an actual current-day file before being considered done.
+- **`index.ts`** — same auth/cooldown pattern as `manual-refresh/index.ts`
+  (`provider_name = 'fo_edge'`, `fetch_type = 'fo'` — added to
+  `provider_fetch_log`'s CHECK constraint by
+  `0008_add_fo_fetch_type.sql`, same pattern as `0005` did for `'all'`).
+  The distinguishing step: before doing any work, it reads
+  `max(trade_date)` from `futures_daily_prices` (the "already loaded"
+  watermark) and compares it against `findLatestAvailableBhavcopy()`'s
+  result (the "NSE's latest" watermark) — if NSE has nothing newer, it
+  returns `{updated: false, message, latestAvailable, latestLoaded}`
+  immediately, with zero writes. Only when NSE's date is strictly newer
+  does it parse and upsert into all four F&O tables (chunked at 500 rows,
+  matching `fo_repo.py`'s Python chunk size) and re-derive `is_open` via
+  the same expiry-vs-today logic as `fo_repo.refresh_open_flags`, then
+  returns `{updated: true, tradeDate, futuresRows, optionRows}`.
+- On the Streamlit side, `edge_refresh.py::trigger_fo_refresh()` is the
+  HTTP client (same shape as `trigger_manual_refresh`, reusing
+  `ManualRefreshError` rather than a parallel exception type, since the
+  calling convention — cooldown/4xx/5xx handling — is identical); the
+  Dashboard button shows a distinct message depending on `updated: true`
+  vs `false` vs an error, rather than treating "nothing new" as a failure.
 
 ## Tests (`tests/`)
 
