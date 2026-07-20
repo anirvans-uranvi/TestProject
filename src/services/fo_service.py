@@ -68,15 +68,27 @@ def shape_option_chain(chain_rows: list[dict]) -> list[dict]:
 
 
 def option_chain_summary(chain_rows: list[dict]) -> dict:
-    """Spot, ATM strike, aggregate CE/PE open interest, and Put-Call Ratio."""
+    """Spot, ATM strike, aggregate CE/PE open interest, and Put-Call Ratio.
+
+    `chain_rows` come from `latest_option_chain_view`, which is "latest per
+    contract" -- individual strikes can genuinely fall stale independently
+    of each other (e.g. a deep ITM/OTM contract with zero OI/volume simply
+    stops appearing in NSE's daily bhavcopy well before its expiry, while
+    liquid near-the-money strikes keep updating daily). So the page-level
+    "as of" date and spot must come from the *freshest* trade_date present
+    in the chain, not from whichever row happens to sort first by strike --
+    picking an arbitrary row previously leaked a stale contract's date/spot
+    into the whole page's summary even when most of the chain was current.
+    """
     if not chain_rows:
         return {}
-    spot = next((_num(r.get("underlying_price")) for r in chain_rows if r.get("underlying_price") is not None), None)
+    trade_date = max((r.get("trade_date") for r in chain_rows if r.get("trade_date")), default=None)
+    latest_rows = [r for r in chain_rows if r.get("trade_date") == trade_date] if trade_date else chain_rows
+    spot = next((_num(r.get("underlying_price")) for r in latest_rows if r.get("underlying_price") is not None), None)
     total_ce_oi = sum(_int(r.get("open_interest")) or 0 for r in chain_rows if str(r.get("option_type")) == "CE")
     total_pe_oi = sum(_int(r.get("open_interest")) or 0 for r in chain_rows if str(r.get("option_type")) == "PE")
     strikes = sorted({_num(r.get("strike_price")) for r in chain_rows if r.get("strike_price") is not None})
     atm = min(strikes, key=lambda s: abs(s - spot)) if (spot is not None and strikes) else None
-    trade_date = next((r.get("trade_date") for r in chain_rows if r.get("trade_date")), None)
     return {
         "spot": spot,
         "atm_strike": atm,

@@ -93,6 +93,25 @@ class TestShapeOptionChain:
     def test_summary_empty(self):
         assert fo_service.option_chain_summary([]) == {}
 
+    def test_summary_ignores_stale_leg_for_date_and_spot(self):
+        # Reproduces the real HDFCBANK bug: a deep-ITM/zero-OI contract
+        # (620 CE) stopped appearing in NSE's bhavcopy after 2026-07-01,
+        # while every other strike kept updating through 2026-07-17. The
+        # "as of" date and spot must reflect the freshest data in the
+        # chain, not whichever row happens to sort first by strike.
+        rows = [
+            {"strike_price": 620.0, "option_type": "CE", "open_interest": 0, "underlying_price": 700.0, "trade_date": date(2026, 7, 1)},
+            {"strike_price": 650.0, "option_type": "CE", "open_interest": 500, "underlying_price": 796.15, "trade_date": date(2026, 7, 17)},
+            {"strike_price": 650.0, "option_type": "PE", "open_interest": 300, "underlying_price": 796.15, "trade_date": date(2026, 7, 17)},
+        ]
+        summary = fo_service.option_chain_summary(rows)
+        assert summary["trade_date"] == date(2026, 7, 17)
+        assert summary["spot"] == 796.15
+        # Stale leg's OI still counts toward the aggregate totals -- it's
+        # the last known open interest for that contract, which is correct.
+        assert summary["total_ce_oi"] == 500
+        assert summary["total_pe_oi"] == 300
+
 
 class TestFuturesTermStructure:
     def test_basis_and_sort(self):
