@@ -328,6 +328,10 @@ def render_screener_table(
     the href at render time (ascending on a first click, otherwise the
     opposite of whatever's currently active) so the caller doesn't need
     any click-side toggle logic, just to apply the href's own sort/dir.
+    `target="_top"` is required: Streamlit Community Cloud serves the app
+    inside an iframe, and a plain link inside `st.markdown`'s output can't
+    navigate that outer frame -- the browser opens it in a fresh, logged-
+    out popup window instead of sorting in place.
     """
     c = _table_theme_classes(theme)
     if not rows:
@@ -349,7 +353,7 @@ def render_screener_table(
         return (
             f'<th class="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide '
             f'whitespace-nowrap border-b {c["wrapper_border"]}">'
-            f'<a href="?sort={key}&dir={next_dir}" class="hover:underline cursor-pointer" '
+            f'<a href="?sort={key}&dir={next_dir}" target="_top" class="hover:underline cursor-pointer" '
             f'style="color:inherit;text-decoration:none;">{col}{arrow}</a></th>'
         )
 
