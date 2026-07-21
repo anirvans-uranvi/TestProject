@@ -327,9 +327,10 @@ def render_screener_table(
     keeps the Supabase auth session only in `st.session_state` (never a
     cookie/localStorage, see session.py's docstring), so any real
     navigation starts a brand-new, logged-out session. The actual sort
-    interaction is native `st.button()`s rendered next to this table
-    (Dashboard's sort-button row), which stay on the same WebSocket
-    session; this function just mirrors their state visually.
+    interaction is a native `st.selectbox`("Sort By")/`st.checkbox`
+    ("Descending") pair rendered above this table (Dashboard), which stay
+    on the same WebSocket session; this function just mirrors their state
+    visually via the arrow.
     """
     c = _table_theme_classes(theme)
     if not rows:

@@ -36,23 +36,28 @@ pages/                  Streamlit multipage app
   2_Stock_Detail.py       Price/volume/dividend charts, scorecard, alerts, position notes
   3_Alerts.py             Alert CRUD + notification history
   4_Settings.py            Per-user thresholds, theme, notification channels
+  5_Options.py              F&O: futures term structure, option chain, 5% CSP / 5% ITM PMCC breakdown
 src/
   config.py               Pydantic Settings (env-driven)
   data_providers/         PriceDataProvider / FundamentalsDataProvider + Dhan/mock/manual impls
   models/                 Pydantic domain models
   calculations/           Pure functions: returns, dividend yield, classification, moving averages
-  services/                Orchestration: screener, refresh, alerts, market calendar, explanations
+  services/                Orchestration: screener, refresh, alerts, market calendar, explanations, F&O
   repositories/            Supabase access layer (one module per table/concern)
   notifications/           NotificationAdapter interface + in-app implementation
   utils/                   Formatting, timezones, Streamlit session/UI helpers
 scripts/
   fetch_nifty50_constituents.py   Refresh companies/nifty50_constituents
-  seed_mock_data.py                Backfill synthetic prices/fundamentals/dividends/snapshots
+  seed_mock_data.py                Backfill synthetic prices/fundamentals/dividends/snapshots + mock F&O
+  fetch_fo_data.py                  Backfill NSE F&O bhavcopy (futures + options) into Supabase
+  cleanup_mock_data.py               Delete leftover source='mock' rows (dry-run by default)
   run_refresh.py                    CLI entrypoint for cron/GitHub Actions/APScheduler
   import_screener_csv.py            Import a screener.in CSV export as PE/PEG/dividend-yield data
 supabase/
   migrations/               Schema, RLS policies, views/functions
   seed.sql                   Current Nifty 50 constituents + companies (reference data only)
+  functions/manual-refresh/  Edge Function behind the "Stock Data Refresh" button
+  functions/fo-refresh/       Edge Function behind the "F&O Data Refresh" button
 tests/                     Pytest suite (calculations, providers, services)
 ```
 
@@ -412,10 +417,13 @@ Same 5-minute cross-user cooldown as `manual-refresh` (`provider_fetch_log`,
 ## Futures & Options (F&O) data
 
 The **Options** page (`pages/5_Options.py`) shows, per stock, the futures
-term structure and the option chain (CE | strike | PE, with open interest,
-change in OI, volume, and LTP; ATM strike highlighted). Open it from the
-Dashboard's "Open in Options →" section or the "View F&O / options" button
-on Stock Detail.
+term structure, the option chain (CE | strike | PE, with open interest,
+change in OI, volume, and LTP; ATM strike highlighted), and a full
+calculation breakdown for the Dashboard's two options-derived screener
+columns — **5% CSP** and **5% ITM PMCC** — showing the actual strikes,
+premiums, and net credit used, not just the final percentage. Open it from
+the Dashboard's "Open in Options →" section or the "View F&O / options"
+button on Stock Detail.
 
 **Data source:** the NSE F&O UDiFF **bhavcopy** (one zip per trading day),
 the only reliable free source for NSE derivatives — yfinance has none, and
