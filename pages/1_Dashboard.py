@@ -406,12 +406,34 @@ else:
     # instead, one per row, roughly aligned alongside its row.
     link_col, table_col = st.columns([1, 30])
     with link_col:
-        st.markdown("<div style='height:2.6rem'></div>", unsafe_allow_html=True)
-        for i, row in enumerate(display_rows):
-            symbol = row["Symbol"]
-            if st.button("🔍", key=f"open_detail_{i}_{symbol}", help=f"Open {symbol} in Stock Detail"):
-                st.session_state["selected_symbol"] = symbol
-                st.switch_page("pages/2_Stock_Detail.py")
+        # render_screener_table()'s rows are a fixed, CSS-driven height
+        # (Tailwind `text-sm`/`py-2`) that native st.button()s don't
+        # naturally match -- Streamlit's default button height plus the
+        # vertical gap between stacked elements is taller than a table
+        # row, so without this override the buttons drift further below
+        # their row the further down the table they are. Scoped to this
+        # container's key so it doesn't affect buttons elsewhere on the
+        # page.
+        st.markdown(
+            """
+            <style>
+            .st-key-dashboard_stock_links.stVerticalBlock { gap: 0rem !important; }
+            .st-key-dashboard_stock_links div[data-testid="stElementContainer"] { margin: 0; }
+            .st-key-dashboard_stock_links button {
+                height: 2.04rem; min-height: 2.04rem; width: 100%;
+                padding: 0; display: flex; align-items: center; justify-content: center;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        with st.container(key="dashboard_stock_links"):
+            st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
+            for i, row in enumerate(display_rows):
+                symbol = row["Symbol"]
+                if st.button("🔍", key=f"open_detail_{i}_{symbol}", help=f"Open {symbol} in Stock Detail"):
+                    st.session_state["selected_symbol"] = symbol
+                    st.switch_page("pages/2_Stock_Detail.py")
     with table_col:
         st.markdown(
             render_screener_table(
