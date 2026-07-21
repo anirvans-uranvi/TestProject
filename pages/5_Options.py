@@ -210,29 +210,43 @@ else:
 screener_row = snapshot_repo.get_latest_screener_row(client, symbol)
 cash_spot = screener_row.latest_price if screener_row else None
 spot_map = {symbol: cash_spot} if cash_spot is not None else {}
-csp = fo_service.csp_5pct_map(near_chain_rows, spot_map).get(symbol)
 pmcc = fo_service.itm_pmcc_5pct_map(near_chain_rows, spot_map).get(symbol)
 
 st.divider()
 st.subheader("5% CSP (cash-secured put)")
 st.caption(
-    "A cash-secured-put yield: sell 1 lot of the near-expiry put whose strike is "
-    "closest to 5% below spot, expressed as a percentage of that strike -- the "
-    "full notional a cash-secured put seller sets aside per lot. Not divided by "
-    "exchange margin, since NSE doesn't publish SPAN margin as a simple "
-    "per-contract percentage."
+    "A cash-secured-put yield: sell 1 lot of the put whose strike is closest to "
+    "5% below spot, expressed as a percentage of that strike -- the full notional "
+    "a cash-secured put seller sets aside per lot. Not divided by exchange margin, "
+    "since NSE doesn't publish SPAN margin as a simple per-contract percentage. "
+    "Shown for the near, next, and far monthly expiries, same as the Futures "
+    "term structure above."
 )
-if csp is None:
-    st.info("Not enough option data to compute 5% CSP for the nearest expiry.")
+if cash_spot is None or not expiries:
+    st.info("Not enough option data to compute 5% CSP.")
 else:
-    csp_stats = [
-        ("Spot", format_inr(csp["spot"]), None),
-        ("Strike sold (nearest 5% below spot)", format_inr(csp["strike"], decimals=0), None),
-        ("Put premium (LTP)", format_inr(csp["put_price"]), f"traded {csp['put_trade_date']}" if csp["put_trade_date"] else None),
-        ("5% CSP", format_pct(csp["csp_pct"], signed=False), "put premium ÷ strike × 100"),
-    ]
-    st.markdown(render_stat_grid(csp_stats, user_settings.theme, cols=4), unsafe_allow_html=True)
-    st.caption(f"Nearest expiry used: {csp['expiry_date']}")
+    term_labels = ["Near month", "Next month", "Far month"]
+    csp_term_rows = []
+    for label, exp in zip(term_labels, expiries[:3]):
+        if exp == selected_expiry:
+            rows_for_exp = chain_rows
+        elif exp == near_expiry:
+            rows_for_exp = near_chain_rows
+        else:
+            rows_for_exp = fo_repo.get_option_chain(client, symbol, exp)
+        exp_csp = fo_service.csp_5pct_for_rows(rows_for_exp, cash_spot, exp)
+        csp_term_rows.append(
+            {
+                "Term": label,
+                "Expiry": exp.strftime("%d %b %Y"),
+                "Spot": format_inr(exp_csp["spot"]) if exp_csp else "N/A",
+                "Strike (nearest 5% below spot)": format_inr(exp_csp["strike"], decimals=0) if exp_csp else "N/A",
+                "Put Premium": format_inr(exp_csp["put_price"]) if exp_csp else "N/A",
+                "Trade Date": (exp_csp["put_trade_date"] or "—") if exp_csp else "N/A",
+                "5% CSP": format_pct(exp_csp["csp_pct"], signed=False) if exp_csp and exp_csp["csp_pct"] is not None else "N/A",
+            }
+        )
+    st.dataframe(pd.DataFrame(csp_term_rows), use_container_width=True, hide_index=True)
 
 st.divider()
 st.subheader("5% ITM PMCC (poor man's covered call)")

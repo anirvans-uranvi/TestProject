@@ -182,6 +182,47 @@ class TestCsp5PctMap:
         assert result["RELIANCE"]["strike"] == 950.0
 
 
+class TestCsp5PctForRows:
+    """The single-expiry core csp_5pct_map delegates to -- used directly
+    by the Options screen for its near/next/far month CSP rows."""
+
+    def test_matches_csp_5pct_map_for_the_same_single_expiry(self):
+        rows = [
+            {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 900.0, "expiry_date": "2026-07-28", "last_price": 5.0},
+            {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 950.0, "expiry_date": "2026-07-28", "last_price": 25.0},
+        ]
+        result = fo_service.csp_5pct_for_rows(rows, spot=1000.0, expiry_date="2026-07-28")
+        assert result["strike"] == 950.0
+        assert result["put_price"] == 25.0
+        assert abs(result["csp_pct"] - (25.0 / 950.0 * 100)) < 1e-9
+        assert result["spot"] == 1000.0
+        assert result["expiry_date"] == "2026-07-28"
+
+    def test_echoes_back_the_expiry_date_argument_not_a_row_field(self):
+        # a caller passes rows already filtered to one expiry -- the
+        # returned expiry_date is exactly what was passed in, not
+        # inferred from the rows themselves.
+        rows = [{"symbol": "RELIANCE", "option_type": "PE", "strike_price": 950.0, "expiry_date": "2026-08-25", "last_price": 25.0}]
+        result = fo_service.csp_5pct_for_rows(rows, spot=1000.0, expiry_date="2026-08-25")
+        assert result["expiry_date"] == "2026-08-25"
+
+    def test_no_pe_rows_returns_none(self):
+        rows = [{"symbol": "RELIANCE", "option_type": "CE", "strike_price": 950.0, "expiry_date": "2026-07-28", "last_price": 60.0}]
+        assert fo_service.csp_5pct_for_rows(rows, spot=1000.0, expiry_date="2026-07-28") is None
+
+    def test_empty_rows_returns_none(self):
+        assert fo_service.csp_5pct_for_rows([], spot=1000.0, expiry_date="2026-07-28") is None
+
+    def test_prefers_freshest_trade_date(self):
+        rows = [
+            {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 900.0, "expiry_date": "2026-07-28", "last_price": 5.0, "trade_date": "2026-07-20"},
+            {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 950.0, "expiry_date": "2026-07-28", "last_price": 25.0, "trade_date": "2026-07-01"},
+        ]
+        result = fo_service.csp_5pct_for_rows(rows, spot=1000.0, expiry_date="2026-07-28")
+        assert result["strike"] == 900.0
+        assert result["put_trade_date"] == "2026-07-20"
+
+
 class TestItmPmcc5PctMap:
     EXPIRY = "2026-07-28"
 

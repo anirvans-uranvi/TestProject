@@ -189,23 +189,40 @@ def csp_5pct_map(put_rows: list[dict], spot_by_symbol: dict[str, float | None]) 
         if not expiries:
             continue
         near_expiry = min(expiries)
-        near_rows = [r for r in rows if r.get("expiry_date") == near_expiry and r.get("strike_price") is not None]
-        if not near_rows:
+        near_rows = [r for r in rows if r.get("expiry_date") == near_expiry]
+        csp = csp_5pct_for_rows(near_rows, spot, near_expiry)
+        if csp is None:
             continue
-        target = spot * 0.95
-        best_row = min(_freshest_rows(near_rows), key=lambda r: abs(_num(r["strike_price"]) - target))
-        strike = _num(best_row["strike_price"])
-        put_price = _num(best_row.get("last_price")) or _num(best_row.get("close")) or _num(best_row.get("settlement_price"))
-        csp_pct = (put_price / strike * 100) if (put_price is not None and strike) else None
-        result[symbol] = {
-            "strike": strike,
-            "put_price": put_price,
-            "csp_pct": csp_pct,
-            "spot": spot,
-            "expiry_date": near_expiry,
-            "put_trade_date": best_row.get("trade_date"),
-        }
+        result[symbol] = csp
     return result
+
+
+def csp_5pct_for_rows(pe_rows: list[dict], spot: float, expiry_date) -> dict | None:
+    """Pure: the single-expiry core of `csp_5pct_map`, factored out so a
+    caller can compute "5% CSP" for a *specific* expiry rather than only
+    ever the nearest one -- used by the Options screen to show a
+    near/next/far month row each, the same term-structure shape the
+    Futures section already uses. `pe_rows` should already be filtered
+    to one symbol + one expiry (any option_type mixed in is ignored).
+    Returns the same shape as one `csp_5pct_map` result value, or `None`
+    if there's no priceable PE strike in `pe_rows`.
+    """
+    near_rows = [r for r in pe_rows if str(r.get("option_type")) == "PE" and r.get("strike_price") is not None]
+    if not near_rows:
+        return None
+    target = spot * 0.95
+    best_row = min(_freshest_rows(near_rows), key=lambda r: abs(_num(r["strike_price"]) - target))
+    strike = _num(best_row["strike_price"])
+    put_price = _num(best_row.get("last_price")) or _num(best_row.get("close")) or _num(best_row.get("settlement_price"))
+    csp_pct = (put_price / strike * 100) if (put_price is not None and strike) else None
+    return {
+        "strike": strike,
+        "put_price": put_price,
+        "csp_pct": csp_pct,
+        "spot": spot,
+        "expiry_date": expiry_date,
+        "put_trade_date": best_row.get("trade_date"),
+    }
 
 
 def itm_pmcc_5pct_map(option_rows: list[dict], spot_by_symbol: dict[str, float | None]) -> dict[str, dict]:
