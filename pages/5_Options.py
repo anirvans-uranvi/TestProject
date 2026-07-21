@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from postgrest.exceptions import APIError
 
-from src.repositories import companies_repo, fo_repo, settings_repo
+from src.repositories import companies_repo, fo_repo, settings_repo, snapshot_repo
 from src.services import fo_service
 from src.utils.formatting import format_inr, format_pct
 from src.utils.session import current_user_id, get_user_client_cached, require_login
@@ -193,8 +193,11 @@ else:
 # ---------------------------------------------------------------------
 # 5% CSP / 5% ITM PMCC -- both restricted to the nearest available
 # expiry regardless of which expiry is selected above for viewing the
-# chain, matching how the Dashboard's own columns for these two are
-# computed, so the numbers line up between the two screens.
+# chain, and both use the stock's cash-market latest_price as spot (not
+# the option chain's own underlying_price, which is a snapshot from the
+# F&O bhavcopy and can lag/differ from the cash price) -- matching
+# exactly how the Dashboard's own columns for these two are computed, so
+# the numbers always line up between the two screens.
 # ---------------------------------------------------------------------
 near_expiry = expiries[0] if expiries else None
 if near_expiry is None:
@@ -204,8 +207,9 @@ elif selected_expiry == near_expiry:
 else:
     near_chain_rows = fo_repo.get_option_chain(client, symbol, near_expiry)
 
-near_spot = fo_service.option_chain_summary(near_chain_rows).get("spot") if near_chain_rows else None
-spot_map = {symbol: near_spot} if near_spot is not None else {}
+screener_row = snapshot_repo.get_latest_screener_row(client, symbol)
+cash_spot = screener_row.latest_price if screener_row else None
+spot_map = {symbol: cash_spot} if cash_spot is not None else {}
 csp = fo_service.csp_5pct_map(near_chain_rows, spot_map).get(symbol)
 pmcc = fo_service.itm_pmcc_5pct_map(near_chain_rows, spot_map).get(symbol)
 
