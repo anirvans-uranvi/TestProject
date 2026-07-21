@@ -161,6 +161,26 @@ class TestCsp5PctMap:
         result = fo_service.csp_5pct_map(rows, {"RELIANCE": 1000.0})
         assert result["RELIANCE"]["put_price"] == 25.0  # unaffected by the CE row
 
+    def test_prefers_freshest_trade_date_over_pure_nearest_strike(self):
+        # spot 1000 -> target 950. Strike 950 is the literal nearest
+        # match but hasn't traded since 2026-07-01 (illiquid); strike 900
+        # is farther from target but is the only strike from the
+        # freshest trade_date (2026-07-20), so it must win instead.
+        rows = [
+            {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 900.0, "expiry_date": "2026-07-28", "last_price": 5.0, "trade_date": "2026-07-20"},
+            {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 950.0, "expiry_date": "2026-07-28", "last_price": 25.0, "trade_date": "2026-07-01"},
+        ]
+        result = fo_service.csp_5pct_map(rows, {"RELIANCE": 1000.0})
+        assert result["RELIANCE"]["strike"] == 900.0
+        assert result["RELIANCE"]["put_price"] == 5.0
+
+    def test_no_trade_date_at_all_falls_back_to_pure_nearest_strike(self):
+        # self._rows() carries no trade_date key on any row -- with no
+        # staleness signal to go on, behavior is unchanged from before
+        # freshness preference existed.
+        result = fo_service.csp_5pct_map(self._rows(), {"RELIANCE": 1000.0})
+        assert result["RELIANCE"]["strike"] == 950.0
+
 
 class TestItmPmcc5PctMap:
     EXPIRY = "2026-07-28"
@@ -195,6 +215,47 @@ class TestItmPmcc5PctMap:
         result = fo_service.itm_pmcc_5pct_map(self._rows(), {"RELIANCE": 1000.0})
         assert abs(result["RELIANCE"]["net_credit"] - 75.0) < 1e-9
         assert abs(result["RELIANCE"]["pmcc_pct"] - (75.0 / 950.0 * 100)) < 1e-9
+
+    def test_prefers_freshest_trade_date_for_itm_and_otm_ce_legs(self):
+        # spot 1000. Strike 990 is the largest CE strike below spot (the
+        # literal "closest ITM" pick) but hasn't traded since 2026-07-01;
+        # strikes 950/900 are farther from spot but are the only ones
+        # from the freshest trade_date (2026-07-20), so 950 must be
+        # chosen as the ITM leg instead of the stale 990, and 900 (not
+        # 990) as the nearest-5%-below-950 OTM leg.
+        rows = [
+            {"symbol": "RELIANCE", "option_type": "CE", "strike_price": 990.0, "expiry_date": self.EXPIRY, "last_price": 200.0, "trade_date": "2026-07-01"},
+            {"symbol": "RELIANCE", "option_type": "CE", "strike_price": 950.0, "expiry_date": self.EXPIRY, "last_price": 60.0, "trade_date": "2026-07-20"},
+            {"symbol": "RELIANCE", "option_type": "CE", "strike_price": 900.0, "expiry_date": self.EXPIRY, "last_price": 110.0, "trade_date": "2026-07-20"},
+            {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 950.0, "expiry_date": self.EXPIRY, "last_price": 25.0, "trade_date": "2026-07-20"},
+        ]
+        result = fo_service.itm_pmcc_5pct_map(rows, {"RELIANCE": 1000.0})
+        assert result["RELIANCE"]["itm_ce_strike"] == 950.0
+        assert result["RELIANCE"]["otm_ce_strike"] == 900.0
+        assert result["RELIANCE"]["buy_ce_price"] == 60.0
+        assert result["RELIANCE"]["sell_ce_price"] == 110.0
+        assert abs(result["RELIANCE"]["net_credit"] - 75.0) < 1e-9
+
+    def test_falls_back_to_a_stale_itm_ce_if_no_fresh_strike_is_itm(self):
+        # spot 1000. The only strike from the freshest trade_date
+        # (2026-07-20) is 1050, which isn't ITM at all -- so the search
+        # must fall back to the full (stale-inclusive) CE set to find the
+        # genuinely-ITM 950 strike, rather than finding no PMCC at all.
+        rows = [
+            {"symbol": "RELIANCE", "option_type": "CE", "strike_price": 950.0, "expiry_date": self.EXPIRY, "last_price": 60.0, "trade_date": "2026-06-01"},
+            {"symbol": "RELIANCE", "option_type": "CE", "strike_price": 1050.0, "expiry_date": self.EXPIRY, "last_price": 5.0, "trade_date": "2026-07-20"},
+            {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 950.0, "expiry_date": self.EXPIRY, "last_price": 25.0, "trade_date": "2026-06-01"},
+        ]
+        result = fo_service.itm_pmcc_5pct_map(rows, {"RELIANCE": 1000.0})
+        assert result["RELIANCE"]["itm_ce_strike"] == 950.0
+
+    def test_no_trade_date_at_all_falls_back_to_pure_nearest_strike(self):
+        # self._rows() carries no trade_date key on any row -- with no
+        # staleness signal to go on, behavior is unchanged from before
+        # freshness preference existed.
+        result = fo_service.itm_pmcc_5pct_map(self._rows(), {"RELIANCE": 1000.0})
+        assert result["RELIANCE"]["itm_ce_strike"] == 950.0
+        assert result["RELIANCE"]["otm_ce_strike"] == 900.0
 
     def test_restricts_to_nearest_expiry_only(self):
         # far-expiry legs are priced at 999 -- if they leaked in, net credit

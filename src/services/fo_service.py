@@ -46,6 +46,28 @@ def _int(value) -> int | None:
     return int(n) if n is not None else None
 
 
+def _freshest_rows(rows: list[dict]) -> list[dict]:
+    """Restrict to the rows whose `trade_date` matches the most recent
+    `trade_date` present in `rows`. `latest_option_chain_view` is "latest
+    row per contract", but illiquid strikes stop appearing in NSE's daily
+    bhavcopy well before their expiry while liquid ones keep updating --
+    so within one expiry, different strikes' "latest" rows can genuinely
+    be weeks apart, and a stale strike's quoted premium no longer
+    reflects reality (confirmed live: LT's 3640 PE strike, one expiry,
+    July 2026 -- neighboring strikes had a trade_date of the current
+    bhavcopy while 3640 itself hadn't traded since three weeks earlier,
+    and its stale ~90 premium made "5% CSP" look ~30x too high). Returns
+    `rows` unchanged if none of them have a `trade_date` at all (e.g. in
+    tests), so callers with no staleness signal to go on behave exactly
+    as before this existed.
+    """
+    dates = {r.get("trade_date") for r in rows if r.get("trade_date")}
+    if not dates:
+        return rows
+    freshest = max(dates)
+    return [r for r in rows if r.get("trade_date") == freshest]
+
+
 def shape_option_chain(chain_rows: list[dict]) -> list[dict]:
     """Pivot per-leg option rows (from latest_option_chain_view) into one row
     per strike: {strike, ce_last, ce_oi, ce_change_oi, ce_volume, pe_...}.
@@ -124,12 +146,15 @@ def csp_5pct_map(put_rows: list[dict], spot_by_symbol: dict[str, float | None]) 
     """Pure: for each symbol's PE legs (from
     `fo_repo.get_all_open_options(OptionType.PE)`, every symbol/expiry
     mixed together), restricts to that symbol's own nearest available
-    expiry, finds the strike closest to 95% of spot, and returns
-    `{symbol: {"strike": ..., "put_price": ..., "csp_pct": ..., "spot":
-    ..., "expiry_date": ...}}`. `spot`/`expiry_date` are just the inputs
-    that produced this result, echoed back so a caller (the Options
-    screen's "5% CSP" breakdown) can display the calculation without
-    having to separately track which expiry/spot were actually used.
+    expiry, finds the strike closest to 95% of spot **among strikes with
+    the freshest available trade_date** (see `_freshest_rows`, falls back
+    to every strike at that expiry if none of them carry a trade_date),
+    and returns `{symbol: {"strike": ..., "put_price": ..., "csp_pct":
+    ..., "spot": ..., "expiry_date": ...}}`. `spot`/`expiry_date` are just
+    the inputs that produced this result, echoed back so a caller (the
+    Options screen's "5% CSP" breakdown) can display the calculation
+    without having to separately track which expiry/spot were actually
+    used.
 
     "5% CSP" is a cash-secured-put yield: the premium for the strike
     nearest 5% below spot, as a percentage of that strike (the full
@@ -163,7 +188,7 @@ def csp_5pct_map(put_rows: list[dict], spot_by_symbol: dict[str, float | None]) 
         if not near_rows:
             continue
         target = spot * 0.95
-        best_row = min(near_rows, key=lambda r: abs(_num(r["strike_price"]) - target))
+        best_row = min(_freshest_rows(near_rows), key=lambda r: abs(_num(r["strike_price"]) - target))
         strike = _num(best_row["strike_price"])
         put_price = _num(best_row.get("last_price")) or _num(best_row.get("close")) or _num(best_row.get("settlement_price"))
         csp_pct = (put_price / strike * 100) if (put_price is not None and strike) else None
@@ -183,10 +208,13 @@ def itm_pmcc_5pct_map(option_rows: list[dict], spot_by_symbol: dict[str, float |
     together), restricts to that symbol's own nearest available expiry and
     builds the "5% ITM PMCC" column:
 
-    1. Buy 1 lot of the ITM CE closest to spot (largest strike < spot).
+    1. Buy 1 lot of the ITM CE closest to spot (largest strike < spot,
+       preferring strikes with the freshest available trade_date -- see
+       `_freshest_rows` -- and only falling back to a stale one if no
+       fresh strike is actually ITM).
     2. Sell 1 lot of the PE at that *same* strike.
     3. Sell 1 lot of the CE whose strike is closest to 95% of the bought
-       CE's strike (a further-ITM call).
+       CE's strike (a further-ITM call, same freshness preference as step 1).
     4. Net credit = PE sell price + CE sell price - CE buy price.
     5. `pmcc_pct` = net credit / the bought CE's strike * 100.
 
@@ -225,7 +253,18 @@ def itm_pmcc_5pct_map(option_rows: list[dict], spot_by_symbol: dict[str, float |
         if not ce_rows or not pe_rows:
             continue
 
-        itm_ce_candidates = [r for r in ce_rows if _num(r["strike_price"]) < spot]
+        # Prefer strikes with the freshest available trade_date (see
+        # _freshest_rows) -- an illiquid strike's "latest" row can be
+        # weeks older than its liquid neighbors', with a premium that no
+        # longer reflects reality. Falls back to the full (possibly
+        # stale-inclusive) ce_rows if the freshest-only subset has no ITM
+        # candidate at all, so a symbol isn't dropped just because its
+        # single most-recent trade_date happens to have no strike below
+        # spot.
+        fresh_ce_rows = _freshest_rows(ce_rows)
+        itm_ce_candidates = [r for r in fresh_ce_rows if _num(r["strike_price"]) < spot]
+        if not itm_ce_candidates:
+            itm_ce_candidates = [r for r in ce_rows if _num(r["strike_price"]) < spot]
         if not itm_ce_candidates:
             continue
         buy_ce = max(itm_ce_candidates, key=lambda r: _num(r["strike_price"]))
@@ -238,7 +277,7 @@ def itm_pmcc_5pct_map(option_rows: list[dict], spot_by_symbol: dict[str, float |
         sell_pe_price = _price(pe_same_strike[0])
 
         target = itm_strike * 0.95
-        sell_ce = min(ce_rows, key=lambda r: abs(_num(r["strike_price"]) - target))
+        sell_ce = min(fresh_ce_rows, key=lambda r: abs(_num(r["strike_price"]) - target))
         otm_strike = _num(sell_ce["strike_price"])
         sell_ce_price = _price(sell_ce)
 
