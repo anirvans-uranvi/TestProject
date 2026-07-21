@@ -126,39 +126,6 @@ class TestFuturesTermStructure:
         assert term[1]["basis"] == 5.0  # 105 - 100
 
 
-class TestNearMonthFuturesMap:
-    def test_picks_earliest_expiry_per_symbol(self):
-        rows = [
-            {"symbol": "RELIANCE", "expiry_date": "2026-08-25", "last_price": 1330.0},
-            {"symbol": "RELIANCE", "expiry_date": "2026-07-28", "last_price": 1300.0},
-            {"symbol": "TCS", "expiry_date": "2026-07-28", "last_price": 3800.0},
-        ]
-        result = fo_service.near_month_futures_map(rows)
-        assert result["RELIANCE"] == {"expiry_date": "2026-07-28", "price": 1300.0}
-        assert result["TCS"] == {"expiry_date": "2026-07-28", "price": 3800.0}
-
-    def test_price_fallback_last_then_close_then_settlement(self):
-        rows = [{"symbol": "RELIANCE", "expiry_date": "2026-07-28", "last_price": None, "close": None, "settlement_price": 1299.1}]
-        assert fo_service.near_month_futures_map(rows)["RELIANCE"]["price"] == 1299.1
-
-    def test_rows_missing_symbol_or_expiry_are_skipped(self):
-        rows = [{"symbol": None, "expiry_date": "2026-07-28", "last_price": 100.0}, {"symbol": "X", "expiry_date": None, "last_price": 100.0}]
-        assert fo_service.near_month_futures_map(rows) == {}
-
-
-class TestNearMonthColumnLabel:
-    def test_label_from_most_common_expiry_month(self):
-        near_month = {
-            "RELIANCE": {"expiry_date": "2026-07-28", "price": 1300.0},
-            "TCS": {"expiry_date": "2026-07-28", "price": 3800.0},
-            "HDFCBANK": {"expiry_date": "2026-08-25", "price": 800.0},  # a rare outlier
-        }
-        assert fo_service.near_month_column_label(near_month) == "Jul Future"
-
-    def test_empty_map_returns_generic_label(self):
-        assert fo_service.near_month_column_label({}) == "Future"
-
-
 class TestCsp5PctMap:
     def _rows(self):
         return [

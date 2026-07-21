@@ -7,9 +7,6 @@ screen renders, so they're unit-testable without Streamlit or a live DB.
 """
 from __future__ import annotations
 
-from collections import Counter
-from datetime import date
-
 from supabase import Client
 
 from src.data_providers.nse_fo_provider import FOBhavcopy
@@ -121,38 +118,6 @@ def futures_term_structure(futures_rows: list[dict]) -> list[dict]:
             }
         )
     return shaped
-
-
-def near_month_futures_map(futures_rows: list[dict]) -> dict[str, dict]:
-    """Pure: groups open-futures rows (from `fo_repo.get_all_open_futures`,
-    every symbol/expiry mixed together) by symbol, keeping only each
-    symbol's nearest (earliest) expiry -- the "near month" contract used
-    for the Dashboard's near-month future price column. Returns
-    `{symbol: {"expiry_date": ..., "price": ...}}`."""
-    best: dict[str, dict] = {}
-    for r in futures_rows:
-        symbol = r.get("symbol")
-        expiry = r.get("expiry_date")
-        if not symbol or not expiry:
-            continue
-        if symbol not in best or expiry < best[symbol]["expiry_date"]:
-            price = _num(r.get("last_price")) or _num(r.get("close")) or _num(r.get("settlement_price"))
-            best[symbol] = {"expiry_date": expiry, "price": price}
-    return best
-
-
-def near_month_column_label(near_month_map: dict[str, dict]) -> str:
-    """The Dashboard's near-month future column header, e.g. "Jul Future".
-    NSE's monthly F&O cycle means every symbol's near-month expiry is
-    normally the same calendar month, so the most common expiry across the
-    map stands in for the whole column (falls back to a generic "Future"
-    if no F&O data is loaded at all)."""
-    expiries = [v["expiry_date"] for v in near_month_map.values() if v.get("expiry_date")]
-    if not expiries:
-        return "Future"
-    most_common = Counter(expiries).most_common(1)[0][0]
-    d = most_common if isinstance(most_common, date) else date.fromisoformat(str(most_common)[:10])
-    return f"{d.strftime('%b')} Future"
 
 
 def csp_5pct_map(put_rows: list[dict], spot_by_symbol: dict[str, float | None]) -> dict[str, dict]:

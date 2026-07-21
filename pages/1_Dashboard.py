@@ -43,13 +43,12 @@ def _load_last_fo_fetch(_client, _cache_bust: int):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_fo_data(_client, _cache_bust: int):
-    """Every open future (all symbols) + every open option leg -- both CE
-    and PE, since the 5% ITM PMCC column needs calls for its two CE legs
-    as well as the put -- in two bulk queries, for the near-month future /
+    """Every open option leg -- both CE and PE, since the 5% ITM PMCC
+    column needs calls for its two CE legs as well as the put -- for the
     5% CSP / 5% ITM PMCC columns. Cached like the screener rows above --
     Streamlit reruns this whole script on every widget interaction, and
-    each of these queries is thousands of rows."""
-    return fo_repo.get_all_open_futures(_client), fo_repo.get_all_open_options(_client)
+    this query is thousands of rows."""
+    return fo_repo.get_all_open_options(_client)
 
 
 if "dashboard_cache_bust" not in st.session_state:
@@ -144,24 +143,21 @@ if not rows:
 df = pd.DataFrame([r.model_dump() for r in rows])
 
 # ---------------------------------------------------------------------
-# F&O-derived columns (near-month future price, 5% CSP) -- a separate data
-# source from latest_screener_view (the F&O tables), joined in by symbol.
-# Degrades to "N/A" for both columns, not a crash, if migration 0007 /
-# F&O data hasn't been loaded yet -- same APIError-catching pattern as
+# F&O-derived columns (5% CSP, 5% ITM PMCC) -- a separate data source from
+# latest_screener_view (the F&O tables), joined in by symbol. Degrades to
+# "N/A" for both columns, not a crash, if migration 0007 / F&O data
+# hasn't been loaded yet -- same APIError-catching pattern as
 # pages/5_Options.py.
 # ---------------------------------------------------------------------
 try:
-    futures_rows, option_rows = _load_fo_data(client, st.session_state["dashboard_cache_bust"])
+    option_rows = _load_fo_data(client, st.session_state["dashboard_cache_bust"])
 except APIError:
-    futures_rows, option_rows = [], []
+    option_rows = []
 
-near_month = fo_service.near_month_futures_map(futures_rows)
-future_col_label = fo_service.near_month_column_label(near_month)
 spot_by_symbol = dict(zip(df["symbol"], df["latest_price"]))
 csp_map = fo_service.csp_5pct_map(option_rows, spot_by_symbol)
 pmcc_map = fo_service.itm_pmcc_5pct_map(option_rows, spot_by_symbol)
 
-df["future_price"] = df["symbol"].map(lambda s: (near_month.get(s) or {}).get("price"))
 df["csp_5pct"] = df["symbol"].map(lambda s: (csp_map.get(s) or {}).get("csp_pct"))
 df["itm_pmcc_5pct"] = df["symbol"].map(lambda s: (pmcc_map.get(s) or {}).get("pmcc_pct"))
 
@@ -386,7 +382,6 @@ for i, (_, r) in enumerate(filtered.iterrows(), start=1):
             "5D": f"{direction_arrow(r['return_5d'])} {format_pct(r['return_5d'])}",
             "20D": f"{direction_arrow(r['return_20d'])} {format_pct(r['return_20d'])}",
             "Momentum": pass_fail_icon(r["criterion_b"]),
-            future_col_label: format_inr(r["future_price"]) if pd.notna(r["future_price"]) else "N/A",
             "5% CSP": format_pct(r["csp_5pct"], signed=False) if pd.notna(r["csp_5pct"]) else "N/A",
             "5% ITM PMCC": format_pct(r["itm_pmcc_5pct"], signed=False) if pd.notna(r["itm_pmcc_5pct"]) else "N/A",
             "Dividend": f"{format_pct(r['ttm_dividend_yield'], signed=False)} {pass_fail_icon(r['criterion_a'])}",
@@ -400,16 +395,34 @@ table_df = pd.DataFrame(display_rows)
 if table_df.empty:
     st.info("No stocks match your current filters. Try loosening the sidebar filters (e.g. minimum dividend yield/PEG) or confirm screener data has been seeded/refreshed.")
 else:
-    st.markdown(
-        render_screener_table(
-            display_rows,
-            user_settings.theme,
-            sortable_columns=SORT_OPTION_TO_KEY,
-            active_sort_key=SORT_OPTION_TO_KEY[sort_col],
-            sort_desc=sort_desc,
-        ),
-        unsafe_allow_html=True,
-    )
+    # A slim native-widget column of "open detail" buttons sits beside the
+    # table rather than inside it: this table is hand-rendered HTML (see
+    # render_screener_table()'s docstring), which has no way to trigger a
+    # same-session page switch -- a real `<a href>` would force a full
+    # browser navigation, and this app keeps the Supabase auth session
+    # only in st.session_state, so any real navigation logs the user out
+    # (the same failure mode the sort-header links hit earlier). A native
+    # st.button() stays on the same WebSocket session, so it's used here
+    # instead, one per row, roughly aligned alongside its row.
+    link_col, table_col = st.columns([1, 30])
+    with link_col:
+        st.markdown("<div style='height:2.6rem'></div>", unsafe_allow_html=True)
+        for i, row in enumerate(display_rows):
+            symbol = row["Symbol"]
+            if st.button("🔍", key=f"open_detail_{i}_{symbol}", help=f"Open {symbol} in Stock Detail"):
+                st.session_state["selected_symbol"] = symbol
+                st.switch_page("pages/2_Stock_Detail.py")
+    with table_col:
+        st.markdown(
+            render_screener_table(
+                display_rows,
+                user_settings.theme,
+                sortable_columns=SORT_OPTION_TO_KEY,
+                active_sort_key=SORT_OPTION_TO_KEY[sort_col],
+                sort_desc=sort_desc,
+            ),
+            unsafe_allow_html=True,
+        )
 
 st.divider()
 open_symbols = table_df["Symbol"] if not table_df.empty else []
