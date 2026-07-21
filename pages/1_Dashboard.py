@@ -169,10 +169,9 @@ df["itm_pmcc_5pct"] = df["symbol"].map(lambda s: (pmcc_map.get(s) or {}).get("pm
 # Sorting -- a single "Sort By" dropdown (+ Descending checkbox) rendered
 # just above the table, deliberately limited to the columns worth sorting
 # by (not every column the table displays). `SORT_OPTION_TO_KEY` maps the
-# dropdown's own labels to the underlying dataframe column; the table's
-# actual header text differs for one entry ("Dividend" here vs "Dividend
-# yield" as a column header), so a second, key-keyed map
-# (`_TABLE_HEADER_BY_KEY`) drives which header gets the ▲/▼ arrow.
+# dropdown's own labels to the underlying dataframe column; these labels
+# are also exactly the table's own header text for each of these columns,
+# so the same dict doubles as `sortable_columns` for the ▲/▼ arrow.
 # ---------------------------------------------------------------------
 SORT_OPTIONS: list[tuple[str, str]] = [
     ("Stock", "symbol"),
@@ -184,15 +183,6 @@ SORT_OPTIONS: list[tuple[str, str]] = [
 ]
 SORT_OPTION_LABELS = [label for label, _ in SORT_OPTIONS]
 SORT_OPTION_TO_KEY = dict(SORT_OPTIONS)
-_TABLE_HEADER_BY_KEY = {
-    "symbol": "Stock",
-    "criterion_b": "Momentum",
-    "csp_5pct": "5% CSP",
-    "ttm_dividend_yield": "Dividend yield",
-    "pe_ratio": "PE",
-    "peg_ratio": "PEG",
-}
-TABLE_HEADER_TO_SORT_KEY = {header: key for key, header in _TABLE_HEADER_BY_KEY.items()}
 
 if "dashboard_sort_label" not in st.session_state:
     st.session_state["dashboard_sort_label"] = "Stock"
@@ -214,7 +204,6 @@ counts = {
     "Green": int((df["status"] == "green").sum()),
     "Amber": int((df["status"] == "amber").sum()),
     "Red": int((df["status"] == "red").sum()),
-    "Unavailable": int((df["status"] == "unavailable").sum()),
 }
 extra_counts = {
     "Yield > threshold": int((df["criterion_a"] == True).sum()),  # noqa: E712
@@ -222,13 +211,12 @@ extra_counts = {
     "PEG <= threshold": int((df["criterion_c"] == True).sum()),
 }
 
-metric_cols = st.columns(8)
+metric_cols = st.columns(7)
 metric_specs = [
     ("Total stocks", counts["Total"], None, None),
     ("🟢 Green", counts["Green"], "green", None),
     ("🟠 Amber", counts["Amber"], "amber", None),
     ("🔴 Red", counts["Red"], "red", None),
-    ("⚪ Unavailable", counts["Unavailable"], "unavailable", None),
     ("Yield > threshold", extra_counts["Yield > threshold"], None, "criterion_a"),
     ("All momentum +ve", extra_counts["All momentum +ve"], None, "criterion_b"),
     ("PEG <= threshold", extra_counts["PEG <= threshold"], None, "criterion_c"),
@@ -391,7 +379,7 @@ for i, (_, r) in enumerate(filtered.iterrows(), start=1):
         {
             "#": i,
             "Stock": r["symbol"],
-            "Latest price": format_inr(r["latest_price"]),
+            "LTP": format_inr(r["latest_price"]),
             "52W High": f"{format_inr(r['week_52_high'])} {pass_fail_icon(r['criterion_52w_high'])}" if pd.notna(r["week_52_high"]) else "N/A",
             "52W Low": f"{format_inr(r['week_52_low'])} {pass_fail_icon(r['criterion_52w_low'])}" if pd.notna(r["week_52_low"]) else "N/A",
             "1D": f"{direction_arrow(r['return_1d'])} {format_pct(r['return_1d'])}",
@@ -401,7 +389,7 @@ for i, (_, r) in enumerate(filtered.iterrows(), start=1):
             future_col_label: format_inr(r["future_price"]) if pd.notna(r["future_price"]) else "N/A",
             "5% CSP": format_pct(r["csp_5pct"], signed=False) if pd.notna(r["csp_5pct"]) else "N/A",
             "5% ITM PMCC": format_pct(r["itm_pmcc_5pct"], signed=False) if pd.notna(r["itm_pmcc_5pct"]) else "N/A",
-            "Dividend yield": f"{format_pct(r['ttm_dividend_yield'], signed=False)} {pass_fail_icon(r['criterion_a'])}",
+            "Dividend": f"{format_pct(r['ttm_dividend_yield'], signed=False)} {pass_fail_icon(r['criterion_a'])}",
             "PE": f"{r['pe_ratio']:.1f}" if pd.notna(r["pe_ratio"]) else "N/A",
             "PEG": f"{r['peg_ratio']:.2f} {pass_fail_icon(r['criterion_c'])}" if pd.notna(r["peg_ratio"]) else "N/A",
             "Symbol": r["symbol"],
@@ -416,7 +404,7 @@ else:
         render_screener_table(
             display_rows,
             user_settings.theme,
-            sortable_columns=TABLE_HEADER_TO_SORT_KEY,
+            sortable_columns=SORT_OPTION_TO_KEY,
             active_sort_key=SORT_OPTION_TO_KEY[sort_col],
             sort_desc=sort_desc,
         ),
