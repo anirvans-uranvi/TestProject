@@ -125,7 +125,11 @@ def csp_5pct_map(put_rows: list[dict], spot_by_symbol: dict[str, float | None]) 
     `fo_repo.get_all_open_options(OptionType.PE)`, every symbol/expiry
     mixed together), restricts to that symbol's own nearest available
     expiry, finds the strike closest to 95% of spot, and returns
-    `{symbol: {"strike": ..., "put_price": ..., "csp_pct": ...}}`.
+    `{symbol: {"strike": ..., "put_price": ..., "csp_pct": ..., "spot":
+    ..., "expiry_date": ...}}`. `spot`/`expiry_date` are just the inputs
+    that produced this result, echoed back so a caller (the Options
+    screen's "5% CSP" breakdown) can display the calculation without
+    having to separately track which expiry/spot were actually used.
 
     "5% CSP" is a cash-secured-put yield: the premium for the strike
     nearest 5% below spot, as a percentage of that strike (the full
@@ -163,7 +167,13 @@ def csp_5pct_map(put_rows: list[dict], spot_by_symbol: dict[str, float | None]) 
         strike = _num(best_row["strike_price"])
         put_price = _num(best_row.get("last_price")) or _num(best_row.get("close")) or _num(best_row.get("settlement_price"))
         csp_pct = (put_price / strike * 100) if (put_price is not None and strike) else None
-        result[symbol] = {"strike": strike, "put_price": put_price, "csp_pct": csp_pct}
+        result[symbol] = {
+            "strike": strike,
+            "put_price": put_price,
+            "csp_pct": csp_pct,
+            "spot": spot,
+            "expiry_date": near_expiry,
+        }
     return result
 
 
@@ -183,8 +193,12 @@ def itm_pmcc_5pct_map(option_rows: list[dict], spot_by_symbol: dict[str, float |
     As with `csp_5pct_map`, `strike * lot_size` cancels out of both the
     premiums and this ratio (each leg is 1 lot), so lot size never needs
     to appear here. Returns `{symbol: {"itm_ce_strike", "otm_ce_strike",
-    "net_credit", "pmcc_pct"}}`; a symbol is omitted if there's no ITM CE,
-    no PE at that strike, or a price is missing for any leg.
+    "buy_ce_price", "sell_pe_price", "sell_ce_price", "net_credit",
+    "pmcc_pct", "spot", "expiry_date"}}` -- the per-leg prices and inputs
+    are included (not just the final net credit) so a caller (the
+    Options screen's "5% ITM PMCC" breakdown) can show the full
+    calculation, not just the result. A symbol is omitted if there's no
+    ITM CE, no PE at that strike, or a price is missing for any leg.
     """
     by_symbol: dict[str, list[dict]] = {}
     for r in option_rows:
@@ -236,7 +250,12 @@ def itm_pmcc_5pct_map(option_rows: list[dict], spot_by_symbol: dict[str, float |
         result[symbol] = {
             "itm_ce_strike": itm_strike,
             "otm_ce_strike": otm_strike,
+            "buy_ce_price": buy_ce_price,
+            "sell_pe_price": sell_pe_price,
+            "sell_ce_price": sell_ce_price,
             "net_credit": net_credit,
             "pmcc_pct": pmcc_pct,
+            "spot": spot,
+            "expiry_date": near_expiry,
         }
     return result

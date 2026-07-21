@@ -404,7 +404,18 @@ else:
     # (the same failure mode the sort-header links hit earlier). A native
     # st.button() stays on the same WebSocket session, so it's used here
     # instead, one per row, roughly aligned alongside its row.
-    link_col, table_col = st.columns([1, 30])
+    table_col, link_col = st.columns([30, 1])
+    with table_col:
+        st.markdown(
+            render_screener_table(
+                display_rows,
+                user_settings.theme,
+                sortable_columns=SORT_OPTION_TO_KEY,
+                active_sort_key=SORT_OPTION_TO_KEY[sort_col],
+                sort_desc=sort_desc,
+            ),
+            unsafe_allow_html=True,
+        )
     with link_col:
         # render_screener_table()'s rows are a fixed, CSS-driven height
         # (Tailwind `text-sm`/`py-2`) that native st.button()s don't
@@ -434,17 +445,6 @@ else:
                 if st.button("🔍", key=f"open_detail_{i}_{symbol}", help=f"Open {symbol} in Stock Detail"):
                     st.session_state["selected_symbol"] = symbol
                     st.switch_page("pages/2_Stock_Detail.py")
-    with table_col:
-        st.markdown(
-            render_screener_table(
-                display_rows,
-                user_settings.theme,
-                sortable_columns=SORT_OPTION_TO_KEY,
-                active_sort_key=SORT_OPTION_TO_KEY[sort_col],
-                sort_desc=sort_desc,
-            ),
-            unsafe_allow_html=True,
-        )
 
 st.divider()
 open_symbols = table_df["Symbol"] if not table_df.empty else []
