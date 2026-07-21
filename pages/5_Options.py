@@ -228,7 +228,7 @@ else:
     csp_stats = [
         ("Spot", format_inr(csp["spot"]), None),
         ("Strike sold (nearest 5% below spot)", format_inr(csp["strike"], decimals=0), None),
-        ("Put premium (LTP)", format_inr(csp["put_price"]), None),
+        ("Put premium (LTP)", format_inr(csp["put_price"]), f"traded {csp['put_trade_date']}" if csp["put_trade_date"] else None),
         ("5% CSP", format_pct(csp["csp_pct"], signed=False), "put premium ÷ strike × 100"),
     ]
     st.markdown(render_stat_grid(csp_stats, user_settings.theme, cols=4), unsafe_allow_html=True)
@@ -252,18 +252,21 @@ else:
                 "Leg": "Buy 1 CE (ITM, closest to spot)",
                 "Strike": format_inr(pmcc["itm_ce_strike"], decimals=0),
                 "Price": format_inr(pmcc["buy_ce_price"]),
+                "Trade Date": pmcc["buy_ce_trade_date"] or "—",
                 "Cash flow": f"-{format_inr(pmcc['buy_ce_price'])}",
             },
             {
                 "Leg": "Sell 1 PE (same strike as ITM CE)",
                 "Strike": format_inr(pmcc["itm_ce_strike"], decimals=0),
                 "Price": format_inr(pmcc["sell_pe_price"]),
+                "Trade Date": pmcc["sell_pe_trade_date"] or "—",
                 "Cash flow": f"+{format_inr(pmcc['sell_pe_price'])}",
             },
             {
                 "Leg": "Sell 1 CE (nearest 5% below ITM CE)",
                 "Strike": format_inr(pmcc["otm_ce_strike"], decimals=0),
                 "Price": format_inr(pmcc["sell_ce_price"]),
+                "Trade Date": pmcc["sell_ce_trade_date"] or "—",
                 "Cash flow": f"+{format_inr(pmcc['sell_ce_price'])}",
             },
         ]

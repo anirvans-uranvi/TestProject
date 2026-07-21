@@ -150,11 +150,16 @@ def csp_5pct_map(put_rows: list[dict], spot_by_symbol: dict[str, float | None]) 
     the freshest available trade_date** (see `_freshest_rows`, falls back
     to every strike at that expiry if none of them carry a trade_date),
     and returns `{symbol: {"strike": ..., "put_price": ..., "csp_pct":
-    ..., "spot": ..., "expiry_date": ...}}`. `spot`/`expiry_date` are just
-    the inputs that produced this result, echoed back so a caller (the
-    Options screen's "5% CSP" breakdown) can display the calculation
-    without having to separately track which expiry/spot were actually
-    used.
+    ..., "spot": ..., "expiry_date": ..., "put_trade_date": ...}}`.
+    `spot`/`expiry_date` are just the inputs that produced this result,
+    echoed back so a caller (the Options screen's "5% CSP" breakdown) can
+    display the calculation without having to separately track which
+    expiry/spot were actually used. `put_trade_date` is the chosen row's
+    own `trade_date` -- this is EOD bhavcopy data (no intraday execution
+    timestamp exists), so it's a trading day, not a time of day; showing
+    it next to the premium in the UI is what actually surfaces a stale
+    quote when `_freshest_rows` had to fall back to one (nothing else in
+    the result makes staleness visible after the fact).
 
     "5% CSP" is a cash-secured-put yield: the premium for the strike
     nearest 5% below spot, as a percentage of that strike (the full
@@ -198,6 +203,7 @@ def csp_5pct_map(put_rows: list[dict], spot_by_symbol: dict[str, float | None]) 
             "csp_pct": csp_pct,
             "spot": spot,
             "expiry_date": near_expiry,
+            "put_trade_date": best_row.get("trade_date"),
         }
     return result
 
@@ -222,11 +228,17 @@ def itm_pmcc_5pct_map(option_rows: list[dict], spot_by_symbol: dict[str, float |
     premiums and this ratio (each leg is 1 lot), so lot size never needs
     to appear here. Returns `{symbol: {"itm_ce_strike", "otm_ce_strike",
     "buy_ce_price", "sell_pe_price", "sell_ce_price", "net_credit",
-    "pmcc_pct", "spot", "expiry_date"}}` -- the per-leg prices and inputs
-    are included (not just the final net credit) so a caller (the
-    Options screen's "5% ITM PMCC" breakdown) can show the full
-    calculation, not just the result. A symbol is omitted if there's no
-    ITM CE, no PE at that strike, or a price is missing for any leg.
+    "pmcc_pct", "spot", "expiry_date", "buy_ce_trade_date",
+    "sell_pe_trade_date", "sell_ce_trade_date"}}` -- the per-leg prices
+    and inputs are included (not just the final net credit) so a caller
+    (the Options screen's "5% ITM PMCC" breakdown) can show the full
+    calculation, not just the result. The three `*_trade_date` fields are
+    each leg's own row's `trade_date` (a trading day, not a time of day
+    -- this is EOD bhavcopy data, no intraday execution timestamp
+    exists), so a stale fallback leg (see the ITM-candidate fallback
+    above) is visible in the UI rather than silently blending in with
+    the fresher legs around it. A symbol is omitted if there's no ITM CE,
+    no PE at that strike, or a price is missing for any leg.
     """
     by_symbol: dict[str, list[dict]] = {}
     for r in option_rows:
@@ -296,5 +308,8 @@ def itm_pmcc_5pct_map(option_rows: list[dict], spot_by_symbol: dict[str, float |
             "pmcc_pct": pmcc_pct,
             "spot": spot,
             "expiry_date": near_expiry,
+            "buy_ce_trade_date": buy_ce.get("trade_date"),
+            "sell_pe_trade_date": pe_same_strike[0].get("trade_date"),
+            "sell_ce_trade_date": sell_ce.get("trade_date"),
         }
     return result
