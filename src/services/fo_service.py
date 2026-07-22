@@ -209,8 +209,43 @@ def csp_5pct_for_rows(pe_rows: list[dict], spot: float, expiry_date) -> dict | N
 def itm_pmcc_5pct_map(option_rows: list[dict], spot_by_symbol: dict[str, float | None]) -> dict[str, dict]:
     """Pure: for each symbol's CE+PE legs (from
     `fo_repo.get_all_open_options()`, every symbol/expiry/type mixed
-    together), restricts to that symbol's own nearest available expiry and
-    builds the "5% ITM PMCC" column:
+    together), restricts to that symbol's own nearest available expiry
+    and delegates to `itm_pmcc_for_rows` to build the "5% ITM PMCC"
+    column. See that function's docstring for the calculation itself.
+    """
+    by_symbol: dict[str, list[dict]] = {}
+    for r in option_rows:
+        symbol = r.get("symbol")
+        if not symbol:
+            continue
+        by_symbol.setdefault(symbol, []).append(r)
+
+    result: dict[str, dict] = {}
+    for symbol, rows in by_symbol.items():
+        spot = spot_by_symbol.get(symbol)
+        if spot is None:
+            continue
+        expiries = {r.get("expiry_date") for r in rows if r.get("expiry_date")}
+        if not expiries:
+            continue
+        near_expiry = min(expiries)
+        near_rows = [r for r in rows if r.get("expiry_date") == near_expiry]
+        pmcc = itm_pmcc_for_rows(near_rows, spot, near_expiry)
+        if pmcc is None:
+            continue
+        result[symbol] = pmcc
+    return result
+
+
+def itm_pmcc_for_rows(leg_rows: list[dict], spot: float, expiry_date) -> dict | None:
+    """Pure: the single-expiry core of `itm_pmcc_5pct_map`, factored out
+    so a caller can compute "5% ITM PMCC" for a *specific* expiry rather
+    than only ever the nearest one -- mirrors `csp_5pct_for_rows`'s same
+    extraction, used by the Dashboard's precomputed cache to store a
+    near/next/far row per symbol (see `dashboard_metrics_rows`).
+    `leg_rows` should already be filtered to one symbol + one expiry
+    (both CE and PE legs mixed in, as `itm_pmcc_5pct_map` already
+    expects). Builds:
 
     1. Buy 1 lot of the ITM CE closest to spot (largest strike < spot,
        preferring strikes with the freshest available trade_date -- see
@@ -222,138 +257,141 @@ def itm_pmcc_5pct_map(option_rows: list[dict], spot_by_symbol: dict[str, float |
     4. Net credit = PE sell price + CE sell price - CE buy price.
     5. `pmcc_pct` = net credit / the bought CE's strike * 100.
 
-    As with `csp_5pct_map`, `strike * lot_size` cancels out of both the
-    premiums and this ratio (each leg is 1 lot), so lot size never needs
-    to appear here. Returns `{symbol: {"itm_ce_strike", "otm_ce_strike",
+    As with `csp_5pct_for_rows`, `strike * lot_size` cancels out of both
+    the premiums and this ratio (each leg is 1 lot), so lot size never
+    needs to appear here. Returns `{"itm_ce_strike", "otm_ce_strike",
     "buy_ce_price", "sell_pe_price", "sell_ce_price", "net_credit",
     "pmcc_pct", "spot", "expiry_date", "buy_ce_trade_date",
-    "sell_pe_trade_date", "sell_ce_trade_date"}}` -- the per-leg prices
+    "sell_pe_trade_date", "sell_ce_trade_date"}` -- the per-leg prices
     and inputs are included (not just the final net credit) so a caller
     (the Options screen's "5% ITM PMCC" breakdown) can show the full
     calculation, not just the result. The three `*_trade_date` fields are
     each leg's own row's `trade_date` (a trading day, not a time of day
     -- this is EOD bhavcopy data, no intraday execution timestamp
     exists), so a stale fallback leg (see the ITM-candidate fallback
-    above) is visible in the UI rather than silently blending in with
-    the fresher legs around it. A symbol is omitted if there's no ITM CE,
-    no PE at that strike, or a price is missing for any leg.
+    below) is visible in the UI rather than silently blending in with
+    the fresher legs around it. Returns `None` if there's no ITM CE, no
+    PE at that strike, or a price is missing for any leg.
     """
-    by_symbol: dict[str, list[dict]] = {}
-    for r in option_rows:
-        symbol = r.get("symbol")
-        if not symbol:
-            continue
-        by_symbol.setdefault(symbol, []).append(r)
+    rows = [r for r in leg_rows if r.get("strike_price") is not None]
+    ce_rows = [r for r in rows if str(r.get("option_type")) == "CE"]
+    pe_rows = [r for r in rows if str(r.get("option_type")) == "PE"]
+    if not ce_rows or not pe_rows:
+        return None
 
     def _price(r: dict) -> float | None:
         return _num(r.get("last_price")) or _num(r.get("close")) or _num(r.get("settlement_price"))
 
-    result: dict[str, dict] = {}
-    for symbol, rows in by_symbol.items():
-        spot = spot_by_symbol.get(symbol)
-        if spot is None:
-            continue
-        expiries = {r.get("expiry_date") for r in rows if r.get("expiry_date")}
-        if not expiries:
-            continue
-        near_expiry = min(expiries)
-        near_rows = [r for r in rows if r.get("expiry_date") == near_expiry and r.get("strike_price") is not None]
-        ce_rows = [r for r in near_rows if str(r.get("option_type")) == "CE"]
-        pe_rows = [r for r in near_rows if str(r.get("option_type")) == "PE"]
-        if not ce_rows or not pe_rows:
-            continue
+    # Prefer strikes with the freshest available trade_date (see
+    # _freshest_rows) -- an illiquid strike's "latest" row can be
+    # weeks older than its liquid neighbors', with a premium that no
+    # longer reflects reality. Falls back to the full (possibly
+    # stale-inclusive) ce_rows if the freshest-only subset has no ITM
+    # candidate at all, so a symbol isn't dropped just because its
+    # single most-recent trade_date happens to have no strike below
+    # spot.
+    fresh_ce_rows = _freshest_rows(ce_rows)
+    itm_ce_candidates = [r for r in fresh_ce_rows if _num(r["strike_price"]) < spot]
+    if not itm_ce_candidates:
+        itm_ce_candidates = [r for r in ce_rows if _num(r["strike_price"]) < spot]
+    if not itm_ce_candidates:
+        return None
+    buy_ce = max(itm_ce_candidates, key=lambda r: _num(r["strike_price"]))
+    itm_strike = _num(buy_ce["strike_price"])
+    buy_ce_price = _price(buy_ce)
 
-        # Prefer strikes with the freshest available trade_date (see
-        # _freshest_rows) -- an illiquid strike's "latest" row can be
-        # weeks older than its liquid neighbors', with a premium that no
-        # longer reflects reality. Falls back to the full (possibly
-        # stale-inclusive) ce_rows if the freshest-only subset has no ITM
-        # candidate at all, so a symbol isn't dropped just because its
-        # single most-recent trade_date happens to have no strike below
-        # spot.
-        fresh_ce_rows = _freshest_rows(ce_rows)
-        itm_ce_candidates = [r for r in fresh_ce_rows if _num(r["strike_price"]) < spot]
-        if not itm_ce_candidates:
-            itm_ce_candidates = [r for r in ce_rows if _num(r["strike_price"]) < spot]
-        if not itm_ce_candidates:
-            continue
-        buy_ce = max(itm_ce_candidates, key=lambda r: _num(r["strike_price"]))
-        itm_strike = _num(buy_ce["strike_price"])
-        buy_ce_price = _price(buy_ce)
+    pe_same_strike = [r for r in pe_rows if _num(r["strike_price"]) == itm_strike]
+    if not pe_same_strike:
+        return None
+    sell_pe_price = _price(pe_same_strike[0])
 
-        pe_same_strike = [r for r in pe_rows if _num(r["strike_price"]) == itm_strike]
-        if not pe_same_strike:
-            continue
-        sell_pe_price = _price(pe_same_strike[0])
+    target = itm_strike * 0.95
+    sell_ce = min(fresh_ce_rows, key=lambda r: abs(_num(r["strike_price"]) - target))
+    otm_strike = _num(sell_ce["strike_price"])
+    sell_ce_price = _price(sell_ce)
 
-        target = itm_strike * 0.95
-        sell_ce = min(fresh_ce_rows, key=lambda r: abs(_num(r["strike_price"]) - target))
-        otm_strike = _num(sell_ce["strike_price"])
-        sell_ce_price = _price(sell_ce)
+    if buy_ce_price is None or sell_pe_price is None or sell_ce_price is None or not itm_strike:
+        return None
 
-        if buy_ce_price is None or sell_pe_price is None or sell_ce_price is None or not itm_strike:
-            continue
-
-        net_credit = sell_pe_price + sell_ce_price - buy_ce_price
-        pmcc_pct = net_credit / itm_strike * 100
-        result[symbol] = {
-            "itm_ce_strike": itm_strike,
-            "otm_ce_strike": otm_strike,
-            "buy_ce_price": buy_ce_price,
-            "sell_pe_price": sell_pe_price,
-            "sell_ce_price": sell_ce_price,
-            "net_credit": net_credit,
-            "pmcc_pct": pmcc_pct,
-            "spot": spot,
-            "expiry_date": near_expiry,
-            "buy_ce_trade_date": buy_ce.get("trade_date"),
-            "sell_pe_trade_date": pe_same_strike[0].get("trade_date"),
-            "sell_ce_trade_date": sell_ce.get("trade_date"),
-        }
-    return result
+    net_credit = sell_pe_price + sell_ce_price - buy_ce_price
+    pmcc_pct = net_credit / itm_strike * 100
+    return {
+        "itm_ce_strike": itm_strike,
+        "otm_ce_strike": otm_strike,
+        "buy_ce_price": buy_ce_price,
+        "sell_pe_price": sell_pe_price,
+        "sell_ce_price": sell_ce_price,
+        "net_credit": net_credit,
+        "pmcc_pct": pmcc_pct,
+        "spot": spot,
+        "expiry_date": expiry_date,
+        "buy_ce_trade_date": buy_ce.get("trade_date"),
+        "sell_pe_trade_date": pe_same_strike[0].get("trade_date"),
+        "sell_ce_trade_date": sell_ce.get("trade_date"),
+    }
 
 
 def dashboard_metrics_rows(option_rows: list[dict], spot_by_symbol: dict[str, float | None]) -> list[dict]:
-    """Pure: merges `csp_5pct_map` and `itm_pmcc_5pct_map` (the same two,
-    already-tested calculations the Dashboard has always used) into one
-    flat row per symbol, shaped for `dashboard_fo_metrics` (see migration
-    0009_add_dashboard_fo_metrics.sql). A symbol missing from either map
-    (no priceable CSP/PMCC, e.g. no F&O data yet) still gets a row, with
-    that half's fields left `None` -- the Dashboard already treats `None`
-    here as "N/A", so this changes nothing about what's displayed, only
-    where the calculation happens (once here, at refresh time, instead of
-    on every page load).
+    """Pure: for each symbol with a spot price and open option legs,
+    computes "5% CSP" / "5% ITM PMCC" (via `csp_5pct_for_rows` /
+    `itm_pmcc_for_rows`, the same already-tested calculations the
+    Dashboard has always used) for each of that symbol's **up to 3
+    nearest distinct expiries** -- near/next/far, the same term-structure
+    shape `pages/5_Options.py`'s Futures section and CSP table already
+    use -- and returns one flat row per **(symbol, expiry)**, shaped for
+    `dashboard_fo_metrics` (see migration
+    0010_dashboard_fo_metrics_per_expiry.sql). This lets the Dashboard
+    offer a month dropdown that just selects which already-cached row to
+    display, with no live recomputation on selection.
+
+    A symbol with no spot price or no option data gets zero rows (there's
+    no `expiry_date` to key a row on, and the column is `not null`) --
+    the Dashboard's lookup for that symbol at any selected month then
+    simply finds nothing, which it already treats as "N/A". A symbol with
+    fewer than 3 expiries just gets fewer rows. `csp_pct`/`pmcc_pct` are
+    `None` independently of each other when either calculation has no
+    priceable result for that specific expiry (e.g. no ITM CE that month).
     """
-    csp_map = csp_5pct_map(option_rows, spot_by_symbol)
-    pmcc_map = itm_pmcc_5pct_map(option_rows, spot_by_symbol)
+    legs_by_symbol: dict[str, list[dict]] = {}
+    for r in option_rows:
+        symbol = r.get("symbol")
+        if not symbol:
+            continue
+        legs_by_symbol.setdefault(symbol, []).append(r)
 
     rows: list[dict] = []
-    for symbol in spot_by_symbol:
-        csp = csp_map.get(symbol)
-        pmcc = pmcc_map.get(symbol)
-        rows.append(
-            {
-                "symbol": symbol,
-                "csp_strike": csp["strike"] if csp else None,
-                "csp_put_price": csp["put_price"] if csp else None,
-                "csp_pct": csp["csp_pct"] if csp else None,
-                "csp_spot": csp["spot"] if csp else None,
-                "csp_expiry_date": csp["expiry_date"] if csp else None,
-                "csp_put_trade_date": csp["put_trade_date"] if csp else None,
-                "pmcc_itm_ce_strike": pmcc["itm_ce_strike"] if pmcc else None,
-                "pmcc_otm_ce_strike": pmcc["otm_ce_strike"] if pmcc else None,
-                "pmcc_buy_ce_price": pmcc["buy_ce_price"] if pmcc else None,
-                "pmcc_sell_pe_price": pmcc["sell_pe_price"] if pmcc else None,
-                "pmcc_sell_ce_price": pmcc["sell_ce_price"] if pmcc else None,
-                "pmcc_net_credit": pmcc["net_credit"] if pmcc else None,
-                "pmcc_pct": pmcc["pmcc_pct"] if pmcc else None,
-                "pmcc_spot": pmcc["spot"] if pmcc else None,
-                "pmcc_expiry_date": pmcc["expiry_date"] if pmcc else None,
-                "pmcc_buy_ce_trade_date": pmcc["buy_ce_trade_date"] if pmcc else None,
-                "pmcc_sell_pe_trade_date": pmcc["sell_pe_trade_date"] if pmcc else None,
-                "pmcc_sell_ce_trade_date": pmcc["sell_ce_trade_date"] if pmcc else None,
-            }
-        )
+    for symbol, spot in spot_by_symbol.items():
+        if spot is None:
+            continue
+        legs = legs_by_symbol.get(symbol)
+        if not legs:
+            continue
+        expiries = sorted({r.get("expiry_date") for r in legs if r.get("expiry_date")})[:3]
+        for expiry in expiries:
+            expiry_rows = [r for r in legs if r.get("expiry_date") == expiry]
+            csp = csp_5pct_for_rows(expiry_rows, spot, expiry)
+            pmcc = itm_pmcc_for_rows(expiry_rows, spot, expiry)
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "expiry_date": expiry,
+                    "spot": spot,
+                    "csp_strike": csp["strike"] if csp else None,
+                    "csp_put_price": csp["put_price"] if csp else None,
+                    "csp_pct": csp["csp_pct"] if csp else None,
+                    "csp_put_trade_date": csp["put_trade_date"] if csp else None,
+                    "pmcc_itm_ce_strike": pmcc["itm_ce_strike"] if pmcc else None,
+                    "pmcc_otm_ce_strike": pmcc["otm_ce_strike"] if pmcc else None,
+                    "pmcc_buy_ce_price": pmcc["buy_ce_price"] if pmcc else None,
+                    "pmcc_sell_pe_price": pmcc["sell_pe_price"] if pmcc else None,
+                    "pmcc_sell_ce_price": pmcc["sell_ce_price"] if pmcc else None,
+                    "pmcc_net_credit": pmcc["net_credit"] if pmcc else None,
+                    "pmcc_pct": pmcc["pmcc_pct"] if pmcc else None,
+                    "pmcc_buy_ce_trade_date": pmcc["buy_ce_trade_date"] if pmcc else None,
+                    "pmcc_sell_pe_trade_date": pmcc["sell_pe_trade_date"] if pmcc else None,
+                    "pmcc_sell_ce_trade_date": pmcc["sell_ce_trade_date"] if pmcc else None,
+                }
+            )
     return rows
 
 
@@ -363,9 +401,9 @@ def recompute_dashboard_metrics(client: Client) -> int:
     `scripts/run_refresh.py`, `scripts/fetch_fo_data.py`). Reads the same
     two inputs the Dashboard used to read live (spot prices from
     `latest_screener_view`, open option legs from
-    `latest_option_chain_view`) and writes the result so the Dashboard can
-    just read the small cache table instead. Returns the row count for
-    logging."""
+    `latest_option_chain_view`) and writes the result (up to 3 rows per
+    symbol, one per near/next/far expiry) so the Dashboard can just read
+    the small cache table instead. Returns the row count for logging."""
     screener_rows = snapshot_repo.get_latest_screener(client)
     spot_by_symbol = {r.symbol: r.latest_price for r in screener_rows}
     option_rows = fo_repo.get_all_open_options(client)

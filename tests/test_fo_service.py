@@ -305,27 +305,101 @@ class TestItmPmcc5PctMap:
         assert "RELIANCE" not in result
 
 
-class TestDashboardMetricsRows:
-    """dashboard_metrics_rows merges csp_5pct_map + itm_pmcc_5pct_map (both
-    already covered above) into the flat per-symbol shape
-    dashboard_fo_metrics (migration 0009) stores -- so these tests focus on
-    the merge itself, not re-deriving the underlying strike-selection math."""
+class TestItmPmccForRows:
+    """The single-expiry core itm_pmcc_5pct_map delegates to -- used by
+    the Dashboard's precomputed cache to store a near/next/far row per
+    symbol (see TestDashboardMetricsRows below)."""
 
-    EXPIRY = "2026-07-28"
-
-    def _rows(self, symbol="RELIANCE"):
+    def _rows(self):
+        # spot 1000 -> ITM CE closest to spot (strike < 1000) is 950;
+        # 5% below 950 (902.5) is closest to strike 900.
         return [
-            {"symbol": symbol, "option_type": "CE", "strike_price": 900.0, "expiry_date": self.EXPIRY, "last_price": 110.0},
-            {"symbol": symbol, "option_type": "CE", "strike_price": 950.0, "expiry_date": self.EXPIRY, "last_price": 60.0},
-            {"symbol": symbol, "option_type": "PE", "strike_price": 900.0, "expiry_date": self.EXPIRY, "last_price": 5.0},
-            {"symbol": symbol, "option_type": "PE", "strike_price": 950.0, "expiry_date": self.EXPIRY, "last_price": 25.0},
+            {"option_type": "CE", "strike_price": 900.0, "last_price": 110.0},
+            {"option_type": "CE", "strike_price": 950.0, "last_price": 60.0},
+            {"option_type": "CE", "strike_price": 1000.0, "last_price": 20.0},
+            {"option_type": "PE", "strike_price": 900.0, "last_price": 5.0},
+            {"option_type": "PE", "strike_price": 950.0, "last_price": 25.0},
+            {"option_type": "PE", "strike_price": 1000.0, "last_price": 60.0},
         ]
 
-    def test_merges_csp_and_pmcc_for_the_same_symbol(self):
-        rows = fo_service.dashboard_metrics_rows(self._rows(), {"RELIANCE": 1000.0})
+    def test_matches_itm_pmcc_5pct_map_for_the_same_single_expiry(self):
+        result = fo_service.itm_pmcc_for_rows(self._rows(), spot=1000.0, expiry_date="2026-07-28")
+        assert result["itm_ce_strike"] == 950.0
+        assert result["otm_ce_strike"] == 900.0
+        assert abs(result["net_credit"] - 75.0) < 1e-9
+        assert abs(result["pmcc_pct"] - (75.0 / 950.0 * 100)) < 1e-9
+        assert result["spot"] == 1000.0
+        assert result["expiry_date"] == "2026-07-28"
+
+    def test_echoes_back_the_expiry_date_argument_not_a_row_field(self):
+        result = fo_service.itm_pmcc_for_rows(self._rows(), spot=1000.0, expiry_date="2026-08-25")
+        assert result["expiry_date"] == "2026-08-25"
+
+    def test_no_ce_rows_returns_none(self):
+        rows = [r for r in self._rows() if r["option_type"] != "CE"]
+        assert fo_service.itm_pmcc_for_rows(rows, spot=1000.0, expiry_date="2026-07-28") is None
+
+    def test_no_pe_rows_returns_none(self):
+        rows = [r for r in self._rows() if r["option_type"] != "PE"]
+        assert fo_service.itm_pmcc_for_rows(rows, spot=1000.0, expiry_date="2026-07-28") is None
+
+    def test_empty_rows_returns_none(self):
+        assert fo_service.itm_pmcc_for_rows([], spot=1000.0, expiry_date="2026-07-28") is None
+
+    def test_no_itm_candidate_at_all_returns_none(self):
+        # spot below every CE strike -> no CE is ITM
+        rows = [{"option_type": "CE", "strike_price": 1050.0, "last_price": 5.0}]
+        assert fo_service.itm_pmcc_for_rows(rows, spot=1000.0, expiry_date="2026-07-28") is None
+
+    def test_prefers_freshest_trade_date_for_itm_and_otm_ce_legs(self):
+        # spot 1000. Strike 990 is the largest CE strike below spot (the
+        # literal "closest ITM" pick) but hasn't traded since 2026-07-01;
+        # strikes 950/900 are farther from spot but are the only ones
+        # from the freshest trade_date (2026-07-20).
+        rows = [
+            {"option_type": "CE", "strike_price": 990.0, "last_price": 200.0, "trade_date": "2026-07-01"},
+            {"option_type": "CE", "strike_price": 950.0, "last_price": 60.0, "trade_date": "2026-07-20"},
+            {"option_type": "CE", "strike_price": 900.0, "last_price": 110.0, "trade_date": "2026-07-20"},
+            {"option_type": "PE", "strike_price": 950.0, "last_price": 25.0, "trade_date": "2026-07-20"},
+        ]
+        result = fo_service.itm_pmcc_for_rows(rows, spot=1000.0, expiry_date="2026-07-28")
+        assert result["itm_ce_strike"] == 950.0
+        assert result["otm_ce_strike"] == 900.0
+
+    def test_falls_back_to_a_stale_itm_ce_if_no_fresh_strike_is_itm(self):
+        rows = [
+            {"option_type": "CE", "strike_price": 950.0, "last_price": 60.0, "trade_date": "2026-06-01"},
+            {"option_type": "CE", "strike_price": 1050.0, "last_price": 5.0, "trade_date": "2026-07-20"},
+            {"option_type": "PE", "strike_price": 950.0, "last_price": 25.0, "trade_date": "2026-06-01"},
+        ]
+        result = fo_service.itm_pmcc_for_rows(rows, spot=1000.0, expiry_date="2026-07-28")
+        assert result["itm_ce_strike"] == 950.0
+
+
+class TestDashboardMetricsRows:
+    """dashboard_metrics_rows fans out per symbol over its up to 3
+    nearest distinct expiries (near/next/far), computing
+    csp_5pct_for_rows + itm_pmcc_for_rows (both already covered above)
+    once per expiry, and returns one flat row per (symbol, expiry) --
+    the shape dashboard_fo_metrics (migration 0010) stores. These tests
+    focus on the fan-out/merge, not re-deriving the underlying
+    strike-selection math."""
+
+    def _rows_for_expiry(self, symbol, expiry):
+        return [
+            {"symbol": symbol, "option_type": "CE", "strike_price": 900.0, "expiry_date": expiry, "last_price": 110.0},
+            {"symbol": symbol, "option_type": "CE", "strike_price": 950.0, "expiry_date": expiry, "last_price": 60.0},
+            {"symbol": symbol, "option_type": "PE", "strike_price": 900.0, "expiry_date": expiry, "last_price": 5.0},
+            {"symbol": symbol, "option_type": "PE", "strike_price": 950.0, "expiry_date": expiry, "last_price": 25.0},
+        ]
+
+    def test_merges_csp_and_pmcc_for_one_expiry(self):
+        rows = fo_service.dashboard_metrics_rows(self._rows_for_expiry("RELIANCE", "2026-07-28"), {"RELIANCE": 1000.0})
         assert len(rows) == 1
         row = rows[0]
         assert row["symbol"] == "RELIANCE"
+        assert row["expiry_date"] == "2026-07-28"
+        assert row["spot"] == 1000.0
         assert row["csp_strike"] == 950.0
         assert row["csp_put_price"] == 25.0
         assert abs(row["csp_pct"] - (25.0 / 950.0 * 100)) < 1e-9
@@ -333,27 +407,48 @@ class TestDashboardMetricsRows:
         assert row["pmcc_otm_ce_strike"] == 900.0
         assert abs(row["pmcc_net_credit"] - (25.0 + 110.0 - 60.0)) < 1e-9
 
-    def test_every_symbol_in_spot_map_gets_a_row_even_with_no_option_data(self):
-        rows = fo_service.dashboard_metrics_rows([], {"RELIANCE": 1000.0})
-        assert len(rows) == 1
-        row = rows[0]
-        assert row["symbol"] == "RELIANCE"
-        assert row["csp_pct"] is None
-        assert row["pmcc_pct"] is None
+    def test_up_to_three_nearest_expiries_get_a_row_each(self):
+        rows = (
+            self._rows_for_expiry("RELIANCE", "2026-07-28")
+            + self._rows_for_expiry("RELIANCE", "2026-08-25")
+            + self._rows_for_expiry("RELIANCE", "2026-09-29")
+        )
+        result = fo_service.dashboard_metrics_rows(rows, {"RELIANCE": 1000.0})
+        assert len(result) == 3
+        assert {r["expiry_date"] for r in result} == {"2026-07-28", "2026-08-25", "2026-09-29"}
 
-    def test_symbol_missing_from_csp_map_only_gets_none_csp_fields_but_real_pmcc(self):
-        # no PE row at all -> csp_5pct_map excludes the symbol entirely,
-        # but itm_pmcc_5pct_map also needs a PE leg (at the ITM CE's
-        # strike) to produce a result, so both end up None here -- this
-        # test documents that a missing half degrades independently
-        # rather than one missing leg blanking the whole row.
-        rows = [r for r in self._rows() if r["option_type"] != "PE"]
-        result = fo_service.dashboard_metrics_rows(rows, {"RELIANCE": 1000.0})[0]
-        assert result["csp_pct"] is None
-        assert result["pmcc_pct"] is None
+    def test_a_fourth_farther_expiry_does_not_get_a_row(self):
+        rows = (
+            self._rows_for_expiry("RELIANCE", "2026-07-28")
+            + self._rows_for_expiry("RELIANCE", "2026-08-25")
+            + self._rows_for_expiry("RELIANCE", "2026-09-29")
+            + self._rows_for_expiry("RELIANCE", "2026-10-27")
+        )
+        result = fo_service.dashboard_metrics_rows(rows, {"RELIANCE": 1000.0})
+        assert len(result) == 3
+        assert "2026-10-27" not in {r["expiry_date"] for r in result}
 
-    def test_multiple_symbols_each_get_their_own_row(self):
-        rows = self._rows("RELIANCE") + self._rows("TCS")
+    def test_symbol_with_no_option_data_gets_zero_rows(self):
+        assert fo_service.dashboard_metrics_rows([], {"RELIANCE": 1000.0}) == []
+
+    def test_symbol_without_spot_gets_zero_rows_even_with_option_data(self):
+        rows = fo_service.dashboard_metrics_rows(self._rows_for_expiry("RELIANCE", "2026-07-28"), {"RELIANCE": None})
+        assert rows == []
+
+    def test_csp_and_pmcc_degrade_independently_within_a_row(self):
+        # no PE row at all -> csp_5pct_for_rows returns None, but
+        # itm_pmcc_for_rows also needs a PE leg (at the ITM CE's strike)
+        # to produce a result, so both end up None here -- this
+        # documents that a missing half degrades independently rather
+        # than one missing leg blanking the whole row.
+        rows = [r for r in self._rows_for_expiry("RELIANCE", "2026-07-28") if r["option_type"] != "PE"]
+        result = fo_service.dashboard_metrics_rows(rows, {"RELIANCE": 1000.0})
+        assert len(result) == 1
+        assert result[0]["csp_pct"] is None
+        assert result[0]["pmcc_pct"] is None
+
+    def test_multiple_symbols_each_get_their_own_rows(self):
+        rows = self._rows_for_expiry("RELIANCE", "2026-07-28") + self._rows_for_expiry("TCS", "2026-07-28")
         result = fo_service.dashboard_metrics_rows(rows, {"RELIANCE": 1000.0, "TCS": 1000.0})
         symbols = {r["symbol"] for r in result}
         assert symbols == {"RELIANCE", "TCS"}

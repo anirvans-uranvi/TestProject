@@ -1,10 +1,12 @@
 // Direct TypeScript port of the "5% CSP" / "5% ITM PMCC" calculations in
 // src/services/fo_service.py (csp_5pct_map, csp_5pct_for_rows,
-// itm_pmcc_5pct_map, _freshest_rows), plus recomputeDashboardMetrics --
-// the entrypoint that reads the same two Postgres views the Python side
-// reads (latest_screener_view for spot, latest_option_chain_view for
-// option legs) and (re)writes dashboard_fo_metrics (migration
-// 0009_add_dashboard_fo_metrics.sql), the Dashboard's precomputed cache.
+// itm_pmcc_5pct_map, itm_pmcc_for_rows, _freshest_rows), plus
+// recomputeDashboardMetrics -- the entrypoint that reads the same two
+// Postgres views the Python side reads (latest_screener_view for spot,
+// latest_option_chain_view for option legs) and (re)writes
+// dashboard_fo_metrics (migration
+// 0010_dashboard_fo_metrics_per_expiry.sql), the Dashboard's precomputed
+// cache, one row per (symbol, expiry_date).
 //
 // Lives in _shared/ (Supabase Edge Functions convention -- an
 // underscore-prefixed folder is bundled into whichever function imports
@@ -163,11 +165,11 @@ export function itmPmccFivePct(legRows: OptionLegRow[], spot: number, expiryDate
 
 export interface DashboardMetricsRow {
   symbol: string;
+  expiryDate: string;
+  spot: number;
   cspStrike: number | null;
   cspPutPrice: number | null;
   cspPct: number | null;
-  cspSpot: number | null;
-  cspExpiryDate: string | null;
   cspPutTradeDate: string | null;
   pmccItmCeStrike: number | null;
   pmccOtmCeStrike: number | null;
@@ -176,85 +178,65 @@ export interface DashboardMetricsRow {
   pmccSellCePrice: number | null;
   pmccNetCredit: number | null;
   pmccPct: number | null;
-  pmccSpot: number | null;
-  pmccExpiryDate: string | null;
   pmccBuyCeTradeDate: string | null;
   pmccSellPeTradeDate: string | null;
   pmccSellCeTradeDate: string | null;
 }
 
-function nearestExpiry(rows: OptionLegRow[]): string | null {
-  const expiries = rows.map((r) => r.expiryDate).filter((e) => !!e);
-  if (expiries.length === 0) return null;
-  return expiries.reduce((a, b) => (b < a ? b : a));
-}
-
-/** Mirrors fo_service.py::dashboard_metrics_rows -- merges cspFivePct and
- * itmPmccFivePct into one flat row per symbol (every symbol in
- * spotBySymbol gets a row; a symbol missing CSP/PMCC data just has those
- * fields left null, same "N/A" contract as the Python version). CSP's
- * nearest expiry is picked from that symbol's PE legs only and PMCC's
- * from all its CE+PE legs, independently -- exactly mirroring
- * csp_5pct_map / itm_pmcc_5pct_map's separate grouping (in practice CE
- * and PE always share the same expiry cycle per symbol, so this rarely
- * diverges, but the port stays faithful to the source rather than
- * assuming that). */
+/** Mirrors fo_service.py::dashboard_metrics_rows -- for each symbol with
+ * a spot price and open option legs, computes "5% CSP" / "5% ITM PMCC"
+ * for each of that symbol's **up to 3 nearest distinct expiries**
+ * (near/next/far) and emits one flat row per (symbol, expiryDate). A
+ * symbol with no spot or no option legs gets zero rows (there's no
+ * expiryDate to key a row on); a symbol with fewer than 3 expiries just
+ * gets fewer rows. cspPct/pmccPct are null independently of each other
+ * when either calculation has no priceable result for that specific
+ * expiry. */
 export function dashboardMetricsRows(
   optionRows: OptionLegRow[],
   spotBySymbol: Record<string, number | null>,
 ): DashboardMetricsRow[] {
-  const allLegsBySymbol = new Map<string, OptionLegRow[]>();
-  const peLegsBySymbol = new Map<string, OptionLegRow[]>();
+  const legsBySymbol = new Map<string, OptionLegRow[]>();
   for (const r of optionRows) {
-    if (!allLegsBySymbol.has(r.symbol)) allLegsBySymbol.set(r.symbol, []);
-    allLegsBySymbol.get(r.symbol)!.push(r);
-    if (r.optionType === "PE") {
-      if (!peLegsBySymbol.has(r.symbol)) peLegsBySymbol.set(r.symbol, []);
-      peLegsBySymbol.get(r.symbol)!.push(r);
-    }
+    if (!legsBySymbol.has(r.symbol)) legsBySymbol.set(r.symbol, []);
+    legsBySymbol.get(r.symbol)!.push(r);
   }
 
   const rows: DashboardMetricsRow[] = [];
-  for (const symbol of Object.keys(spotBySymbol)) {
-    const spot = spotBySymbol[symbol];
-    let csp: CspResult | null = null;
-    let pmcc: PmccResult | null = null;
+  for (const [symbol, spot] of Object.entries(spotBySymbol)) {
+    if (spot === null) continue;
+    const legs = legsBySymbol.get(symbol);
+    if (!legs || legs.length === 0) continue;
 
-    if (spot !== null) {
-      const peLegs = peLegsBySymbol.get(symbol) ?? [];
-      const cspExpiry = nearestExpiry(peLegs);
-      if (cspExpiry) {
-        csp = cspFivePct(peLegs.filter((r) => r.expiryDate === cspExpiry), spot, cspExpiry);
-      }
+    const expiries = [...new Set(legs.map((r) => r.expiryDate).filter((e) => !!e))]
+      .sort()
+      .slice(0, 3);
 
-      const allLegs = allLegsBySymbol.get(symbol) ?? [];
-      const pmccExpiry = nearestExpiry(allLegs);
-      if (pmccExpiry) {
-        pmcc = itmPmccFivePct(allLegs.filter((r) => r.expiryDate === pmccExpiry), spot, pmccExpiry);
-      }
+    for (const expiry of expiries) {
+      const expiryRows = legs.filter((r) => r.expiryDate === expiry);
+      const csp = cspFivePct(expiryRows, spot, expiry);
+      const pmcc = itmPmccFivePct(expiryRows, spot, expiry);
+
+      rows.push({
+        symbol,
+        expiryDate: expiry,
+        spot,
+        cspStrike: csp?.strike ?? null,
+        cspPutPrice: csp?.putPrice ?? null,
+        cspPct: csp?.cspPct ?? null,
+        cspPutTradeDate: csp?.putTradeDate ?? null,
+        pmccItmCeStrike: pmcc?.itmCeStrike ?? null,
+        pmccOtmCeStrike: pmcc?.otmCeStrike ?? null,
+        pmccBuyCePrice: pmcc?.buyCePrice ?? null,
+        pmccSellPePrice: pmcc?.sellPePrice ?? null,
+        pmccSellCePrice: pmcc?.sellCePrice ?? null,
+        pmccNetCredit: pmcc?.netCredit ?? null,
+        pmccPct: pmcc?.pmccPct ?? null,
+        pmccBuyCeTradeDate: pmcc?.buyCeTradeDate ?? null,
+        pmccSellPeTradeDate: pmcc?.sellPeTradeDate ?? null,
+        pmccSellCeTradeDate: pmcc?.sellCeTradeDate ?? null,
+      });
     }
-
-    rows.push({
-      symbol,
-      cspStrike: csp?.strike ?? null,
-      cspPutPrice: csp?.putPrice ?? null,
-      cspPct: csp?.cspPct ?? null,
-      cspSpot: csp?.spot ?? null,
-      cspExpiryDate: csp?.expiryDate ?? null,
-      cspPutTradeDate: csp?.putTradeDate ?? null,
-      pmccItmCeStrike: pmcc?.itmCeStrike ?? null,
-      pmccOtmCeStrike: pmcc?.otmCeStrike ?? null,
-      pmccBuyCePrice: pmcc?.buyCePrice ?? null,
-      pmccSellPePrice: pmcc?.sellPePrice ?? null,
-      pmccSellCePrice: pmcc?.sellCePrice ?? null,
-      pmccNetCredit: pmcc?.netCredit ?? null,
-      pmccPct: pmcc?.pmccPct ?? null,
-      pmccSpot: pmcc?.spot ?? null,
-      pmccExpiryDate: pmcc?.expiryDate ?? null,
-      pmccBuyCeTradeDate: pmcc?.buyCeTradeDate ?? null,
-      pmccSellPeTradeDate: pmcc?.sellPeTradeDate ?? null,
-      pmccSellCeTradeDate: pmcc?.sellCeTradeDate ?? null,
-    });
   }
   return rows;
 }
@@ -331,11 +313,11 @@ export async function recomputeDashboardMetrics(serviceClient: AnyClient): Promi
 
   const payload = rows.map((r) => ({
     symbol: r.symbol,
+    expiry_date: r.expiryDate,
+    spot: r.spot,
     csp_strike: r.cspStrike,
     csp_put_price: r.cspPutPrice,
     csp_pct: r.cspPct,
-    csp_spot: r.cspSpot,
-    csp_expiry_date: r.cspExpiryDate,
     csp_put_trade_date: r.cspPutTradeDate,
     pmcc_itm_ce_strike: r.pmccItmCeStrike,
     pmcc_otm_ce_strike: r.pmccOtmCeStrike,
@@ -344,13 +326,11 @@ export async function recomputeDashboardMetrics(serviceClient: AnyClient): Promi
     pmcc_sell_ce_price: r.pmccSellCePrice,
     pmcc_net_credit: r.pmccNetCredit,
     pmcc_pct: r.pmccPct,
-    pmcc_spot: r.pmccSpot,
-    pmcc_expiry_date: r.pmccExpiryDate,
     pmcc_buy_ce_trade_date: r.pmccBuyCeTradeDate,
     pmcc_sell_pe_trade_date: r.pmccSellPeTradeDate,
     pmcc_sell_ce_trade_date: r.pmccSellCeTradeDate,
   }));
 
-  await upsertChunked(serviceClient, "dashboard_fo_metrics", payload, "symbol");
+  await upsertChunked(serviceClient, "dashboard_fo_metrics", payload, "symbol,expiry_date");
   return payload.length;
 }

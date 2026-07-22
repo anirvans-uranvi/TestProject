@@ -67,12 +67,13 @@ def upsert_option_prices(client: Client, prices: list[OptionDailyPrice]) -> None
 
 def upsert_dashboard_fo_metrics(client: Client, rows: list[dict]) -> None:
     """Wholesale-upserts the Dashboard's precomputed 5% CSP / 5% ITM PMCC
-    cache (migration 0009), one row per symbol -- `rows` come from
+    cache (migration 0010), one row per (symbol, expiry_date) -- up to 3
+    per symbol (near/next/far) -- `rows` come from
     `fo_service.dashboard_metrics_rows`."""
     if not rows:
         return
     for chunk in _chunked(rows):
-        client.table("dashboard_fo_metrics").upsert(chunk, on_conflict="symbol").execute()
+        client.table("dashboard_fo_metrics").upsert(chunk, on_conflict="symbol,expiry_date").execute()
 
 
 def refresh_open_flags(client: Client, as_of: date) -> None:
@@ -149,12 +150,15 @@ def get_all_open_options(client: Client, option_type: OptionType | None = None) 
     return _paginate(_query)
 
 
-def get_dashboard_fo_metrics(client: Client) -> dict[str, dict]:
-    """The whole `dashboard_fo_metrics` cache table, keyed by symbol -- what
-    the Dashboard reads instead of fetching every open option leg and
-    recomputing 5% CSP / 5% ITM PMCC on every page load."""
-    rows = _paginate(lambda: client.table("dashboard_fo_metrics").select("*"))
-    return {r["symbol"]: r for r in rows}
+def get_dashboard_fo_metrics(client: Client) -> list[dict]:
+    """The whole `dashboard_fo_metrics` cache table -- up to 3 rows per
+    symbol (near/next/far expiry). Raw rows, not grouped by symbol: the
+    Dashboard needs the full set to derive its "Options month" dropdown
+    (the distinct `expiry_date`s present) before picking out the rows for
+    whichever month is selected. What the Dashboard reads instead of
+    fetching every open option leg and recomputing 5% CSP / 5% ITM PMCC
+    on every page load."""
+    return _paginate(lambda: client.table("dashboard_fo_metrics").select("*"))
 
 
 def get_futures_daily(

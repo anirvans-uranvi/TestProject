@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 import streamlit as st
 from postgrest.exceptions import APIError
@@ -44,12 +46,15 @@ def _load_last_fo_fetch(_client, _cache_bust: int):
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_dashboard_fo_metrics(_client, _cache_bust: int):
     """The precomputed 5% CSP / 5% ITM PMCC cache (`dashboard_fo_metrics`,
-    migration 0009) -- a couple dozen small rows, one per symbol, kept
-    current by every refresh path (see
+    migration 0010) -- up to 3 rows per symbol (near/next/far expiry),
+    kept current by every refresh path (see
     `fo_service.recompute_dashboard_metrics` and its TypeScript port in
     `supabase/functions/_shared/dashboardMetrics.ts`) instead of pulling
     every open option leg (thousands of rows) and recomputing the
-    nearest-strike search here on every page load."""
+    nearest-strike search here on every page load. Raw rows, not grouped
+    by symbol -- the page derives the "Options month" dropdown's choices
+    from the distinct expiry_dates present, then filters to whichever
+    month is selected."""
     return fo_repo.get_dashboard_fo_metrics(_client)
 
 
@@ -148,18 +153,19 @@ df = pd.DataFrame([r.model_dump() for r in rows])
 
 # ---------------------------------------------------------------------
 # F&O-derived columns (5% CSP, 5% ITM PMCC) -- read from the precomputed
-# dashboard_fo_metrics cache (migration 0009) rather than recomputed here;
-# see _load_dashboard_fo_metrics's docstring. Degrades to "N/A" for both
-# columns, not a crash, if migration 0007/0009 hasn't been applied yet --
-# same APIError-catching pattern as pages/5_Options.py.
+# dashboard_fo_metrics cache (migration 0010) rather than recomputed
+# here; see _load_dashboard_fo_metrics's docstring. Up to 3 rows per
+# symbol (near/next/far expiry) come back here; the "Options month"
+# selectbox further below (alongside "Sort By") picks which expiry's
+# rows actually populate the two columns -- a pure re-render over
+# already-cached data, no new fetch. Degrades to "N/A" in both columns,
+# not a crash, if migration 0007/0010 hasn't been applied yet -- same
+# APIError-catching pattern as pages/5_Options.py.
 # ---------------------------------------------------------------------
 try:
-    dashboard_fo_metrics = _load_dashboard_fo_metrics(client, st.session_state["dashboard_cache_bust"])
+    dashboard_fo_metrics_rows = _load_dashboard_fo_metrics(client, st.session_state["dashboard_cache_bust"])
 except APIError:
-    dashboard_fo_metrics = {}
-
-df["csp_5pct"] = df["symbol"].map(lambda s: (dashboard_fo_metrics.get(s) or {}).get("csp_pct"))
-df["itm_pmcc_5pct"] = df["symbol"].map(lambda s: (dashboard_fo_metrics.get(s) or {}).get("pmcc_pct"))
+    dashboard_fo_metrics_rows = []
 
 # ---------------------------------------------------------------------
 # Sorting -- a single "Sort By" dropdown (+ Descending checkbox) rendered
@@ -361,11 +367,39 @@ with clear_col:
         st.session_state["criterion_filter"] = None
         st.rerun()
 
-sort_by_col, sort_desc_col = st.columns([2, 1])
+sort_by_col, sort_desc_col, month_col = st.columns([2, 1, 2])
 with sort_by_col:
     sort_col = st.selectbox("Sort By", SORT_OPTION_LABELS, key="dashboard_sort_label")
 with sort_desc_col:
     sort_desc = st.checkbox("Descending", key="dashboard_sort_desc")
+with month_col:
+    # Expiry dates come back from Supabase as plain "YYYY-MM-DD" strings
+    # (get_dashboard_fo_metrics returns raw dict rows, not a parsed
+    # model) -- sorting/equality-comparing them as strings works fine
+    # (ISO format sorts chronologically), and format_func below only
+    # parses one for display.
+    available_expiries = sorted({r["expiry_date"] for r in dashboard_fo_metrics_rows if r.get("expiry_date")})
+    if available_expiries:
+        if st.session_state.get("dashboard_options_month") not in available_expiries:
+            st.session_state["dashboard_options_month"] = available_expiries[0]
+        selected_month = st.selectbox(
+            "Options month",
+            available_expiries,
+            key="dashboard_options_month",
+            format_func=lambda d: date.fromisoformat(d).strftime("%b %Y"),
+            help="Which monthly options expiry feeds the 5% CSP / 5% ITM PMCC columns below.",
+        )
+    else:
+        selected_month = None
+        st.selectbox("Options month", ["N/A"], disabled=True)
+
+metrics_by_symbol = (
+    {r["symbol"]: r for r in dashboard_fo_metrics_rows if r["expiry_date"] == selected_month}
+    if selected_month is not None
+    else {}
+)
+filtered["csp_5pct"] = filtered["symbol"].map(lambda s: (metrics_by_symbol.get(s) or {}).get("csp_pct"))
+filtered["itm_pmcc_5pct"] = filtered["symbol"].map(lambda s: (metrics_by_symbol.get(s) or {}).get("pmcc_pct"))
 
 filtered = filtered.sort_values(SORT_OPTION_TO_KEY[sort_col], ascending=not sort_desc, na_position="last")
 

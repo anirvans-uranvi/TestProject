@@ -439,13 +439,16 @@ breakdown). Open it from the Dashboard's "Open in Options →" section or
 the "View F&O / options" button on Stock Detail.
 
 The Dashboard's own **5% CSP** / **5% ITM PMCC** columns read from a small
-precomputed cache table (`dashboard_fo_metrics`, migration `0009`)
+precomputed cache table (`dashboard_fo_metrics`, migration `0010`, keyed
+by `(symbol, expiry_date)` -- up to 3 rows per symbol, near/next/far)
 instead of recalculating across every open option contract on every page
 load -- every refresh path (the cron script, `fetch_fo_data.py`, and both
-on-demand refresh buttons below) recomputes it as its last step, so it's
-never more than one refresh out of date. See
-`docs/CODEBASE_GUIDE.md`'s Futures & Options section ("Dashboard cache")
-for the full pipeline.
+on-demand refresh buttons below) recomputes all 3 months as its last
+step, so it's never more than one refresh out of date. An **"Options
+month" dropdown** next to "Sort By" lets you pick which of the 3 cached
+months feeds those two columns -- purely a re-render over already-cached
+rows, no new fetch. See `docs/CODEBASE_GUIDE.md`'s Futures & Options
+section ("Dashboard cache") for the full pipeline.
 
 **Data source:** the NSE F&O UDiFF **bhavcopy** (one zip per trading day),
 the only reliable free source for NSE derivatives — yfinance has none, and
@@ -459,7 +462,7 @@ python scripts/fetch_fo_data.py --mock     # synthetic data, no network
 ```
 
 Requires `SUPABASE_SERVICE_ROLE_KEY` (writes shared market data, bypasses
-RLS), and migrations `0007` and `0009` applied first (`0009` adds the
+RLS), and migrations `0007` and `0010` applied first (`0010` adds the
 `dashboard_fo_metrics` cache table this script recomputes at the end of
 each run). `scripts/seed_mock_data.py` also seeds ~30 days of synthetic
 F&O so the Options screen works locally with no network. This is

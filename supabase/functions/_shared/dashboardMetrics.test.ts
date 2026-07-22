@@ -155,28 +155,68 @@ Deno.test("itmPmccFivePct: no ITM candidate at all (even stale) returns null", (
 
 // --- dashboardMetricsRows --------------------------------------------------
 
-Deno.test("dashboardMetricsRows: restricts to nearest expiry only, ignores farther expiries", () => {
-  const rows = [
-    ...pmccBaseRows(),
-    // a farther expiry that must NOT be used even for the same strikes
-    leg({ optionType: "CE", strikePrice: 950.0, lastPrice: 999.0, expiryDate: "2026-08-25" }),
-    leg({ optionType: "PE", strikePrice: 950.0, lastPrice: 999.0, expiryDate: "2026-08-25" }),
-  ];
-  const result = dashboardMetricsRows(rows, { RELIANCE: 1000.0 });
-  const reliance = result.find((r) => r.symbol === "RELIANCE")!;
-  assertEquals(reliance.cspPutPrice, 25.0);
-  assertAlmostEquals(reliance.pmccNetCredit!, 75.0);
+function pmccRowsForExpiry(expiryDate: string): OptionLegRow[] {
+  return pmccBaseRows().map((r) => ({ ...r, expiryDate }));
+}
+
+Deno.test("dashboardMetricsRows: merges CSP and PMCC for one expiry into one row", () => {
+  const result = dashboardMetricsRows(pmccRowsForExpiry("2026-07-28"), { RELIANCE: 1000.0 });
+  assertEquals(result.length, 1);
+  const row = result[0];
+  assertEquals(row.symbol, "RELIANCE");
+  assertEquals(row.expiryDate, "2026-07-28");
+  assertEquals(row.spot, 1000.0);
+  assertEquals(row.cspPutPrice, 25.0);
+  assertAlmostEquals(row.pmccNetCredit!, 75.0);
 });
 
-Deno.test("dashboardMetricsRows: symbol with no option data still gets a row, fields null", () => {
+Deno.test("dashboardMetricsRows: up to 3 nearest expiries each get a row", () => {
+  const rows = [
+    ...pmccRowsForExpiry("2026-07-28"),
+    ...pmccRowsForExpiry("2026-08-25"),
+    ...pmccRowsForExpiry("2026-09-29"),
+  ];
+  const result = dashboardMetricsRows(rows, { RELIANCE: 1000.0 });
+  assertEquals(result.length, 3);
+  assertEquals(new Set(result.map((r) => r.expiryDate)), new Set(["2026-07-28", "2026-08-25", "2026-09-29"]));
+});
+
+Deno.test("dashboardMetricsRows: a 4th, farther expiry does not get a row", () => {
+  const rows = [
+    ...pmccRowsForExpiry("2026-07-28"),
+    ...pmccRowsForExpiry("2026-08-25"),
+    ...pmccRowsForExpiry("2026-09-29"),
+    ...pmccRowsForExpiry("2026-10-27"),
+  ];
+  const result = dashboardMetricsRows(rows, { RELIANCE: 1000.0 });
+  assertEquals(result.length, 3);
+  assert(!result.some((r) => r.expiryDate === "2026-10-27"));
+});
+
+Deno.test("dashboardMetricsRows: symbol with no option data gets zero rows", () => {
   const result = dashboardMetricsRows([], { RELIANCE: 1000.0 });
+  assertEquals(result, []);
+});
+
+Deno.test("dashboardMetricsRows: symbol without spot gets zero rows even with option data", () => {
+  const result = dashboardMetricsRows(pmccRowsForExpiry("2026-07-28"), { RELIANCE: null });
+  assertEquals(result, []);
+});
+
+Deno.test("dashboardMetricsRows: CSP and PMCC degrade independently within a row", () => {
+  const rows = pmccRowsForExpiry("2026-07-28").filter((r) => r.optionType !== "PE");
+  const result = dashboardMetricsRows(rows, { RELIANCE: 1000.0 });
   assertEquals(result.length, 1);
-  assertEquals(result[0].symbol, "RELIANCE");
   assertEquals(result[0].cspPct, null);
   assertEquals(result[0].pmccPct, null);
 });
 
-Deno.test("dashboardMetricsRows: symbol without spot is still included with null fields", () => {
-  const result = dashboardMetricsRows(pmccBaseRows(), { RELIANCE: null });
-  assert(result.some((r) => r.symbol === "RELIANCE" && r.cspPct === null && r.pmccPct === null));
+Deno.test("dashboardMetricsRows: multiple symbols each get their own rows", () => {
+  const rows = [
+    ...pmccRowsForExpiry("2026-07-28"),
+    ...pmccRowsForExpiry("2026-07-28").map((r) => ({ ...r, symbol: "TCS" })),
+  ];
+  const result = dashboardMetricsRows(rows, { RELIANCE: 1000.0, TCS: 1000.0 });
+  const symbols = new Set(result.map((r) => r.symbol));
+  assertEquals(symbols, new Set(["RELIANCE", "TCS"]));
 });
