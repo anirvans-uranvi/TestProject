@@ -186,7 +186,8 @@ def list_option_expiries(client: Client, symbol: str) -> list[date]:
 
 def get_option_chain(client: Client, symbol: str, expiry_date: date) -> list[dict]:
     """Latest row per open CE/PE contract for one symbol+expiry (raw, one row
-    per option leg; use fo_service.shape_option_chain to pivot to strikes)."""
+    per option leg -- see fo_service.option_chain_summary for the spot/ATM/
+    OI aggregation the Options screen derives from these rows)."""
     resp = (
         client.table("latest_option_chain_view")
         .select("*")

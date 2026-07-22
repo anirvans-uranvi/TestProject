@@ -150,47 +150,6 @@ else:
     st.info("No open futures contracts for this symbol.")
 
 # ---------------------------------------------------------------------
-# Option chain (CE | Strike | PE)
-# ---------------------------------------------------------------------
-st.divider()
-st.subheader("Option chain")
-if not chain_rows:
-    st.info("No option-chain data for this symbol/expiry yet.")
-else:
-    shaped = fo_service.shape_option_chain(chain_rows)
-    atm = summary.get("atm_strike")
-    chain_df = pd.DataFrame(
-        [
-            {
-                "CE OI": _fmt_int(r.get("ce_oi")),
-                "CE ΔOI": _fmt_int(r.get("ce_change_oi")),
-                "CE Vol": _fmt_int(r.get("ce_volume")),
-                "CE LTP": format_inr(r.get("ce_last")),
-                "Strike": f"{r['strike']:,.0f}",
-                "PE LTP": format_inr(r.get("pe_last")),
-                "PE Vol": _fmt_int(r.get("pe_volume")),
-                "PE ΔOI": _fmt_int(r.get("pe_change_oi")),
-                "PE OI": _fmt_int(r.get("pe_oi")),
-                "_strike_num": r["strike"],
-            }
-            for r in shaped
-        ]
-    )
-
-    def _highlight_atm(row: pd.Series):
-        if atm is not None and row["_strike_num"] == atm:
-            return ["background-color: rgba(79, 70, 229, 0.12)"] * len(row)
-        return [""] * len(row)
-
-    styler = (
-        chain_df.style.apply(_highlight_atm, axis=1)
-        .hide(axis="index")
-        .hide(subset=["_strike_num"], axis="columns")
-    )
-    st.dataframe(styler, use_container_width=True, height=520)
-    st.caption("ATM strike highlighted. CE = calls (left), PE = puts (right). ΔOI = change in open interest.")
-
-# ---------------------------------------------------------------------
 # 5% CSP / 5% ITM PMCC -- both restricted to the nearest available
 # expiry regardless of which expiry is selected above for viewing the
 # chain, and both use the stock's cash-market latest_price as spot (not

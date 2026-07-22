@@ -68,25 +68,6 @@ def _freshest_rows(rows: list[dict]) -> list[dict]:
     return [r for r in rows if r.get("trade_date") == freshest]
 
 
-def shape_option_chain(chain_rows: list[dict]) -> list[dict]:
-    """Pivot per-leg option rows (from latest_option_chain_view) into one row
-    per strike: {strike, ce_last, ce_oi, ce_change_oi, ce_volume, pe_...}.
-    Sorted ascending by strike (classic option-chain layout)."""
-    by_strike: dict[float, dict] = {}
-    for r in chain_rows:
-        strike = _num(r.get("strike_price"))
-        if strike is None:
-            continue
-        slot = by_strike.setdefault(strike, {"strike": strike})
-        side = "ce" if str(r.get("option_type")) == "CE" else "pe"
-        slot[f"{side}_last"] = _num(r.get("last_price")) or _num(r.get("close"))
-        slot[f"{side}_settlement"] = _num(r.get("settlement_price"))
-        slot[f"{side}_oi"] = _int(r.get("open_interest"))
-        slot[f"{side}_change_oi"] = _int(r.get("change_in_oi"))
-        slot[f"{side}_volume"] = _int(r.get("volume"))
-    return [by_strike[k] for k in sorted(by_strike)]
-
-
 def option_chain_summary(chain_rows: list[dict]) -> dict:
     """Spot, ATM strike, aggregate CE/PE open interest, and Put-Call Ratio.
 

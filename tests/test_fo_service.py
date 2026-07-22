@@ -59,7 +59,7 @@ class TestIngestFoDay:
         assert len(book.futures_prices) == 6
 
 
-class TestShapeOptionChain:
+class TestOptionChainSummary:
     def _rows(self):
         return [
             {"strike_price": 100.0, "option_type": "CE", "last_price": 12.0, "open_interest": 500, "change_in_oi": 50, "volume": 30, "underlying_price": 101.0, "trade_date": date(2026, 7, 16)},
@@ -67,20 +67,6 @@ class TestShapeOptionChain:
             {"strike_price": 110.0, "option_type": "CE", "last_price": 5.0, "open_interest": 300, "change_in_oi": 10, "volume": 15, "underlying_price": 101.0, "trade_date": date(2026, 7, 16)},
             {"strike_price": 110.0, "option_type": "PE", "last_price": 14.0, "open_interest": 200, "change_in_oi": 5, "volume": 12, "underlying_price": 101.0, "trade_date": date(2026, 7, 16)},
         ]
-
-    def test_pivots_ce_pe_per_strike(self):
-        shaped = fo_service.shape_option_chain(self._rows())
-        assert [r["strike"] for r in shaped] == [100.0, 110.0]
-        row = shaped[0]
-        assert row["ce_last"] == 12.0
-        assert row["ce_oi"] == 500
-        assert row["pe_last"] == 8.0
-        assert row["pe_oi"] == 700
-
-    def test_sorted_ascending_by_strike(self):
-        rows = list(reversed(self._rows()))
-        shaped = fo_service.shape_option_chain(rows)
-        assert [r["strike"] for r in shaped] == [100.0, 110.0]
 
     def test_summary_spot_atm_pcr(self):
         summary = fo_service.option_chain_summary(self._rows())
