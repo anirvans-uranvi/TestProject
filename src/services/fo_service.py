@@ -10,7 +10,7 @@ from __future__ import annotations
 from supabase import Client
 
 from src.data_providers.nse_fo_provider import FOBhavcopy
-from src.repositories import fo_repo
+from src.repositories import fo_repo, snapshot_repo
 
 
 def ingest_fo_day(client: Client, book: FOBhavcopy) -> dict[str, int]:
@@ -330,3 +330,64 @@ def itm_pmcc_5pct_map(option_rows: list[dict], spot_by_symbol: dict[str, float |
             "sell_ce_trade_date": sell_ce.get("trade_date"),
         }
     return result
+
+
+def dashboard_metrics_rows(option_rows: list[dict], spot_by_symbol: dict[str, float | None]) -> list[dict]:
+    """Pure: merges `csp_5pct_map` and `itm_pmcc_5pct_map` (the same two,
+    already-tested calculations the Dashboard has always used) into one
+    flat row per symbol, shaped for `dashboard_fo_metrics` (see migration
+    0009_add_dashboard_fo_metrics.sql). A symbol missing from either map
+    (no priceable CSP/PMCC, e.g. no F&O data yet) still gets a row, with
+    that half's fields left `None` -- the Dashboard already treats `None`
+    here as "N/A", so this changes nothing about what's displayed, only
+    where the calculation happens (once here, at refresh time, instead of
+    on every page load).
+    """
+    csp_map = csp_5pct_map(option_rows, spot_by_symbol)
+    pmcc_map = itm_pmcc_5pct_map(option_rows, spot_by_symbol)
+
+    rows: list[dict] = []
+    for symbol in spot_by_symbol:
+        csp = csp_map.get(symbol)
+        pmcc = pmcc_map.get(symbol)
+        rows.append(
+            {
+                "symbol": symbol,
+                "csp_strike": csp["strike"] if csp else None,
+                "csp_put_price": csp["put_price"] if csp else None,
+                "csp_pct": csp["csp_pct"] if csp else None,
+                "csp_spot": csp["spot"] if csp else None,
+                "csp_expiry_date": csp["expiry_date"] if csp else None,
+                "csp_put_trade_date": csp["put_trade_date"] if csp else None,
+                "pmcc_itm_ce_strike": pmcc["itm_ce_strike"] if pmcc else None,
+                "pmcc_otm_ce_strike": pmcc["otm_ce_strike"] if pmcc else None,
+                "pmcc_buy_ce_price": pmcc["buy_ce_price"] if pmcc else None,
+                "pmcc_sell_pe_price": pmcc["sell_pe_price"] if pmcc else None,
+                "pmcc_sell_ce_price": pmcc["sell_ce_price"] if pmcc else None,
+                "pmcc_net_credit": pmcc["net_credit"] if pmcc else None,
+                "pmcc_pct": pmcc["pmcc_pct"] if pmcc else None,
+                "pmcc_spot": pmcc["spot"] if pmcc else None,
+                "pmcc_expiry_date": pmcc["expiry_date"] if pmcc else None,
+                "pmcc_buy_ce_trade_date": pmcc["buy_ce_trade_date"] if pmcc else None,
+                "pmcc_sell_pe_trade_date": pmcc["sell_pe_trade_date"] if pmcc else None,
+                "pmcc_sell_ce_trade_date": pmcc["sell_ce_trade_date"] if pmcc else None,
+            }
+        )
+    return rows
+
+
+def recompute_dashboard_metrics(client: Client) -> int:
+    """Recomputes and upserts the whole `dashboard_fo_metrics` cache table
+    -- the single Python entrypoint every refresh path calls (cron's
+    `scripts/run_refresh.py`, `scripts/fetch_fo_data.py`). Reads the same
+    two inputs the Dashboard used to read live (spot prices from
+    `latest_screener_view`, open option legs from
+    `latest_option_chain_view`) and writes the result so the Dashboard can
+    just read the small cache table instead. Returns the row count for
+    logging."""
+    screener_rows = snapshot_repo.get_latest_screener(client)
+    spot_by_symbol = {r.symbol: r.latest_price for r in screener_rows}
+    option_rows = fo_repo.get_all_open_options(client)
+    rows = dashboard_metrics_rows(option_rows, spot_by_symbol)
+    fo_repo.upsert_dashboard_fo_metrics(client, rows)
+    return len(rows)

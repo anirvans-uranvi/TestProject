@@ -6,7 +6,7 @@ from postgrest.exceptions import APIError
 
 from src.models.user import SavedFilter
 from src.repositories import fetch_log_repo, fo_repo, settings_repo, snapshot_repo
-from src.services import edge_refresh, fo_service
+from src.services import edge_refresh
 from src.services.market_calendar import get_market_state
 from src.services.threshold_override import apply_user_thresholds
 from src.utils.formatting import direction_arrow, format_inr, format_pct, pass_fail_icon
@@ -42,13 +42,15 @@ def _load_last_fo_fetch(_client, _cache_bust: int):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def _load_fo_data(_client, _cache_bust: int):
-    """Every open option leg -- both CE and PE, since the 5% ITM PMCC
-    column needs calls for its two CE legs as well as the put -- for the
-    5% CSP / 5% ITM PMCC columns. Cached like the screener rows above --
-    Streamlit reruns this whole script on every widget interaction, and
-    this query is thousands of rows."""
-    return fo_repo.get_all_open_options(_client)
+def _load_dashboard_fo_metrics(_client, _cache_bust: int):
+    """The precomputed 5% CSP / 5% ITM PMCC cache (`dashboard_fo_metrics`,
+    migration 0009) -- a couple dozen small rows, one per symbol, kept
+    current by every refresh path (see
+    `fo_service.recompute_dashboard_metrics` and its TypeScript port in
+    `supabase/functions/_shared/dashboardMetrics.ts`) instead of pulling
+    every open option leg (thousands of rows) and recomputing the
+    nearest-strike search here on every page load."""
+    return fo_repo.get_dashboard_fo_metrics(_client)
 
 
 if "dashboard_cache_bust" not in st.session_state:
@@ -97,6 +99,8 @@ with header_col4:
                 st.session_state["last_fo_refresh_summary"] = {"error": str(exc)}
             else:
                 st.session_state["last_fo_refresh_summary"] = fo_summary
+        st.session_state["dashboard_cache_bust"] += 1
+        st.cache_data.clear()
         st.rerun()
 
 # Shown once, right after the rerun triggered by the buttons above (a
@@ -143,23 +147,19 @@ if not rows:
 df = pd.DataFrame([r.model_dump() for r in rows])
 
 # ---------------------------------------------------------------------
-# F&O-derived columns (5% CSP, 5% ITM PMCC) -- a separate data source from
-# latest_screener_view (the F&O tables), joined in by symbol. Degrades to
-# "N/A" for both columns, not a crash, if migration 0007 / F&O data
-# hasn't been loaded yet -- same APIError-catching pattern as
-# pages/5_Options.py.
+# F&O-derived columns (5% CSP, 5% ITM PMCC) -- read from the precomputed
+# dashboard_fo_metrics cache (migration 0009) rather than recomputed here;
+# see _load_dashboard_fo_metrics's docstring. Degrades to "N/A" for both
+# columns, not a crash, if migration 0007/0009 hasn't been applied yet --
+# same APIError-catching pattern as pages/5_Options.py.
 # ---------------------------------------------------------------------
 try:
-    option_rows = _load_fo_data(client, st.session_state["dashboard_cache_bust"])
+    dashboard_fo_metrics = _load_dashboard_fo_metrics(client, st.session_state["dashboard_cache_bust"])
 except APIError:
-    option_rows = []
+    dashboard_fo_metrics = {}
 
-spot_by_symbol = dict(zip(df["symbol"], df["latest_price"]))
-csp_map = fo_service.csp_5pct_map(option_rows, spot_by_symbol)
-pmcc_map = fo_service.itm_pmcc_5pct_map(option_rows, spot_by_symbol)
-
-df["csp_5pct"] = df["symbol"].map(lambda s: (csp_map.get(s) or {}).get("csp_pct"))
-df["itm_pmcc_5pct"] = df["symbol"].map(lambda s: (pmcc_map.get(s) or {}).get("pmcc_pct"))
+df["csp_5pct"] = df["symbol"].map(lambda s: (dashboard_fo_metrics.get(s) or {}).get("csp_pct"))
+df["itm_pmcc_5pct"] = df["symbol"].map(lambda s: (dashboard_fo_metrics.get(s) or {}).get("pmcc_pct"))
 
 # ---------------------------------------------------------------------
 # Sorting -- a single "Sort By" dropdown (+ Descending checkbox) rendered

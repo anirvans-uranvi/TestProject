@@ -11,6 +11,7 @@
 // in every logged-in user's own browser session.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { findLatestAvailableBhavcopy, parseFoBhavcopy, type ParsedBhavcopy } from "./bhavcopy.ts";
+import { recomputeDashboardMetrics } from "../_shared/dashboardMetrics.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -193,6 +194,18 @@ Deno.serve(async (req: Request) => {
     const message = err instanceof Error ? err.message : String(err);
     await logFetch(serviceClient, startedAt, new Date(), "failure", message);
     return jsonResponse({ error: `Ingest failed: ${message}` }, 500);
+  }
+
+  // Option data just changed, which feeds the Dashboard's precomputed 5%
+  // CSP / 5% ITM PMCC cache -- recompute it here too, so the Dashboard
+  // reflects this refresh the instant it finishes. Not fatal if it fails
+  // (e.g. migration 0009 not applied yet) -- the real ingest above
+  // already succeeded and shouldn't be reported as a failure over a
+  // cache that degrades to "N/A" anyway.
+  try {
+    await recomputeDashboardMetrics(serviceClient);
+  } catch (err) {
+    console.error("dashboard_fo_metrics recompute failed:", err instanceof Error ? err.message : String(err));
   }
 
   const finishedAt = new Date();

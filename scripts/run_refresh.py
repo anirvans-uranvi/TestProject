@@ -22,13 +22,15 @@ import argparse
 import sys
 from pathlib import Path
 
+from postgrest.exceptions import APIError
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import get_settings  # noqa: E402
 from src.data_providers.factory import get_fundamentals_provider, get_price_provider  # noqa: E402
 from src.repositories import companies_repo  # noqa: E402
 from src.repositories.supabase_client import get_service_client  # noqa: E402
-from src.services import refresh_service, screener_service  # noqa: E402
+from src.services import fo_service, refresh_service, screener_service  # noqa: E402
 from src.services.market_calendar import is_trading_day  # noqa: E402
 from src.utils.logging import get_logger  # noqa: E402
 from src.utils.timezones import now_ist  # noqa: E402
@@ -71,6 +73,17 @@ def run_once(mode: str) -> None:
             stale_threshold_minutes=settings.default_stale_data_threshold_minutes,
         )
         logger.info("screener refresh: computed %d rows", len(rows))
+
+        # Spot price just changed for every symbol, which feeds the
+        # Dashboard's precomputed 5% CSP / 5% ITM PMCC cache -- recompute
+        # it here too. Tolerant of migration 0009 not being applied yet
+        # (mirrors the Dashboard's own APIError-catching degrade-to-N/A
+        # for F&O data), so an older deployment's cron doesn't break.
+        try:
+            metrics_count = fo_service.recompute_dashboard_metrics(client)
+            logger.info("dashboard F&O metrics cache: recomputed %d rows", metrics_count)
+        except APIError as exc:
+            logger.warning("dashboard F&O metrics cache recompute skipped: %s", exc)
 
 
 def run_daemon(mode: str) -> None:

@@ -21,6 +21,7 @@ import {
   ttmDividendYield,
 } from "./calculations.ts";
 import { fetchChartData, fetchFundamentals } from "./yahoo.ts";
+import { recomputeDashboardMetrics } from "../_shared/dashboardMetrics.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -294,6 +295,20 @@ Deno.serve(async (req: Request) => {
 
   const succeeded = results.filter((r) => r.ok).map((r) => r.symbol);
   const failed = results.filter((r) => !r.ok);
+
+  // Spot price just changed for every symbol that succeeded above, which
+  // feeds the Dashboard's precomputed 5% CSP / 5% ITM PMCC cache --
+  // recompute it here too, so the Dashboard reflects this refresh the
+  // instant it finishes rather than waiting on the next cron tick. Not
+  // fatal if it fails (e.g. migration 0009 not applied yet) -- the price
+  // refresh above already succeeded and shouldn't be reported as failed
+  // over a cache that degrades to "N/A" anyway.
+  try {
+    await recomputeDashboardMetrics(serviceClient);
+  } catch (err) {
+    console.error("dashboard_fo_metrics recompute failed:", err instanceof Error ? err.message : String(err));
+  }
+
   const finishedAt = new Date();
 
   await serviceClient.from("provider_fetch_log").insert({

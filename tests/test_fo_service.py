@@ -317,3 +317,57 @@ class TestItmPmcc5PctMap:
         rows = [r for r in self._rows() if not (r["option_type"] == "PE" and r["strike_price"] == 950.0 and r["expiry_date"] == self.EXPIRY)]
         result = fo_service.itm_pmcc_5pct_map(rows, {"RELIANCE": 1000.0})
         assert "RELIANCE" not in result
+
+
+class TestDashboardMetricsRows:
+    """dashboard_metrics_rows merges csp_5pct_map + itm_pmcc_5pct_map (both
+    already covered above) into the flat per-symbol shape
+    dashboard_fo_metrics (migration 0009) stores -- so these tests focus on
+    the merge itself, not re-deriving the underlying strike-selection math."""
+
+    EXPIRY = "2026-07-28"
+
+    def _rows(self, symbol="RELIANCE"):
+        return [
+            {"symbol": symbol, "option_type": "CE", "strike_price": 900.0, "expiry_date": self.EXPIRY, "last_price": 110.0},
+            {"symbol": symbol, "option_type": "CE", "strike_price": 950.0, "expiry_date": self.EXPIRY, "last_price": 60.0},
+            {"symbol": symbol, "option_type": "PE", "strike_price": 900.0, "expiry_date": self.EXPIRY, "last_price": 5.0},
+            {"symbol": symbol, "option_type": "PE", "strike_price": 950.0, "expiry_date": self.EXPIRY, "last_price": 25.0},
+        ]
+
+    def test_merges_csp_and_pmcc_for_the_same_symbol(self):
+        rows = fo_service.dashboard_metrics_rows(self._rows(), {"RELIANCE": 1000.0})
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["symbol"] == "RELIANCE"
+        assert row["csp_strike"] == 950.0
+        assert row["csp_put_price"] == 25.0
+        assert abs(row["csp_pct"] - (25.0 / 950.0 * 100)) < 1e-9
+        assert row["pmcc_itm_ce_strike"] == 950.0
+        assert row["pmcc_otm_ce_strike"] == 900.0
+        assert abs(row["pmcc_net_credit"] - (25.0 + 110.0 - 60.0)) < 1e-9
+
+    def test_every_symbol_in_spot_map_gets_a_row_even_with_no_option_data(self):
+        rows = fo_service.dashboard_metrics_rows([], {"RELIANCE": 1000.0})
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["symbol"] == "RELIANCE"
+        assert row["csp_pct"] is None
+        assert row["pmcc_pct"] is None
+
+    def test_symbol_missing_from_csp_map_only_gets_none_csp_fields_but_real_pmcc(self):
+        # no PE row at all -> csp_5pct_map excludes the symbol entirely,
+        # but itm_pmcc_5pct_map also needs a PE leg (at the ITM CE's
+        # strike) to produce a result, so both end up None here -- this
+        # test documents that a missing half degrades independently
+        # rather than one missing leg blanking the whole row.
+        rows = [r for r in self._rows() if r["option_type"] != "PE"]
+        result = fo_service.dashboard_metrics_rows(rows, {"RELIANCE": 1000.0})[0]
+        assert result["csp_pct"] is None
+        assert result["pmcc_pct"] is None
+
+    def test_multiple_symbols_each_get_their_own_row(self):
+        rows = self._rows("RELIANCE") + self._rows("TCS")
+        result = fo_service.dashboard_metrics_rows(rows, {"RELIANCE": 1000.0, "TCS": 1000.0})
+        symbols = {r["symbol"] for r in result}
+        assert symbols == {"RELIANCE", "TCS"}

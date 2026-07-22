@@ -30,7 +30,7 @@ from src.data_providers.mock_provider import MockFOProvider  # noqa: E402
 from src.data_providers.nse_fo_provider import FOBhavcopy  # noqa: E402
 from src.repositories import companies_repo, fo_repo  # noqa: E402
 from src.repositories.supabase_client import get_service_client  # noqa: E402
-from src.services.fo_service import ingest_fo_day  # noqa: E402
+from src.services.fo_service import ingest_fo_day, recompute_dashboard_metrics  # noqa: E402
 from src.utils.logging import get_logger  # noqa: E402
 
 logger = get_logger(__name__)
@@ -110,6 +110,12 @@ def main() -> None:
         "F&O ingest complete: %d days, %d futures + %d option daily rows for %d symbols",
         len(books), totals["futures_prices"], totals["option_prices"], len(universe),
     )
+
+    # Option data just changed, which feeds the Dashboard's precomputed 5%
+    # CSP / 5% ITM PMCC cache -- recompute once at the end (not per day
+    # inside the backfill loop above, since only the final state matters).
+    metrics_count = recompute_dashboard_metrics(client)
+    logger.info("dashboard F&O metrics cache: recomputed %d rows", metrics_count)
 
 
 if __name__ == "__main__":

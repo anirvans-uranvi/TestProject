@@ -351,6 +351,13 @@ A 5-minute cooldown (tracked via `provider_fetch_log`, `provider_name =
 'manual_edge'`) applies across all users, to keep repeated clicks from
 rate-limiting the whole project's access to Yahoo's endpoints.
 
+As its last step, this function also recomputes the Dashboard's
+`dashboard_fo_metrics` cache (a TypeScript port of the same calculation
+`fo_service.py` uses, in `supabase/functions/_shared/dashboardMetrics.ts`
+-- see [Futures & Options data](#futures--options-fo-data)) so a changed
+spot price shows up in the 5% CSP / 5% ITM PMCC columns immediately,
+without waiting for the next scheduled recompute.
+
 **Deploying the Edge Function** (one-time setup, requires the Supabase
 CLI -- Edge Functions are genuinely easier to develop/deploy with proper
 tooling than via the Dashboard's editor, unlike the SQL migrations
@@ -414,6 +421,11 @@ Same 5-minute cross-user cooldown as `manual-refresh` (`provider_fetch_log`,
 `provider_name = 'fo_edge'`, `fetch_type = 'fo'` -- added to the allowed
 `fetch_type` values by migration `0008_add_fo_fetch_type.sql`).
 
+Also recomputes `dashboard_fo_metrics` as its last step whenever it
+actually ingests a newer bhavcopy (skipped on the "already up to date"
+no-op path, since nothing changed) -- same reasoning and shared
+TypeScript module as `manual-refresh` above.
+
 ## Futures & Options (F&O) data
 
 The **Options** page (`pages/5_Options.py`) shows, per stock, the futures
@@ -421,9 +433,19 @@ term structure, the option chain (CE | strike | PE, with open interest,
 change in OI, volume, and LTP; ATM strike highlighted), and a full
 calculation breakdown for the Dashboard's two options-derived screener
 columns — **5% CSP** and **5% ITM PMCC** — showing the actual strikes,
-premiums, and net credit used, not just the final percentage. Open it from
-the Dashboard's "Open in Options →" section or the "View F&O / options"
-button on Stock Detail.
+premiums, trade dates, and net credit used, not just the final
+percentage (CSP as a near/next/far month table, PMCC as a leg-by-leg
+breakdown). Open it from the Dashboard's "Open in Options →" section or
+the "View F&O / options" button on Stock Detail.
+
+The Dashboard's own **5% CSP** / **5% ITM PMCC** columns read from a small
+precomputed cache table (`dashboard_fo_metrics`, migration `0009`)
+instead of recalculating across every open option contract on every page
+load -- every refresh path (the cron script, `fetch_fo_data.py`, and both
+on-demand refresh buttons below) recomputes it as its last step, so it's
+never more than one refresh out of date. See
+`docs/CODEBASE_GUIDE.md`'s Futures & Options section ("Dashboard cache")
+for the full pipeline.
 
 **Data source:** the NSE F&O UDiFF **bhavcopy** (one zip per trading day),
 the only reliable free source for NSE derivatives — yfinance has none, and
@@ -437,11 +459,13 @@ python scripts/fetch_fo_data.py --mock     # synthetic data, no network
 ```
 
 Requires `SUPABASE_SERVICE_ROLE_KEY` (writes shared market data, bypasses
-RLS), and migration `0007` applied first. `scripts/seed_mock_data.py` also
-seeds ~30 days of synthetic F&O so the Options screen works locally with no
-network. This is **end-of-day** data (NSE publishes the file ~6pm IST after
-close); re-run the script daily (or via the same schedulers as the cash
-data) to keep it current — see [Limitations](#limitations).
+RLS), and migrations `0007` and `0009` applied first (`0009` adds the
+`dashboard_fo_metrics` cache table this script recomputes at the end of
+each run). `scripts/seed_mock_data.py` also seeds ~30 days of synthetic
+F&O so the Options screen works locally with no network. This is
+**end-of-day** data (NSE publishes the file ~6pm IST after close); re-run
+the script daily (or via the same schedulers as the cash data) to keep it
+current — see [Limitations](#limitations).
 
 Day-to-day, once the initial backfill is done, the Dashboard's **📊 F&O
 Data Refresh** button (see [On-demand refresh](#on-demand-refresh-dashboard-refresh-buttons)
