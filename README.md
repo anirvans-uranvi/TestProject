@@ -24,6 +24,7 @@ operations; that doc covers the code itself.
 - [Scheduled refresh](#scheduled-refresh)
 - [On-demand refresh (Dashboard refresh buttons)](#on-demand-refresh-dashboard-refresh-buttons)
 - [Futures & Options (F&O) data](#futures--options-fo-data)
+- [Portfolio](#portfolio)
 - [Docker](#docker)
 - [Limitations](#limitations)
 
@@ -37,6 +38,7 @@ pages/                  Streamlit multipage app
   3_Alerts.py             Alert CRUD + notification history
   4_Settings.py            Per-user thresholds, theme, notification channels
   5_Options.py              F&O: futures term structure, 5% CSP / 5% CC breakdown
+  6_Portfolio.py             Upload Zerodha/Dhan holdings, live-valued against app market data
 src/
   config.py               Pydantic Settings (env-driven)
   data_providers/         PriceDataProvider / FundamentalsDataProvider + Dhan/mock/manual impls
@@ -482,6 +484,44 @@ Data Refresh** button (see [On-demand refresh](#on-demand-refresh-dashboard-refr
 above) is the easier way to pick up each new trading day's bhavcopy --
 no terminal/service-role key needed, and it's a no-op if nothing new is
 published yet.
+
+## Portfolio
+
+The **Portfolio** page (`pages/6_Portfolio.py`) shows your own holdings --
+uploaded from a broker CSV export, not the Nifty50 screener universe --
+valued live against the app's own market data: Stock, Qty, Avg Price,
+LTP, Investment, Cur Val, P&L, P&L%. Two broker formats are supported
+today, picked from a dropdown before uploading:
+
+- **Zerodha**: the `Instrument` column is already the exact NSE trading
+  symbol, so it's trusted directly.
+- **Dhan**: the `Name` column is a free-text company name, matched
+  against `companies.name` by normalized-substring containment (case/
+  suffix-insensitive). Ambiguous or unmatched names are left unresolved
+  -- you can type the correct NSE symbol in before saving, or leave it
+  blank to keep that row as N/A.
+
+Holdings are saved per-user (`portfolio_holdings`, migration `0012`);
+re-uploading a broker's file replaces that broker's previously saved
+rows (a full sync, not a merge). The same stock held across multiple
+brokers is combined into one row for display.
+
+**LTP only comes from data already loaded in Supabase** -- never a fresh
+live fetch triggered by this page. The app's `companies`/
+`daily_screener_snapshots` tables normally only cover the 50 Nifty
+constituents, so ETFs, gilt/liquid funds, and non-Nifty50 stocks show
+"N/A" for LTP/Cur Val/P&L/P&L% right after upload. Once a symbol is
+resolved (matched automatically or entered manually), both refresh paths
+(`scripts/run_refresh.py` and the `manual-refresh` Edge Function) start
+tracking it: they read the distinct symbols across every user's
+`portfolio_holdings`, register a minimal `companies` row for any not
+already known, and fold them into the same price/fundamentals/screener
+fetch every Nifty50 symbol already gets. `nifty50_constituents` is never
+touched by this, so portfolio-only symbols never appear on the
+Dashboard, Stock Detail, Alerts, or Options pages -- those all read
+through `latest_screener_view`, which inner-joins on
+`nifty50_constituents.is_current`. In short: upload → save → click
+"Manual refresh" (or wait for the next cron run) → real LTP appears.
 
 ## Docker
 

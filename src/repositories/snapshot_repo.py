@@ -25,6 +25,29 @@ def get_latest_screener_row(client: Client, symbol: str) -> ScreenerRow | None:
     return ScreenerRow.model_validate(rows[0]) if rows else None
 
 
+def get_latest_prices(client: Client, symbols: list[str]) -> dict[str, float]:
+    """Latest `latest_price` per symbol, queried directly against
+    daily_screener_snapshots rather than latest_screener_view -- the view
+    inner-joins nifty50_constituents.is_current, which would silently
+    drop any portfolio-only symbol (an ETF/fund or non-Nifty50 stock)
+    even after the refresh pipeline has registered and priced it."""
+    if not symbols:
+        return {}
+    resp = (
+        client.table("daily_screener_snapshots")
+        .select("symbol, latest_price")
+        .in_("symbol", symbols)
+        .order("snapshot_date", desc=True)
+        .execute()
+    )
+    prices: dict[str, float] = {}
+    for row in resp.data or []:
+        symbol = row["symbol"]
+        if symbol not in prices and row.get("latest_price") is not None:
+            prices[symbol] = float(row["latest_price"])
+    return prices
+
+
 def get_previous_snapshot(client: Client, symbol: str, before_date: date) -> DailyScreenerSnapshot | None:
     resp = (
         client.table("daily_screener_snapshots")

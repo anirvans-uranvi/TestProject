@@ -30,7 +30,7 @@ from src.config import get_settings  # noqa: E402
 from src.data_providers.factory import get_fundamentals_provider, get_price_provider  # noqa: E402
 from src.repositories import companies_repo  # noqa: E402
 from src.repositories.supabase_client import get_service_client  # noqa: E402
-from src.services import fo_service, refresh_service, screener_service  # noqa: E402
+from src.services import fo_service, portfolio_service, refresh_service, screener_service  # noqa: E402
 from src.services.market_calendar import is_trading_day  # noqa: E402
 from src.utils.logging import get_logger  # noqa: E402
 from src.utils.timezones import now_ist  # noqa: E402
@@ -45,6 +45,30 @@ def run_once(mode: str) -> None:
     if not symbols:
         logger.warning("No current Nifty 50 constituents found -- apply supabase/seed.sql first")
         return
+
+    # Also track any symbols referenced by uploaded portfolios (ETFs,
+    # gilt/liquid funds, non-Nifty50 stocks) so their LTP gets refreshed
+    # too -- registers a minimal companies row for any not seen before.
+    # nifty50_constituents is never touched, so these stay excluded from
+    # the Dashboard's screener view (its latest_screener_view inner-joins
+    # on is_current). Tolerant of the portfolio_holdings migration not
+    # being applied yet, same as the F&O cache recompute below.
+    try:
+        portfolio_rows = (
+            client.table("portfolio_holdings").select("symbol, raw_name").not_.is_("symbol", "null").execute().data
+            or []
+        )
+    except APIError:
+        portfolio_rows = []
+    if portfolio_rows:
+        known_symbols = {c.symbol for c in companies_repo.list_all_companies(client)}
+        raw_name_by_symbol = {r["symbol"]: r["raw_name"] for r in portfolio_rows}
+        portfolio_symbols = [r["symbol"] for r in portfolio_rows]
+        new_companies = portfolio_service.resolve_tracked_symbols(portfolio_symbols, known_symbols, raw_name_by_symbol)
+        if new_companies:
+            companies_repo.upsert_companies(client, new_companies)
+            logger.info("portfolio tracking: registered %d new symbol(s)", len(new_companies))
+        symbols = sorted(set(symbols) | set(portfolio_symbols))
 
     if mode in ("intraday", "all"):
         if is_trading_day(now_ist().date()):

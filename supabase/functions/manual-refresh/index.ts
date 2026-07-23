@@ -22,6 +22,7 @@ import {
 } from "./calculations.ts";
 import { fetchChartData, fetchFundamentals } from "./yahoo.ts";
 import { recomputeDashboardMetrics } from "../_shared/dashboardMetrics.ts";
+import { resolveTrackedSymbols } from "../_shared/portfolioSymbols.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -284,7 +285,38 @@ Deno.serve(async (req: Request) => {
   if (constituentsErr || !constituents || constituents.length === 0) {
     return jsonResponse({ error: "Could not load current Nifty 50 constituents" }, 500);
   }
-  const symbols: string[] = constituents.map((c: any) => c.symbol as string);
+  let symbols: string[] = constituents.map((c: any) => c.symbol as string);
+
+  // Also track any symbols referenced by uploaded portfolios (ETFs,
+  // gilt/liquid funds, non-Nifty50 stocks) so their LTP gets refreshed
+  // too -- registers a minimal companies row for any not seen before.
+  // nifty50_constituents is never touched, so these stay excluded from
+  // the Dashboard's screener view (latest_screener_view inner-joins on
+  // is_current). Tolerant of the portfolio_holdings migration not being
+  // applied yet, same as the dashboard_fo_metrics recompute below.
+  try {
+    const { data: portfolioRows } = await serviceClient
+      .from("portfolio_holdings")
+      .select("symbol, raw_name")
+      .not("symbol", "is", null);
+    if (portfolioRows && portfolioRows.length > 0) {
+      const { data: companies } = await serviceClient.from("companies").select("symbol");
+      const knownSymbols = new Set<string>((companies ?? []).map((c: any) => c.symbol as string));
+      const rawNameBySymbol: Record<string, string> = {};
+      const portfolioSymbols: string[] = [];
+      for (const row of portfolioRows as any[]) {
+        portfolioSymbols.push(row.symbol as string);
+        rawNameBySymbol[row.symbol as string] = row.raw_name as string;
+      }
+      const newCompanies = resolveTrackedSymbols(portfolioSymbols, knownSymbols, rawNameBySymbol);
+      if (newCompanies.length > 0) {
+        await serviceClient.from("companies").upsert(newCompanies, { onConflict: "symbol" });
+      }
+      symbols = Array.from(new Set([...symbols, ...portfolioSymbols]));
+    }
+  } catch (err) {
+    console.error("portfolio symbol tracking skipped:", err instanceof Error ? err.message : String(err));
+  }
 
   const asOfDate = todayIsoInIst();
   const results: SymbolResult[] = [];

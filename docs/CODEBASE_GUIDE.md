@@ -107,6 +107,7 @@ pages/
   3_Alerts.py                     Alert CRUD + notification history
   4_Settings.py                    Per-user thresholds, theme, change password
   5_Options.py                     F&O: futures term structure + 5% CSP/CC breakdown per stock
+  6_Portfolio.py                    Upload Zerodha/Dhan holdings, live-valued against app market data
 src/
   config.py                       Pydantic Settings, reads .env
   models/                          Pydantic domain models + enums
@@ -134,11 +135,12 @@ tests/                             Pytest suite -- almost entirely calculations/
 ## Database schema
 
 All migrations live in `supabase/migrations/`, applied in numeric order
-(`0001` → `0010`). Seventeen tables, in three groups (`0008` doesn't add a
+(`0001` → `0012`). Eighteen tables, in three groups (`0008` doesn't add a
 table -- it just extends `provider_fetch_log.fetch_type`'s CHECK
 constraint with `'fo'`, for the `fo-refresh` Edge Function's logging;
-`0010` drops and recreates `dashboard_fo_metrics` with a different key
-rather than adding a new table -- see "Dashboard cache" below):
+`0010`/`0011` drop and recreate `dashboard_fo_metrics` with a different
+key/columns rather than adding a new table -- see "Dashboard cache"
+below; `0012` adds `portfolio_holdings`):
 
 **Reference data** (written by `scripts/fetch_nifty50_constituents.py` /
 `seed.sql`, read-only to the app):
@@ -160,6 +162,7 @@ rather than adding a new table -- see "Dashboard cache" below):
 - `user_positions` — entry/target/stop-loss/notes per symbol
 - `alerts` — alert configs
 - `notification_log` — alert-fired history, deduped via a unique `dedupe_key`
+- `portfolio_holdings` — broker-CSV-uploaded holdings (migration `0012`), keyed `(user_id, broker, raw_name)`. `symbol` is nullable and deliberately **not** FK'd to `companies` -- a resolved symbol may not exist there yet (an ETF/fund or non-Nifty50 stock the screener doesn't otherwise track); see the Portfolio section below for how it gets registered.
 
 Two generated helpers, defined in `0003_views_functions.sql` (and patched
 in `0004`):
@@ -259,7 +262,8 @@ backoff and a client-side request-rate throttle.
 One module per table/concern (`companies_repo.py`, `price_repo.py`,
 `fundamentals_repo.py`, `dividends_repo.py`, `snapshot_repo.py`,
 `settings_repo.py`, `alerts_repo.py`, `notification_repo.py`,
-`fetch_log_repo.py`), plus `supabase_client.py` for client construction.
+`fetch_log_repo.py`, `portfolio_repo.py`), plus `supabase_client.py` for
+client construction.
 
 The one convention that matters everywhere in this layer: **every
 function takes an explicit `Client` argument** — there's no module-level
@@ -304,6 +308,7 @@ without needing this treatment.
 - **`market_calendar.py`** — NSE trading-day/market-state logic. The holiday list (`NSE_HOLIDAYS`) is hardcoded **per calendar year** and needs a manual update every year; falls back to weekday-only for years not listed.
 - **`threshold_override.py`** — `daily_screener_snapshots` is computed server-side against *default* thresholds (the stable audit trail); a signed-in user can configure their own thresholds in Settings, so pages re-run `build_classification()` client-side against the row's stored raw inputs (which are threshold-independent) to reflect that choice, without a server-side recompute per user. Also recomputes `is_stale` from `data_quality.stale_minutes` against the user's own `stale_data_threshold_minutes` when available.
 - **`explanation.py`** — `explain_classification(row)` builds the plain-English sentence shown on Stock Detail, branching on which criteria passed/failed/are missing.
+- **`portfolio_service.py`** — CSV parsing for the two supported broker exports (`parse_zerodha_csv`, `parse_dhan_csv`), name-to-symbol matching (`match_symbol`, normalized-substring containment against `companies.name`), cross-broker merging (`merge_holdings`), and live valuation (`compute_portfolio_view`). `resolve_tracked_symbols` is the pure diff both refresh paths call to register newly-seen portfolio symbols. See the Portfolio section below.
 
 ## Notifications (`src/notifications/`)
 
@@ -522,6 +527,99 @@ Forgot password tabs and `st.stop()`s.
   Both are restricted to the symbol's own nearest available expiry (CC unconditionally; CSP's near row specifically) **regardless of which expiry is selected above**, so the near-month numbers always match the Dashboard's cached values for the same stock. Shaping is done by `fo_service.option_chain_summary`/`futures_term_structure`/`csp_5pct_for_rows`/`cc_5pct_map`, not in the page.
 
   **A real bug found here, right after this section first shipped**: the CSP/CC breakdown's spot value (CC was still "ITM PMCC" at the time, but the bug and fix applied identically) was initially taken from `option_chain_summary(near_chain_rows)["spot"]` — the F&O bhavcopy's own `underlying_price` column — while the Dashboard's two columns (now the `dashboard_fo_metrics` cache, see above) use the cash-market `latest_price` from `latest_screener_view`. These two prices aren't the same value, so this page's numbers didn't match the Dashboard's for the same stock (confirmed live: ADANIENT showed 5% CSP = 0.54% on the Dashboard but 0.45% here, since a different spot picked a different nearest-5%-below strike, 3040 vs 3020). Fixed by fetching `snapshot_repo.get_latest_screener_row(client, symbol).latest_price` and using that as the spot for both calculations here too, instead of the chain's `underlying_price` — the top-of-page "Spot"/"ATM strike" summary tiles are unaffected and deliberately still use the chain's own `underlying_price` (correct for highlighting the ATM row in the actual option-chain data being displayed there). If you add another F&O-derived calculation to either screen, source spot the same way this one now does — from the screener, not the chain — to keep the two screens' numbers in agreement.
+
+- **`6_Portfolio.py`** — see the dedicated Portfolio section below for the full upload → match → save → refresh-registration pipeline. On the page itself: `_load_holdings` reads all of the signed-in user's saved rows (across every broker), `portfolio_service.merge_holdings` combines same-stock rows into one, then `compute_portfolio_view` joins in LTP via `snapshot_repo.get_latest_prices` (a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why) and computes Cur Val/P&L/P&L%. The holdings table reuses `render_screener_table()` exactly like the Dashboard's, since it already treats arbitrary dict keys as columns. The upload section (broker `st.selectbox` + `st.file_uploader`, keyed per-broker so switching the dropdown clears any previously-selected file) previews parsed rows via `st.dataframe`, then an `st.form` collects a manual NSE-symbol override for any row `match_symbol` couldn't resolve before `portfolio_repo.replace_broker_holdings` saves.
+
+## Portfolio
+
+`pages/6_Portfolio.py` shows the signed-in user's own broker holdings
+(not the Nifty50 screener universe), valued live against the app's own
+market data. This is a separate, self-contained subsystem from the
+screener, similar in spirit to the F&O section above: its own table, its
+own service module, its own refresh-pipeline hook — nothing here changes
+`nifty50_constituents`, `latest_screener_view`, or any existing page.
+
+**Schema (migration `0012_portfolio_holdings.sql`)**: one table,
+`portfolio_holdings`, keyed `(user_id, broker, raw_name)`, RLS-scoped to
+`auth.uid() = user_id` like every other per-user table. `symbol` is
+nullable and **deliberately not FK'd to `companies`** — at upload time a
+correctly-resolved symbol (an ETF, a fund, a non-Nifty50 stock) may not
+have a `companies` row yet at all; forcing the FK would make saving a
+freshly-uploaded portfolio fail until some *other* process happened to
+register that symbol first. Re-uploading a broker's CSV replaces every
+existing row for that `(user_id, broker)` (delete-then-insert,
+`portfolio_repo.replace_broker_holdings`) — a full sync, not a merge, so
+a position no longer in the file disappears rather than lingering.
+
+**Two broker CSV formats, one broker-agnostic shape after parsing**
+(`src/services/portfolio_service.py`):
+- **Zerodha** (`parse_zerodha_csv`) — the `Instrument` column is already
+  the exact NSE trading symbol, so it's trusted directly with no name
+  matching at all.
+- **Dhan** (`parse_dhan_csv`) — the `Name` column is a free-text company
+  name, and numbers are quoted with Indian-style grouping (e.g.
+  `"6,42,438.40"`), handled by the same tolerant `_to_float` pattern
+  `scripts/import_screener_csv.py` already established (strip
+  `,`/`%`/quotes, treat `-`/`NA`/`""` as missing rather than zero).
+  Symbol resolution goes through `match_symbol(raw_name, companies)`:
+  both the raw name and every known `companies.name` are normalized
+  (uppercase, strip non-alphanumerics, strip a trailing `LTD`/`LIMITED`),
+  and a match requires exactly one company whose normalized name
+  contains (or is contained by) the normalized raw name — zero or
+  ambiguous matches are left unresolved (`symbol = None`) rather than
+  guessed. The Portfolio page lets the user type the correct symbol in
+  for any unresolved row before saving.
+
+Both parsers deliberately **ignore the file's own LTP/Cur. val/P&L
+columns** — those are always recomputed live from the app's own data, per
+the feature's original spec, never trusted from the export.
+
+**Valuation** (`compute_portfolio_view`): `cur_val = qty * ltp`,
+`pnl = cur_val - investment`, `pnl_pct = pnl / investment * 100`, all
+`None` (→ "N/A" in the UI) when `ltp` is unavailable — either because the
+row's symbol is still unresolved, or because it's resolved but the app
+has no market data for it yet. Portfolio-level totals sum `investment`
+across every row but sum `cur_val`/`pnl`/`pnl_pct` only over rows with a
+known LTP, with an `unpriced_count` the page uses to caption a partial
+total rather than silently showing a number that excludes some holdings.
+
+**Why LTP is read via `snapshot_repo.get_latest_prices`, not
+`latest_screener_view`**: the view (`0004_fix_constituents_fk_and_view_defaults.sql`)
+inner-joins `nifty50_constituents.is_current`, so it would silently
+exclude any portfolio-only symbol (an ETF/fund or non-Nifty50 stock) even
+after that symbol has been registered and priced. `get_latest_prices`
+instead queries `daily_screener_snapshots` directly for exactly the
+symbols asked for, keeping the newest row per symbol in Python — the
+same "latest per symbol" logic the view encodes in SQL, just without the
+constituents gate. `daily_screener_snapshots`'s own RLS policy
+(`authenticated read ... using (true)`, `0002_rls_policies.sql`) already
+has no such gate at the table level.
+
+**Getting a new symbol tracked** (the "N/A until the next refresh" flow):
+neither `scripts/run_refresh.py` nor the `manual-refresh` Edge Function
+originally looked past `nifty50_constituents.is_current` when building
+their symbol universe — the Streamlit page's own client can't fix this
+itself, since `companies`' RLS policy is `authenticated`-**read-only**
+(`0002_rls_policies.sql`); only the service-role key these two refresh
+paths already hold can insert into it. Both were extended identically:
+read the distinct `(symbol, raw_name)` pairs across **every** user's
+`portfolio_holdings`, diff against `companies` via the pure
+`resolve_tracked_symbols` (Python) / `resolveTrackedSymbols` (TypeScript,
+`supabase/functions/_shared/portfolioSymbols.ts` — same
+dual-implementation tradeoff as `dashboardMetrics.ts`/`calculations.ts`,
+for the same reason: the Edge Function can't call the Python code),
+upsert a minimal `companies` row (symbol + best-known name) for anything
+new, then union those symbols into the existing Nifty50 symbol list
+before the normal intraday/EOD/fundamentals/screener fetch loops — no
+other change to those loops, which already tolerate sparse fundamentals
+(ETFs/funds lack PE/EPS) via existing `is_stale`/`data_quality` handling.
+`nifty50_constituents` itself is **never** written by this path, so
+portfolio-only symbols get `companies` + `daily_screener_snapshots` rows
+but stay permanently excluded from `latest_screener_view` and therefore
+from the Dashboard, Stock Detail, Alerts, and Options pages — exactly as
+before this feature existed. Both paths are tolerant of the
+`portfolio_holdings` migration not being applied yet (catch-and-skip,
+same degrade-gracefully precedent as the F&O cache recompute).
 
 ## Auth: a non-obvious quirk
 

@@ -20,6 +20,15 @@ def list_current_constituents(client: Client) -> list[Company]:
     return companies
 
 
+def list_all_companies(client: Client) -> list[Company]:
+    """Every row in `companies`, not just current Nifty50 constituents --
+    needed for matching portfolio-upload instrument names against
+    companies that may exist purely because a prior portfolio upload
+    registered them (see resolve_tracked_symbols in portfolio_service)."""
+    resp = client.table("companies").select("*").execute()
+    return [Company.model_validate(r) for r in (resp.data or [])]
+
+
 def get_company(client: Client, symbol: str) -> Company | None:
     resp = client.table("companies").select("*").eq("symbol", symbol).limit(1).execute()
     rows = resp.data or []
