@@ -197,11 +197,11 @@ Deno.serve(async (req: Request) => {
   }
 
   // Option data just changed, which feeds the Dashboard's precomputed 5%
-  // CSP / 5% ITM PMCC cache -- recompute it here too, so the Dashboard
+  // CSP / 5% CC cache -- recompute it here too, so the Dashboard
   // reflects this refresh the instant it finishes. Not fatal if it fails
-  // (e.g. migration 0009 not applied yet) -- the real ingest above
-  // already succeeded and shouldn't be reported as a failure over a
-  // cache that degrades to "N/A" anyway.
+  // (e.g. the dashboard_fo_metrics migration not applied yet) -- the
+  // real ingest above already succeeded and shouldn't be reported as a
+  // failure over a cache that degrades to "N/A" anyway.
   try {
     await recomputeDashboardMetrics(serviceClient);
   } catch (err) {

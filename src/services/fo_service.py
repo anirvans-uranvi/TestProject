@@ -206,15 +206,17 @@ def csp_5pct_for_rows(pe_rows: list[dict], spot: float, expiry_date) -> dict | N
     }
 
 
-def itm_pmcc_5pct_map(option_rows: list[dict], spot_by_symbol: dict[str, float | None]) -> dict[str, dict]:
-    """Pure: for each symbol's CE+PE legs (from
-    `fo_repo.get_all_open_options()`, every symbol/expiry/type mixed
-    together), restricts to that symbol's own nearest available expiry
-    and delegates to `itm_pmcc_for_rows` to build the "5% ITM PMCC"
+def cc_5pct_map(call_rows: list[dict], spot_by_symbol: dict[str, float | None]) -> dict[str, dict]:
+    """Pure: for each symbol's CE legs (from
+    `fo_repo.get_all_open_options(OptionType.CE)`, every symbol/expiry
+    mixed together), restricts to that symbol's own nearest available
+    expiry and delegates to `cc_5pct_for_rows` to build the "5% CC"
     column. See that function's docstring for the calculation itself.
     """
     by_symbol: dict[str, list[dict]] = {}
-    for r in option_rows:
+    for r in call_rows:
+        if str(r.get("option_type")) != "CE":
+            continue
         symbol = r.get("symbol")
         if not symbol:
             continue
@@ -230,127 +232,93 @@ def itm_pmcc_5pct_map(option_rows: list[dict], spot_by_symbol: dict[str, float |
             continue
         near_expiry = min(expiries)
         near_rows = [r for r in rows if r.get("expiry_date") == near_expiry]
-        pmcc = itm_pmcc_for_rows(near_rows, spot, near_expiry)
-        if pmcc is None:
+        cc = cc_5pct_for_rows(near_rows, spot, near_expiry)
+        if cc is None:
             continue
-        result[symbol] = pmcc
+        result[symbol] = cc
     return result
 
 
-def itm_pmcc_for_rows(leg_rows: list[dict], spot: float, expiry_date) -> dict | None:
-    """Pure: the single-expiry core of `itm_pmcc_5pct_map`, factored out
-    so a caller can compute "5% ITM PMCC" for a *specific* expiry rather
-    than only ever the nearest one -- mirrors `csp_5pct_for_rows`'s same
+def cc_5pct_for_rows(ce_rows: list[dict], spot: float, expiry_date) -> dict | None:
+    """Pure: the single-expiry core of `cc_5pct_map`, factored out so a
+    caller can compute "5% CC" for a *specific* expiry rather than only
+    ever the nearest one -- mirrors `csp_5pct_for_rows`'s same
     extraction, used by the Dashboard's precomputed cache to store a
     near/next/far row per symbol (see `dashboard_metrics_rows`).
-    `leg_rows` should already be filtered to one symbol + one expiry
-    (both CE and PE legs mixed in, as `itm_pmcc_5pct_map` already
-    expects). Builds:
+    `ce_rows` should already be filtered to one symbol + one expiry (any
+    PE legs mixed in are ignored).
 
-    1. Buy 1 lot of the ITM CE closest to spot (largest strike < spot,
-       preferring strikes with the freshest available trade_date -- see
-       `_freshest_rows` -- and only falling back to a stale one if no
-       fresh strike is actually ITM).
-    2. Sell 1 lot of the PE at that *same* strike.
-    3. Sell 1 lot of the CE whose strike is closest to 95% of the bought
-       CE's strike (a further-ITM call, same freshness preference as step 1).
-    4. Net credit = PE sell price + CE sell price - CE buy price.
-    5. `pmcc_pct` = net credit / the bought CE's strike * 100.
+    "5% CC" is a covered-call yield: sell 1 lot of the OTM call whose
+    strike is closest to 5% *above* spot -- the mirror image of "5% CSP"'s
+    strike search (`target = spot * 1.05` instead of `spot * 0.95`),
+    preferring strikes with the freshest available trade_date (see
+    `_freshest_rows`, falls back to every strike at that expiry if none
+    of them carry one). Two percentages are returned:
 
-    As with `csp_5pct_for_rows`, `strike * lot_size` cancels out of both
-    the premiums and this ratio (each leg is 1 lot), so lot size never
-    needs to appear here. Returns `{"itm_ce_strike", "otm_ce_strike",
-    "buy_ce_price", "sell_pe_price", "sell_ce_price", "net_credit",
-    "pmcc_pct", "spot", "expiry_date", "buy_ce_trade_date",
-    "sell_pe_trade_date", "sell_ce_trade_date"}` -- the per-leg prices
-    and inputs are included (not just the final net credit) so a caller
-    (the Options screen's "5% ITM PMCC" breakdown) can show the full
-    calculation, not just the result. The three `*_trade_date` fields are
-    each leg's own row's `trade_date` (a trading day, not a time of day
-    -- this is EOD bhavcopy data, no intraday execution timestamp
-    exists), so a stale fallback leg (see the ITM-candidate fallback
-    below) is visible in the UI rather than silently blending in with
-    the fresher legs around it. Returns `None` if there's no ITM CE, no
-    PE at that strike, or a price is missing for any leg.
+    - `cc_pct` = premium / spot * 100 -- the premium as a fraction of the
+      stock's own price, i.e. the yield on capital already held if
+      writing this covered call against it.
+    - `assignment_profit_pct` = premium / (strike - spot) * 100 -- the
+      premium as a fraction of the extra capital gain still available
+      between spot and the strike (the "room" before assignment caps
+      further upside); `None` if strike == spot (mathematically
+      undefined) rather than raising.
+
+    Returns `{"strike", "premium", "cc_pct", "assignment_profit_pct",
+    "spot", "expiry_date", "trade_date"}`, or `None` if there's no
+    priceable CE strike in `ce_rows`. `spot`/`expiry_date` are just the
+    inputs echoed back (same convention as `csp_5pct_for_rows`) so a
+    caller can display the calculation without separately tracking which
+    expiry/spot were used.
     """
-    rows = [r for r in leg_rows if r.get("strike_price") is not None]
-    ce_rows = [r for r in rows if str(r.get("option_type")) == "CE"]
-    pe_rows = [r for r in rows if str(r.get("option_type")) == "PE"]
-    if not ce_rows or not pe_rows:
+    near_rows = [r for r in ce_rows if str(r.get("option_type")) == "CE" and r.get("strike_price") is not None]
+    if not near_rows:
         return None
-
-    def _price(r: dict) -> float | None:
-        return _num(r.get("last_price")) or _num(r.get("close")) or _num(r.get("settlement_price"))
-
-    # Prefer strikes with the freshest available trade_date (see
-    # _freshest_rows) -- an illiquid strike's "latest" row can be
-    # weeks older than its liquid neighbors', with a premium that no
-    # longer reflects reality. Falls back to the full (possibly
-    # stale-inclusive) ce_rows if the freshest-only subset has no ITM
-    # candidate at all, so a symbol isn't dropped just because its
-    # single most-recent trade_date happens to have no strike below
-    # spot.
-    fresh_ce_rows = _freshest_rows(ce_rows)
-    itm_ce_candidates = [r for r in fresh_ce_rows if _num(r["strike_price"]) < spot]
-    if not itm_ce_candidates:
-        itm_ce_candidates = [r for r in ce_rows if _num(r["strike_price"]) < spot]
-    if not itm_ce_candidates:
-        return None
-    buy_ce = max(itm_ce_candidates, key=lambda r: _num(r["strike_price"]))
-    itm_strike = _num(buy_ce["strike_price"])
-    buy_ce_price = _price(buy_ce)
-
-    pe_same_strike = [r for r in pe_rows if _num(r["strike_price"]) == itm_strike]
-    if not pe_same_strike:
-        return None
-    sell_pe_price = _price(pe_same_strike[0])
-
-    target = itm_strike * 0.95
-    sell_ce = min(fresh_ce_rows, key=lambda r: abs(_num(r["strike_price"]) - target))
-    otm_strike = _num(sell_ce["strike_price"])
-    sell_ce_price = _price(sell_ce)
-
-    if buy_ce_price is None or sell_pe_price is None or sell_ce_price is None or not itm_strike:
-        return None
-
-    net_credit = sell_pe_price + sell_ce_price - buy_ce_price
-    pmcc_pct = net_credit / itm_strike * 100
+    target = spot * 1.05
+    best_row = min(_freshest_rows(near_rows), key=lambda r: abs(_num(r["strike_price"]) - target))
+    strike = _num(best_row["strike_price"])
+    premium = _num(best_row.get("last_price")) or _num(best_row.get("close")) or _num(best_row.get("settlement_price"))
+    cc_pct = (premium / spot * 100) if (premium is not None and spot) else None
+    assignment_profit_pct = (
+        premium / (strike - spot) * 100
+        if (premium is not None and strike is not None and strike != spot)
+        else None
+    )
     return {
-        "itm_ce_strike": itm_strike,
-        "otm_ce_strike": otm_strike,
-        "buy_ce_price": buy_ce_price,
-        "sell_pe_price": sell_pe_price,
-        "sell_ce_price": sell_ce_price,
-        "net_credit": net_credit,
-        "pmcc_pct": pmcc_pct,
+        "strike": strike,
+        "premium": premium,
+        "cc_pct": cc_pct,
+        "assignment_profit_pct": assignment_profit_pct,
         "spot": spot,
         "expiry_date": expiry_date,
-        "buy_ce_trade_date": buy_ce.get("trade_date"),
-        "sell_pe_trade_date": pe_same_strike[0].get("trade_date"),
-        "sell_ce_trade_date": sell_ce.get("trade_date"),
+        "trade_date": best_row.get("trade_date"),
     }
 
 
 def dashboard_metrics_rows(option_rows: list[dict], spot_by_symbol: dict[str, float | None]) -> list[dict]:
     """Pure: for each symbol with a spot price and open option legs,
-    computes "5% CSP" / "5% ITM PMCC" (via `csp_5pct_for_rows` /
-    `itm_pmcc_for_rows`, the same already-tested calculations the
+    computes "5% CSP" / "5% CC" (via `csp_5pct_for_rows` /
+    `cc_5pct_for_rows`, the same already-tested calculations the
     Dashboard has always used) for each of that symbol's **up to 3
     nearest distinct expiries** -- near/next/far, the same term-structure
     shape `pages/5_Options.py`'s Futures section and CSP table already
     use -- and returns one flat row per **(symbol, expiry)**, shaped for
     `dashboard_fo_metrics` (see migration
-    0010_dashboard_fo_metrics_per_expiry.sql). This lets the Dashboard
-    offer a month dropdown that just selects which already-cached row to
-    display, with no live recomputation on selection.
+    0011_dashboard_cc_5pct.sql). This lets the Dashboard offer a month
+    dropdown that just selects which already-cached row to display, with
+    no live recomputation on selection.
 
     A symbol with no spot price or no option data gets zero rows (there's
     no `expiry_date` to key a row on, and the column is `not null`) --
     the Dashboard's lookup for that symbol at any selected month then
     simply finds nothing, which it already treats as "N/A". A symbol with
-    fewer than 3 expiries just gets fewer rows. `csp_pct`/`pmcc_pct` are
+    fewer than 3 expiries just gets fewer rows. `csp_pct`/`cc_pct` are
     `None` independently of each other when either calculation has no
-    priceable result for that specific expiry (e.g. no ITM CE that month).
+    priceable result for that specific expiry (e.g. no CE strike that
+    month). `cc_5pct_for_rows`'s `assignment_profit_pct` is deliberately
+    NOT cached here -- the Dashboard only ever displays `cc_pct`; the
+    Options screen's "Assignment Profit" figure is computed live instead
+    (see `pages/5_Options.py`).
     """
     legs_by_symbol: dict[str, list[dict]] = {}
     for r in option_rows:
@@ -370,7 +338,7 @@ def dashboard_metrics_rows(option_rows: list[dict], spot_by_symbol: dict[str, fl
         for expiry in expiries:
             expiry_rows = [r for r in legs if r.get("expiry_date") == expiry]
             csp = csp_5pct_for_rows(expiry_rows, spot, expiry)
-            pmcc = itm_pmcc_for_rows(expiry_rows, spot, expiry)
+            cc = cc_5pct_for_rows(expiry_rows, spot, expiry)
             rows.append(
                 {
                     "symbol": symbol,
@@ -380,16 +348,10 @@ def dashboard_metrics_rows(option_rows: list[dict], spot_by_symbol: dict[str, fl
                     "csp_put_price": csp["put_price"] if csp else None,
                     "csp_pct": csp["csp_pct"] if csp else None,
                     "csp_put_trade_date": csp["put_trade_date"] if csp else None,
-                    "pmcc_itm_ce_strike": pmcc["itm_ce_strike"] if pmcc else None,
-                    "pmcc_otm_ce_strike": pmcc["otm_ce_strike"] if pmcc else None,
-                    "pmcc_buy_ce_price": pmcc["buy_ce_price"] if pmcc else None,
-                    "pmcc_sell_pe_price": pmcc["sell_pe_price"] if pmcc else None,
-                    "pmcc_sell_ce_price": pmcc["sell_ce_price"] if pmcc else None,
-                    "pmcc_net_credit": pmcc["net_credit"] if pmcc else None,
-                    "pmcc_pct": pmcc["pmcc_pct"] if pmcc else None,
-                    "pmcc_buy_ce_trade_date": pmcc["buy_ce_trade_date"] if pmcc else None,
-                    "pmcc_sell_pe_trade_date": pmcc["sell_pe_trade_date"] if pmcc else None,
-                    "pmcc_sell_ce_trade_date": pmcc["sell_ce_trade_date"] if pmcc else None,
+                    "cc_strike": cc["strike"] if cc else None,
+                    "cc_premium": cc["premium"] if cc else None,
+                    "cc_pct": cc["cc_pct"] if cc else None,
+                    "cc_trade_date": cc["trade_date"] if cc else None,
                 }
             )
     return rows

@@ -66,8 +66,8 @@ def upsert_option_prices(client: Client, prices: list[OptionDailyPrice]) -> None
 
 
 def upsert_dashboard_fo_metrics(client: Client, rows: list[dict]) -> None:
-    """Wholesale-upserts the Dashboard's precomputed 5% CSP / 5% ITM PMCC
-    cache (migration 0010), one row per (symbol, expiry_date) -- up to 3
+    """Wholesale-upserts the Dashboard's precomputed 5% CSP / 5% CC
+    cache (migration 0011), one row per (symbol, expiry_date) -- up to 3
     per symbol (near/next/far) -- `rows` come from
     `fo_service.dashboard_metrics_rows`."""
     if not rows:
@@ -156,7 +156,7 @@ def get_dashboard_fo_metrics(client: Client) -> list[dict]:
     Dashboard needs the full set to derive its "Options month" dropdown
     (the distinct `expiry_date`s present) before picking out the rows for
     whichever month is selected. What the Dashboard reads instead of
-    fetching every open option leg and recomputing 5% CSP / 5% ITM PMCC
+    fetching every open option leg and recomputing 5% CSP / 5% CC
     on every page load."""
     return _paginate(lambda: client.table("dashboard_fo_metrics").select("*"))
 

@@ -150,13 +150,13 @@ else:
     st.info("No open futures contracts for this symbol.")
 
 # ---------------------------------------------------------------------
-# 5% CSP / 5% ITM PMCC -- both restricted to the nearest available
-# expiry regardless of which expiry is selected above for viewing the
-# chain, and both use the stock's cash-market latest_price as spot (not
-# the option chain's own underlying_price, which is a snapshot from the
-# F&O bhavcopy and can lag/differ from the cash price) -- matching
-# exactly how the Dashboard's own columns for these two are computed, so
-# the numbers always line up between the two screens.
+# 5% CSP / 5% CC -- both restricted to the nearest available expiry
+# regardless of which expiry is selected above for viewing the chain,
+# and both use the stock's cash-market latest_price as spot (not the
+# option chain's own underlying_price, which is a snapshot from the F&O
+# bhavcopy and can lag/differ from the cash price) -- matching exactly
+# how the Dashboard's own columns for these two are computed, so the
+# numbers always line up between the two screens.
 # ---------------------------------------------------------------------
 near_expiry = expiries[0] if expiries else None
 if near_expiry is None:
@@ -169,7 +169,7 @@ else:
 screener_row = snapshot_repo.get_latest_screener_row(client, symbol)
 cash_spot = screener_row.latest_price if screener_row else None
 spot_map = {symbol: cash_spot} if cash_spot is not None else {}
-pmcc = fo_service.itm_pmcc_5pct_map(near_chain_rows, spot_map).get(symbol)
+cc = fo_service.cc_5pct_map(near_chain_rows, spot_map).get(symbol)
 
 st.divider()
 st.subheader("5% CSP (cash-secured put)")
@@ -208,46 +208,36 @@ else:
     st.dataframe(pd.DataFrame(csp_term_rows), use_container_width=True, hide_index=True)
 
 st.divider()
-st.subheader("5% ITM PMCC (poor man's covered call)")
+st.subheader("5% CC (covered call)")
 st.caption(
-    "A synthetic covered call built entirely from near-expiry options: buy 1 lot "
-    "of the ITM call closest to spot, sell 1 lot of the put at that same strike, "
-    "and sell 1 lot of the call whose strike is closest to 5% below the bought "
-    "call's strike. Net credit = put sold + call sold − call bought, expressed as "
-    "a percentage of the bought (ITM) call's strike."
+    "A covered-call yield: sell 1 lot of the call whose strike is closest to "
+    "5% above spot. **5% CC** = premium ÷ last traded price of the stock × "
+    "100 -- the yield on the stock itself, as if writing this call against "
+    "shares you already hold. **Assignment Profit** = premium ÷ (strike − "
+    "spot) × 100 -- the premium as a percentage of the extra capital gain "
+    "still available between spot and the strike, i.e. the room left before "
+    "assignment caps further upside."
 )
-if pmcc is None:
-    st.info("Not enough option data to compute 5% ITM PMCC for the nearest expiry.")
+if cc is None:
+    st.info("Not enough option data to compute 5% CC for the nearest expiry.")
 else:
-    leg_df = pd.DataFrame(
-        [
-            {
-                "Leg": "Buy 1 CE (ITM, closest to spot)",
-                "Strike": format_inr(pmcc["itm_ce_strike"], decimals=0),
-                "Price": format_inr(pmcc["buy_ce_price"]),
-                "Trade Date": pmcc["buy_ce_trade_date"] or "—",
-                "Cash flow": f"-{format_inr(pmcc['buy_ce_price'])}",
-            },
-            {
-                "Leg": "Sell 1 PE (same strike as ITM CE)",
-                "Strike": format_inr(pmcc["itm_ce_strike"], decimals=0),
-                "Price": format_inr(pmcc["sell_pe_price"]),
-                "Trade Date": pmcc["sell_pe_trade_date"] or "—",
-                "Cash flow": f"+{format_inr(pmcc['sell_pe_price'])}",
-            },
-            {
-                "Leg": "Sell 1 CE (nearest 5% below ITM CE)",
-                "Strike": format_inr(pmcc["otm_ce_strike"], decimals=0),
-                "Price": format_inr(pmcc["sell_ce_price"]),
-                "Trade Date": pmcc["sell_ce_trade_date"] or "—",
-                "Cash flow": f"+{format_inr(pmcc['sell_ce_price'])}",
-            },
-        ]
-    )
-    st.dataframe(leg_df, use_container_width=True, hide_index=True)
-    pmcc_stats = [
-        ("Net credit", format_inr(pmcc["net_credit"]), "PE sold + CE sold − CE bought"),
-        ("5% ITM PMCC", format_pct(pmcc["pmcc_pct"], signed=False), "net credit ÷ ITM CE strike × 100"),
+    leg_stats = [
+        ("Strike", format_inr(cc["strike"], decimals=0), "nearest 5% above spot"),
+        ("Premium", format_inr(cc["premium"]), None),
+        ("Spot", format_inr(cc["spot"]), "last traded price"),
     ]
-    st.markdown(render_stat_grid(pmcc_stats, user_settings.theme, cols=2), unsafe_allow_html=True)
-    st.caption(f"Nearest expiry used: {pmcc['expiry_date']}")
+    st.markdown(render_stat_grid(leg_stats, user_settings.theme, cols=3), unsafe_allow_html=True)
+    cc_stats = [
+        (
+            "5% CC",
+            format_pct(cc["cc_pct"], signed=False) if cc["cc_pct"] is not None else "N/A",
+            "premium ÷ spot × 100",
+        ),
+        (
+            "Assignment Profit",
+            format_pct(cc["assignment_profit_pct"], signed=False) if cc["assignment_profit_pct"] is not None else "N/A",
+            "premium ÷ (strike − spot) × 100",
+        ),
+    ]
+    st.markdown(render_stat_grid(cc_stats, user_settings.theme, cols=2), unsafe_allow_html=True)
+    st.caption(f"Trade date: {cc['trade_date'] or '—'} · Nearest expiry used: {cc['expiry_date']}")

@@ -106,7 +106,7 @@ pages/
   2_Stock_Detail.py               Price/volume/dividend charts, scorecard, alerts, position notes
   3_Alerts.py                     Alert CRUD + notification history
   4_Settings.py                    Per-user thresholds, theme, change password
-  5_Options.py                     F&O: futures term structure + 5% CSP/PMCC breakdown per stock
+  5_Options.py                     F&O: futures term structure + 5% CSP/CC breakdown per stock
 src/
   config.py                       Pydantic Settings, reads .env
   models/                          Pydantic domain models + enums
@@ -152,7 +152,7 @@ rather than adding a new table -- see "Dashboard cache" below):
 - `daily_screener_snapshots` — the calculated audit trail: one row per symbol per day with the computed returns, TTM yield, criteria A/B/C, the two 52-week high/low proximity flags, and status. This is what the classification-history chart on Stock Detail reads.
 - `provider_fetch_log` — success/failure log for every provider call, used for the Dashboard's "data freshness" indicator and for retry/backoff auditing
 - `futures_contracts` / `futures_daily_prices` / `option_contracts` / `option_daily_prices` — NSE F&O derivatives (migration `0007`), written by `scripts/fetch_fo_data.py`. See the Futures & Options section for the contract-dimension vs daily-price-fact split and why the source is the EOD bhavcopy.
-- `dashboard_fo_metrics` — the Dashboard's precomputed "5% CSP"/"5% ITM PMCC" cache, one row per **(symbol, expiry_date)** -- up to 3 rows per symbol, near/next/far (migration `0010`, re-keyed from `0009`'s one-row-per-symbol shape). See the Futures & Options section for why this exists and everywhere that recomputes it.
+- `dashboard_fo_metrics` — the Dashboard's precomputed "5% CSP"/"5% CC" cache, one row per **(symbol, expiry_date)** -- up to 3 rows per symbol, near/next/far (migration `0011`, replacing `0010`'s pmcc_* columns with cc_* ones; `0010` itself re-keyed `0009`'s one-row-per-symbol shape). See the Futures & Options section for why this exists and everywhere that recomputes it.
 
 **Per-user data** (RLS-scoped to `auth.uid() = user_id`):
 - `user_settings` — thresholds, theme
@@ -377,38 +377,49 @@ against the real calendar once per run by `fo_repo.refresh_open_flags`.
   parsed day; `option_chain_summary` / `futures_term_structure` are pure
   presentation helpers (tested in
   `tests/test_fo_service.py`). `csp_5pct_map(put_rows, spot_by_symbol)` /
-  `csp_5pct_for_rows(pe_rows, spot, expiry_date)` /
-  `itm_pmcc_5pct_map(option_rows, spot_by_symbol)` compute the "5% CSP"
-  and "5% ITM PMCC" derived metrics — the single implementation shared by
-  the Options screen's "5% CSP"/"5% ITM PMCC" breakdown sections (see
-  below) and, via `dashboard_metrics_rows`/`recompute_dashboard_metrics`
-  below, the Dashboard's two F&O-derived columns. Each restricts to a
-  symbol's own nearest available expiry and returns not just the final
-  percentage but every intermediate value used to get there (strike(s),
-  each leg's premium, spot, expiry, each leg's own `trade_date`) — needed
-  by the Options screen's breakdown; `csp_5pct_for_rows` is the
-  single-expiry core `csp_5pct_map` delegates to, used directly by the
-  Options screen to compute a near/next/far month row each (the same
-  term-structure shape the Futures section already uses), one call per
-  expiry. Both prefer strikes with the freshest available `trade_date`
-  over a purely-nearest-strike match (`_freshest_rows`) — `strike ≈
-  target` can still be a contract that hasn't traded in weeks if it's
-  illiquid, while a neighboring strike keeps updating daily; PMCC's ITM
-  CE search falls back to a stale strike only if *no* freshest-dated
-  strike is actually ITM, so a symbol isn't dropped just because its most
-  recent trade_date happens to have no strike below spot.
-- `itm_pmcc_for_rows(leg_rows, spot, expiry_date)` — the single-expiry
-  core `itm_pmcc_5pct_map` delegates to, extracted the same way
-  `csp_5pct_for_rows` was: lets a caller compute "5% ITM PMCC" for a
-  *specific* expiry instead of only ever the nearest one. Used by
-  `dashboard_metrics_rows` below to store a near/next/far row per symbol.
+  `csp_5pct_for_rows(pe_rows, spot, expiry_date)` compute "5% CSP", and
+  `cc_5pct_map(call_rows, spot_by_symbol)` / `cc_5pct_for_rows(ce_rows,
+  spot, expiry_date)` compute "5% CC" — the single implementation shared
+  by the Options screen's "5% CSP"/"5% CC" breakdown sections (see below)
+  and, via `dashboard_metrics_rows`/`recompute_dashboard_metrics` below,
+  the Dashboard's two F&O-derived columns. Each restricts to a symbol's
+  own nearest available expiry and returns not just the final percentage
+  but every intermediate value used to get there (strike, premium, spot,
+  expiry, `trade_date`) — needed by the Options screen's breakdown;
+  `csp_5pct_for_rows`/`cc_5pct_for_rows` are the single-expiry cores
+  `csp_5pct_map`/`cc_5pct_map` delegate to, used directly by the Options
+  screen (CSP) or the Dashboard's cache (both) to compute a near/next/far
+  month row each (the same term-structure shape the Futures section
+  already uses), one call per expiry. Both prefer strikes with the
+  freshest available `trade_date` over a purely-nearest-strike match
+  (`_freshest_rows`) — `strike ≈ target` can still be a contract that
+  hasn't traded in weeks if it's illiquid, while a neighboring strike
+  keeps updating daily.
+
+  **"5% CC" (covered call)** is deliberately simple: sell 1 lot of the
+  OTM call whose strike is closest to **5% above** spot (the mirror
+  image of "5% CSP"'s `target = spot * 0.95` search) — no ITM leg, no PE
+  leg, just the one call. Two percentages come out of `cc_5pct_for_rows`:
+  `cc_pct` = premium ÷ spot × 100 (the covered-call yield on the stock's
+  own price — this is the value both the Dashboard and the Options
+  screen label "5% CC"), and `assignment_profit_pct` = premium ÷ (strike
+  − spot) × 100 (premium as a fraction of the capital-gain room left
+  before assignment caps further upside — shown on the Options screen
+  only, as "Assignment Profit"; `None` when strike equals spot rather
+  than dividing by zero). This replaced an earlier "5% ITM PMCC"
+  (poor-man's-covered-call: buy an ITM call, sell a PE at the same
+  strike, sell a further OTM call, net-credit ÷ ITM strike) on request —
+  if you find references to `itm_pmcc_5pct_map`/`itm_pmcc_for_rows`
+  anywhere (old commits, cached docs), that calculation no longer exists.
 - `dashboard_metrics_rows(option_rows, spot_by_symbol)` / `recompute_dashboard_metrics(client)`
   — the Dashboard's precomputed-cache write path (`dashboard_fo_metrics`,
-  migration `0010`). For each symbol with a spot price and open option
+  migration `0011`). For each symbol with a spot price and open option
   legs, `dashboard_metrics_rows` calls `csp_5pct_for_rows` +
-  `itm_pmcc_for_rows` once per each of that symbol's **up to 3 nearest
+  `cc_5pct_for_rows` once per each of that symbol's **up to 3 nearest
   distinct expiries** (adding no new strike-selection math of its own),
-  emitting one flat row per **(symbol, expiry)**; `recompute_dashboard_metrics`
+  emitting one flat row per **(symbol, expiry)** — `cc_5pct_for_rows`'s
+  `assignment_profit_pct` is deliberately not cached here, since the
+  Dashboard only ever displays `cc_pct`; `recompute_dashboard_metrics`
   reads spot from `latest_screener_view` + open option legs from
   `latest_option_chain_view`, calls it, and upserts the whole table. See
   "Dashboard cache" below for why this exists and every path that calls it.
@@ -426,12 +437,12 @@ actually published something newer than what's already loaded (checked via
 new is a cheap read-only no-op rather than a silent re-fetch. It has no
 external zip-library dependency — see the Edge Functions section for why.
 
-**Dashboard cache (`dashboard_fo_metrics`, migration `0010`)**: the
-Dashboard used to compute its "5% CSP"/"5% ITM PMCC" columns live, on
-every page load — pulling every open option leg for all 50 symbols
-(thousands of rows, paginated) and running the nearest-strike search in
-Python in the request path. That's now precomputed instead, the same way
-every other Dashboard column already was (`daily_screener_snapshots`):
+**Dashboard cache (`dashboard_fo_metrics`, migration `0011`)**: the
+Dashboard used to compute its "5% CSP"/"5% CC" columns live, on every
+page load — pulling every open option leg for all 50 symbols (thousands
+of rows, paginated) and running the nearest-strike search in Python in
+the request path. That's now precomputed instead, the same way every
+other Dashboard column already was (`daily_screener_snapshots`):
 `dashboard_fo_metrics` holds up to 3 small rows per symbol -- one per
 near/next/far monthly expiry -- keyed by **(symbol, expiry_date)**
 (`fo_service.dashboard_metrics_rows`/`recompute_dashboard_metrics`), and
@@ -449,10 +460,10 @@ separate schedule:
   on-demand refresh buttons. These can't call the Python implementation
   (no service-role key in Streamlit), so the calculation is ported to
   TypeScript too: `supabase/functions/_shared/dashboardMetrics.ts`
-  (`cspFivePct`/`itmPmccFivePct`/`recomputeDashboardMetrics`, tested in
+  (`cspFivePct`/`ccFivePct`/`recomputeDashboardMetrics`, tested in
   `dashboardMetrics.test.ts`) — the same duplicated-business-logic
   tradeoff `calculations.ts`/`bhavcopy.ts` already accept, for the same
-  reason (a truly instant on-demand path). If you change the CSP/PMCC
+  reason (a truly instant on-demand path). If you change the CSP/CC
   calculation in `fo_service.py`, mirror it here too.
 
 `dashboard_fo_metrics` was originally one row per symbol (migration
@@ -460,12 +471,16 @@ separate schedule:
 recreated it keyed by `(symbol, expiry_date)` instead once a per-month
 dropdown was requested, since the whole point of the cache is that
 picking a different month can't trigger live recomputation -- it has to
-already be sitting in the table. This truncates the cache (harmless,
-rebuilt on the next refresh) -- see that migration's own comment for why
-a drop+recreate was safe here (a pure derived cache, no history worth an
-`ALTER`).
+already be sitting in the table. Migration `0011` then dropped and
+recreated it again, replacing `0010`'s `pmcc_*` columns (a three-leg
+ITM/PE/OTM breakdown) with just `cc_strike`/`cc_premium`/`cc_pct`/
+`cc_trade_date`, when "5% ITM PMCC" was replaced with the simpler "5% CC"
+covered-call calculation on request. Each of these truncates the cache
+(harmless, rebuilt on the next refresh) -- see each migration's own
+comment for why a drop+recreate was safe here (a pure derived cache, no
+history worth an `ALTER`).
 
-All four write paths tolerate migration `0010` not being applied yet
+All four write paths tolerate migration `0011` not being applied yet
 (catch-and-log, not a hard failure) — same degrade-gracefully precedent as
 the Dashboard's own `except APIError` → "N/A" handling.
 
@@ -483,13 +498,13 @@ Forgot password tabs and `st.stop()`s.
 
   **Screener table columns**, left to right: `#` (serial number, just `enumerate()` over the current filtered/sorted rows — always 1..N of what's on screen, not a stored ID, so it renumbers on every filter/sort change), `Stock` (the NSE ticker symbol, e.g. `ADANIENT` — not the full company name; a redundant hidden `Symbol` key is still carried in each `display_rows` dict for the selectboxes below the table and the per-row link column, but since `Stock` moved to the symbol too, `Symbol` is now just an alias of the same value), `LTP` (latest price — renamed from "Latest price" for column-width economy), `52W High`/`52W Low` (value + `pass_fail_icon` for `criterion_52w_high`/`criterion_52w_low` — display-only proximity checks, **not** part of Green/Amber/Red; see `classification.py` above), `1D`/`5D`/`20D` (arrow + percentage only), `Momentum` (a single `pass_fail_icon(criterion_b)` — despite the name it's specifically criterion B, not a combined A/B/C view), two F&O-derived columns (see below), and `Dividend`/`PE`/`PEG` last (`Dividend` — renamed from "Dividend yield" — and `PEG` both carry a `pass_fail_icon` for criteria A and C respectively; `PE` is plain, not a criterion). There used to be a third F&O-derived column, the near-month future's price (header e.g. `Jul Future`, backed by `fo_service.near_month_futures_map`/`near_month_column_label`) — it was dropped on request, and those two now-unused `fo_service` functions (and their tests) were deleted along with it rather than left as dead code; futures data is no longer fetched on this page at all (only options, for the two columns below).
 
-  **The two F&O-derived columns** (between `Momentum` and `Dividend`) come from a *separate* data source than the rest of the table — `dashboard_fo_metrics` (migration `0010`), the Dashboard's precomputed F&O cache, not `latest_screener_view` — joined in by symbol after filtering, rather than being part of `ScreenerRow`. `_load_dashboard_fo_metrics` returns the *raw* row list (up to 3 per symbol, one per near/next/far expiry); an **"Options month" selectbox**, rendered next to "Sort By"/"Descending" (`sort_by_col, sort_desc_col, month_col = st.columns([2, 1, 2])`), lists the distinct `expiry_date`s actually present (formatted `"%b %Y"`, e.g. "Jul 2026") and defaults to the nearest one via `st.session_state["dashboard_options_month"]` (same pattern as `dashboard_sort_label`). Picking a month is a pure re-render over already-cached rows -- `filtered["csp_5pct"]`/`filtered["itm_pmcc_5pct"]` are built by filtering `dashboard_fo_metrics_rows` to that one `expiry_date` and mapping by symbol, no new fetch or recomputation triggered. (Note this assignment happens on `filtered`, not the earlier `df`, specifically so it can live down near the Sort By widgets after `filtered = df.copy()` has already run -- nothing between that copy and here reads either column.) This page only ever reads the final `csp_pct`/`pmcc_pct` key out of each row; see the Futures & Options section's "Dashboard cache" paragraph above for the full pipeline (`fo_service.dashboard_metrics_rows`/`recompute_dashboard_metrics`, and every refresh path that keeps it current) and `csp_5pct_for_rows`/`itm_pmcc_for_rows`'s docs for the underlying formulas, which are also what the Options screen's "5% CSP"/"5% ITM PMCC" breakdown sections use directly (unchanged, live, for a single symbol):
+  **The two F&O-derived columns** (between `Momentum` and `Dividend`) come from a *separate* data source than the rest of the table — `dashboard_fo_metrics` (migration `0011`), the Dashboard's precomputed F&O cache, not `latest_screener_view` — joined in by symbol after filtering, rather than being part of `ScreenerRow`. `_load_dashboard_fo_metrics` returns the *raw* row list (up to 3 per symbol, one per near/next/far expiry); an **"Options month" selectbox**, rendered next to "Sort By"/"Descending" (`sort_by_col, sort_desc_col, month_col = st.columns([2, 1, 2])`), lists the distinct `expiry_date`s actually present (formatted `"%b %Y"`, e.g. "Jul 2026") and defaults to the nearest one via `st.session_state["dashboard_options_month"]` (same pattern as `dashboard_sort_label`). Picking a month is a pure re-render over already-cached rows -- `filtered["csp_5pct"]`/`filtered["cc_5pct"]` are built by filtering `dashboard_fo_metrics_rows` to that one `expiry_date` and mapping by symbol, no new fetch or recomputation triggered. (Note this assignment happens on `filtered`, not the earlier `df`, specifically so it can live down near the Sort By widgets after `filtered = df.copy()` has already run -- nothing between that copy and here reads either column.) This page only ever reads the final `csp_pct`/`cc_pct` key out of each row; see the Futures & Options section's "Dashboard cache" paragraph above for the full pipeline (`fo_service.dashboard_metrics_rows`/`recompute_dashboard_metrics`, and every refresh path that keeps it current) and `csp_5pct_for_rows`/`cc_5pct_for_rows`'s docs for the underlying formulas, which are also what the Options screen's "5% CSP"/"5% CC" breakdown sections use directly (unchanged, live, for a single symbol):
   - **`5% CSP`** — a cash-secured-put yield: for the strike nearest 5% below spot (the screener's `latest_price`, not the option chain's `underlying_price`, kept consistent both here and on the Options screen — see the bug note on `5_Options.py` below), the selected expiry's put premium as a percentage of that strike (`put_price / strike * 100`). **Deliberately not divided by exchange margin** — SPAN margin isn't available from NSE as a simple downloadable per-contract figure (it's a licensed CME Group multi-scenario risk calculation, confirmed via a live search of NSE's actual report index turning up nothing), so this uses the strike itself (the full notional a cash-secured-put seller sets aside) as the yield's denominator instead; `strike * lot_size` cancels out of both the premium and this ratio, so lot size never needs to appear in the formula at all.
-  - **`5% ITM PMCC`** — a synthetic covered-call ("poor man's covered call") built entirely from the selected expiry's options: buy 1 lot of the ITM call closest to spot (largest strike below spot), sell 1 lot of the put at that *same* strike, sell 1 lot of the call whose strike is closest to 5% below the bought call's strike, and express the net credit (`PE sold + CE sold − CE bought`) as a percentage of the bought (ITM) call's strike. Same lot-size-cancels-out reasoning as `5% CSP`.
+  - **`5% CC`** — a covered-call yield: sell 1 lot of the call whose strike is closest to 5% *above* spot, expressed as a percentage of **spot** (not the strike) -- `premium / spot * 100`. This is deliberately the simplest possible covered-call read: no ITM leg, no PE leg, just the one OTM call's premium as a yield on the stock's own price. (The Options screen additionally shows "Assignment Profit" -- `premium / (strike - spot) * 100` -- but the Dashboard column only ever surfaces `cc_pct`.) This replaced an earlier three-leg "5% ITM PMCC" (poor-man's-covered-call) calculation on request; see `fo_service.py`'s bullet above for what that used to compute.
 
   **A real bug this surfaced**: `fo_repo.get_all_open_options()` initially had no pagination, and PostgREST caps a single response at a server-configured max (1000 rows on this project) regardless of how many rows actually match — against live data (~5,053 open PE legs across 50 symbols) this silently truncated to exactly 1000 rows, and whichever symbols fell outside that window (most of the universe, including RELIANCE/TCS/HDFCBANK) were missing from the 5% CSP column with **no error anywhere** — confirmed live (`PE rows: 1000` before, `5053` after). Fixed by a generic `fo_repo._paginate(query_builder, page_size=1000)` helper that `get_all_open_futures()`/`get_all_open_options()` go through, looping `.range()` calls until a page comes back short (this is still exercised by `recompute_dashboard_metrics`, which calls `get_all_open_options()` at refresh time, and by its TypeScript port's own paginated fetch). `tests/test_fo_repo.py` covers the pagination boundary cases (multi-page accumulation, an exact-multiple-of-page-size input not looping forever, empty results).
 
-  The cache read (`fo_repo.get_dashboard_fo_metrics`) is cached the same way `_load_screener_rows`/`_load_last_fetch` are (`@st.cache_data(ttl=60)`, keyed on `dashboard_cache_bust`) — a handful of rows, not the thousands-of-rows option query this used to be (see "Dashboard cache" above for why that moved off this page's request path entirely). Both refresh buttons bump `dashboard_cache_bust` and `st.cache_data.clear()`, so a click always shows this session's own just-recomputed cache rows rather than stale 60s-old ones. Like `pages/5_Options.py`, a missing F&O schema (migration `0007`/`0010` not yet applied) degrades to "N/A" in both columns via the same `except APIError` pattern (and an empty/disabled month dropdown), rather than crashing the whole Dashboard.
+  The cache read (`fo_repo.get_dashboard_fo_metrics`) is cached the same way `_load_screener_rows`/`_load_last_fetch` are (`@st.cache_data(ttl=60)`, keyed on `dashboard_cache_bust`) — a handful of rows, not the thousands-of-rows option query this used to be (see "Dashboard cache" above for why that moved off this page's request path entirely). Both refresh buttons bump `dashboard_cache_bust` and `st.cache_data.clear()`, so a click always shows this session's own just-recomputed cache rows rather than stale 60s-old ones. Like `pages/5_Options.py`, a missing F&O schema (migration `0007`/`0011` not yet applied) degrades to "N/A" in both columns via the same `except APIError` pattern (and an empty/disabled month dropdown), rather than crashing the whole Dashboard.
 
   There is deliberately no dedicated `Status` column — it duplicated the per-criterion tick/cross columns already on screen without adding information. The underlying `status` field is still sortable/filterable (sidebar multiselect), just not rendered as its own column. `status_badge()` (colored text badge, e.g. "🟢 Green") is still used standalone on Stock Detail's header, where the status needs to stand alone rather than sit in a row with other context.
 
@@ -501,12 +516,12 @@ Forgot password tabs and `st.stop()`s.
 - **`2_Stock_Detail.py`** — the most feature-dense page: Plotly candlestick (falls back to a line chart if OHLC is incomplete) with volume subplot, moving averages, entry/target/stop-loss lines, dividend timeline, classification-history chart, position notes form, and inline alert creation. The Fundamentals column is rendered via `render_stat_grid()` instead of stacked `st.markdown` lines; the alert list uses `render_alert_row()` (see below) instead of printing the alert's raw Python `config` dict; the "Create a new alert" expander's inputs are now wrapped in an `st.form` (previously plain buttons), bringing it to parity with `3_Alerts.py`'s create-alert form, which already used this pattern. A "📊 View F&O / options" button hands the current symbol to `5_Options.py` via `st.session_state["fo_symbol"]` + `st.switch_page`.
 - **`3_Alerts.py`** — alert CRUD (including portfolio-wide alerts, `symbol IS NULL`) and notification history. Alert rows use `render_alert_row()` (shared with Stock Detail — one formatting implementation, two call sites) instead of a raw dict dump. Notification history stays `st.dataframe`-only on every viewport, deliberately not given a Tailwind mobile-card alternative — see the design-system note under Utils for why.
 - **`4_Settings.py`** — per-user thresholds, theme, change-password. The three permanently-disabled Email/Telegram/Slack notification checkboxes were collapsed into a single row of `render_pill()` "coming soon" badges next to the one real (In-app) checkbox, removing dead-weight disabled UI for unimplemented channels.
-- **`5_Options.py`** — the F&O / Options screen for one stock (see the Futures & Options section above for the data pipeline). Symbol selector defaults to `st.session_state["fo_symbol"]` (set by the Dashboard's "Open in Options →" block or Stock Detail's button), falling back to `selected_symbol`. Renders: an expiry selector (drives the summary tiles and, indirectly, which expiry's rows are reused for the near-month CSP row below); summary tiles (spot / ATM strike / total CE OI / total PE OI / Put-Call ratio) via `render_stat_grid`, sourced from `fo_service.option_chain_summary(chain_rows)` for the selected expiry; a futures term-structure table (near/next/far, with basis vs spot) + a near-month daily-close Plotly chart; and two sections below that, **"5% CSP"** and **"5% ITM PMCC"**, showing the actual calculation for the selected symbol rather than just the final Dashboard-column percentage. (There used to be a classic CE | Strike | PE option chain table between the futures chart and these two sections -- it was dropped on request; `chain_rows`/`option_chain_summary` are still fetched/used for the summary tiles and CSP's near-expiry row, but the pivoted per-strike display itself, and the now-unused `fo_service.shape_option_chain` pivot helper + its tests, were removed rather than left as dead code.):
+- **`5_Options.py`** — the F&O / Options screen for one stock (see the Futures & Options section above for the data pipeline). Symbol selector defaults to `st.session_state["fo_symbol"]` (set by the Dashboard's "Open in Options →" block or Stock Detail's button), falling back to `selected_symbol`. Renders: an expiry selector (drives the summary tiles and, indirectly, which expiry's rows are reused for the near-month CSP row below); summary tiles (spot / ATM strike / total CE OI / total PE OI / Put-Call ratio) via `render_stat_grid`, sourced from `fo_service.option_chain_summary(chain_rows)` for the selected expiry; a futures term-structure table (near/next/far, with basis vs spot) + a near-month daily-close Plotly chart; and two sections below that, **"5% CSP"** and **"5% CC"**, showing the actual calculation for the selected symbol rather than just the final Dashboard-column percentage. (There used to be a classic CE | Strike | PE option chain table between the futures chart and these two sections -- it was dropped on request; `chain_rows`/`option_chain_summary` are still fetched/used for the summary tiles and CSP's near-expiry row, but the pivoted per-strike display itself, and the now-unused `fo_service.shape_option_chain` pivot helper + its tests, were removed rather than left as dead code.):
   - **5% CSP** is a **near/next/far month table** (`fo_service.csp_5pct_for_rows`, one call per expiry — the same term-structure shape the Futures section above already uses), columns Term / Expiry / Spot / Strike / Put Premium / **Trade Date** / 5% CSP. The near row reuses the already-fetched `chain_rows` when the expiry selector above happens to be on the near expiry; next/far are fetched separately via `fo_repo.get_option_chain`. The Trade Date column is what actually surfaces a stale quote to the user — see `_freshest_rows`'s docstring above for why a strike's "latest" row can silently be weeks old.
-  - **5% ITM PMCC** stays a single near-expiry breakdown (`fo_service.itm_pmcc_5pct_map`): a stat grid of the inputs (spot, strikes), a leg-by-leg table (Leg / Strike / Price / **Trade Date** / Cash flow) for the three legs, and the final percentage with its formula spelled out.
-  Both are restricted to the symbol's own nearest available expiry (PMCC unconditionally; CSP's near row specifically) **regardless of which expiry is selected above**, so the near-month numbers always match the Dashboard's cached values for the same stock. Shaping is done by `fo_service.option_chain_summary`/`futures_term_structure`/`csp_5pct_for_rows`/`itm_pmcc_5pct_map`, not in the page.
+  - **5% CC** is a single near-expiry breakdown (`fo_service.cc_5pct_map`): a stat grid of the inputs (strike, premium, spot), then two result stats -- **5% CC** (`premium / spot * 100`) and **Assignment Profit** (`premium / (strike - spot) * 100`, `None`/"N/A" if strike equals spot) -- each with its formula spelled out, plus the leg's trade date and the nearest expiry used. This replaced an earlier three-leg "5% ITM PMCC" breakdown (a stat grid + a Leg/Strike/Price/Trade Date/Cash flow table for three legs) on request; "Assignment Profit" only appears here, not on the Dashboard, which only ever caches/displays `cc_pct`.
+  Both are restricted to the symbol's own nearest available expiry (CC unconditionally; CSP's near row specifically) **regardless of which expiry is selected above**, so the near-month numbers always match the Dashboard's cached values for the same stock. Shaping is done by `fo_service.option_chain_summary`/`futures_term_structure`/`csp_5pct_for_rows`/`cc_5pct_map`, not in the page.
 
-  **A real bug found here, right after this section first shipped**: the CSP/PMCC breakdown's spot value was initially taken from `option_chain_summary(near_chain_rows)["spot"]` — the F&O bhavcopy's own `underlying_price` column — while the Dashboard's two columns (now the `dashboard_fo_metrics` cache, see above) use the cash-market `latest_price` from `latest_screener_view`. These two prices aren't the same value, so this page's numbers didn't match the Dashboard's for the same stock (confirmed live: ADANIENT showed 5% CSP = 0.54% on the Dashboard but 0.45% here, since a different spot picked a different nearest-5%-below strike, 3040 vs 3020). Fixed by fetching `snapshot_repo.get_latest_screener_row(client, symbol).latest_price` and using that as the spot for both calculations here too, instead of the chain's `underlying_price` — the top-of-page "Spot"/"ATM strike" summary tiles are unaffected and deliberately still use the chain's own `underlying_price` (correct for highlighting the ATM row in the actual option-chain data being displayed there). If you add another F&O-derived calculation to either screen, source spot the same way this one now does — from the screener, not the chain — to keep the two screens' numbers in agreement.
+  **A real bug found here, right after this section first shipped**: the CSP/CC breakdown's spot value (CC was still "ITM PMCC" at the time, but the bug and fix applied identically) was initially taken from `option_chain_summary(near_chain_rows)["spot"]` — the F&O bhavcopy's own `underlying_price` column — while the Dashboard's two columns (now the `dashboard_fo_metrics` cache, see above) use the cash-market `latest_price` from `latest_screener_view`. These two prices aren't the same value, so this page's numbers didn't match the Dashboard's for the same stock (confirmed live: ADANIENT showed 5% CSP = 0.54% on the Dashboard but 0.45% here, since a different spot picked a different nearest-5%-below strike, 3040 vs 3020). Fixed by fetching `snapshot_repo.get_latest_screener_row(client, symbol).latest_price` and using that as the spot for both calculations here too, instead of the chain's `underlying_price` — the top-of-page "Spot"/"ATM strike" summary tiles are unaffected and deliberately still use the chain's own `underlying_price` (correct for highlighting the ATM row in the actual option-chain data being displayed there). If you add another F&O-derived calculation to either screen, source spot the same way this one now does — from the screener, not the chain — to keep the two screens' numbers in agreement.
 
 ## Auth: a non-obvious quirk
 

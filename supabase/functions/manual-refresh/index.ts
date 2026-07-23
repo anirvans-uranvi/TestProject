@@ -297,12 +297,12 @@ Deno.serve(async (req: Request) => {
   const failed = results.filter((r) => !r.ok);
 
   // Spot price just changed for every symbol that succeeded above, which
-  // feeds the Dashboard's precomputed 5% CSP / 5% ITM PMCC cache --
-  // recompute it here too, so the Dashboard reflects this refresh the
-  // instant it finishes rather than waiting on the next cron tick. Not
-  // fatal if it fails (e.g. migration 0009 not applied yet) -- the price
-  // refresh above already succeeded and shouldn't be reported as failed
-  // over a cache that degrades to "N/A" anyway.
+  // feeds the Dashboard's precomputed 5% CSP / 5% CC cache -- recompute
+  // it here too, so the Dashboard reflects this refresh the instant it
+  // finishes rather than waiting on the next cron tick. Not fatal if it
+  // fails (e.g. the dashboard_fo_metrics migration not applied yet) --
+  // the price refresh above already succeeded and shouldn't be reported
+  // as failed over a cache that degrades to "N/A" anyway.
   try {
     await recomputeDashboardMetrics(serviceClient);
   } catch (err) {

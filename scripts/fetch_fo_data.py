@@ -112,8 +112,8 @@ def main() -> None:
     )
 
     # Option data just changed, which feeds the Dashboard's precomputed 5%
-    # CSP / 5% ITM PMCC cache -- recompute once at the end (not per day
-    # inside the backfill loop above, since only the final state matters).
+    # CSP / 5% CC cache -- recompute once at the end (not per day inside
+    # the backfill loop above, since only the final state matters).
     metrics_count = recompute_dashboard_metrics(client)
     logger.info("dashboard F&O metrics cache: recomputed %d rows", metrics_count)
 

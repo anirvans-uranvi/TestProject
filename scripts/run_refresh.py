@@ -75,10 +75,11 @@ def run_once(mode: str) -> None:
         logger.info("screener refresh: computed %d rows", len(rows))
 
         # Spot price just changed for every symbol, which feeds the
-        # Dashboard's precomputed 5% CSP / 5% ITM PMCC cache -- recompute
-        # it here too. Tolerant of migration 0009 not being applied yet
-        # (mirrors the Dashboard's own APIError-catching degrade-to-N/A
-        # for F&O data), so an older deployment's cron doesn't break.
+        # Dashboard's precomputed 5% CSP / 5% CC cache -- recompute it
+        # here too. Tolerant of the dashboard_fo_metrics migration not
+        # being applied yet (mirrors the Dashboard's own
+        # APIError-catching degrade-to-N/A for F&O data), so an older
+        # deployment's cron doesn't break.
         try:
             metrics_count = fo_service.recompute_dashboard_metrics(client)
             logger.info("dashboard F&O metrics cache: recomputed %d rows", metrics_count)

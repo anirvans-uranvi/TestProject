@@ -36,7 +36,7 @@ pages/                  Streamlit multipage app
   2_Stock_Detail.py       Price/volume/dividend charts, scorecard, alerts, position notes
   3_Alerts.py             Alert CRUD + notification history
   4_Settings.py            Per-user thresholds, theme, notification channels
-  5_Options.py              F&O: futures term structure, option chain, 5% CSP / 5% ITM PMCC breakdown
+  5_Options.py              F&O: futures term structure, 5% CSP / 5% CC breakdown
 src/
   config.py               Pydantic Settings (env-driven)
   data_providers/         PriceDataProvider / FundamentalsDataProvider + Dhan/mock/manual impls
@@ -355,7 +355,7 @@ As its last step, this function also recomputes the Dashboard's
 `dashboard_fo_metrics` cache (a TypeScript port of the same calculation
 `fo_service.py` uses, in `supabase/functions/_shared/dashboardMetrics.ts`
 -- see [Futures & Options data](#futures--options-fo-data)) so a changed
-spot price shows up in the 5% CSP / 5% ITM PMCC columns immediately,
+spot price shows up in the 5% CSP / 5% CC columns immediately,
 without waiting for the next scheduled recompute.
 
 **Deploying the Edge Function** (one-time setup, requires the Supabase
@@ -429,17 +429,24 @@ TypeScript module as `manual-refresh` above.
 ## Futures & Options (F&O) data
 
 The **Options** page (`pages/5_Options.py`) shows, per stock, the futures
-term structure, the option chain (CE | strike | PE, with open interest,
-change in OI, volume, and LTP; ATM strike highlighted), and a full
-calculation breakdown for the Dashboard's two options-derived screener
-columns — **5% CSP** and **5% ITM PMCC** — showing the actual strikes,
-premiums, trade dates, and net credit used, not just the final
-percentage (CSP as a near/next/far month table, PMCC as a leg-by-leg
-breakdown). Open it from the Dashboard's "Open in Options →" section or
+term structure and a full calculation breakdown for the Dashboard's two
+options-derived screener columns — **5% CSP** and **5% CC** — showing the
+actual strikes, premiums, and trade dates used, not just the final
+percentage (CSP as a near/next/far month table, CC as a single-leg
+breakdown that also shows an "Assignment Profit" figure the Dashboard
+doesn't). Open it from the Dashboard's "Open in Options →" section or
 the "View F&O / options" button on Stock Detail.
 
-The Dashboard's own **5% CSP** / **5% ITM PMCC** columns read from a small
-precomputed cache table (`dashboard_fo_metrics`, migration `0010`, keyed
+**5% CC** is a covered-call yield: sell 1 lot of the OTM call whose
+strike is closest to 5% above spot; `cc_pct` = premium ÷ spot × 100 (the
+yield on the stock's own price), and Assignment Profit = premium ÷
+(strike − spot) × 100 (premium as a fraction of the capital-gain room
+left before the strike caps further upside). This replaced an earlier,
+more complex "5% ITM PMCC" (poor-man's-covered-call, three option legs)
+on request.
+
+The Dashboard's own **5% CSP** / **5% CC** columns read from a small
+precomputed cache table (`dashboard_fo_metrics`, migration `0011`, keyed
 by `(symbol, expiry_date)` -- up to 3 rows per symbol, near/next/far)
 instead of recalculating across every open option contract on every page
 load -- every refresh path (the cron script, `fetch_fo_data.py`, and both
@@ -462,7 +469,7 @@ python scripts/fetch_fo_data.py --mock     # synthetic data, no network
 ```
 
 Requires `SUPABASE_SERVICE_ROLE_KEY` (writes shared market data, bypasses
-RLS), and migrations `0007` and `0010` applied first (`0010` adds the
+RLS), and migrations `0007` and `0011` applied first (`0011` adds the
 `dashboard_fo_metrics` cache table this script recomputes at the end of
 each run). `scripts/seed_mock_data.py` also seeds ~30 days of synthetic
 F&O so the Options screen works locally with no network. This is

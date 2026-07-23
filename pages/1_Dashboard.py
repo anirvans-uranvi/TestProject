@@ -45,8 +45,8 @@ def _load_last_fo_fetch(_client, _cache_bust: int):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_dashboard_fo_metrics(_client, _cache_bust: int):
-    """The precomputed 5% CSP / 5% ITM PMCC cache (`dashboard_fo_metrics`,
-    migration 0010) -- up to 3 rows per symbol (near/next/far expiry),
+    """The precomputed 5% CSP / 5% CC cache (`dashboard_fo_metrics`,
+    migration 0011) -- up to 3 rows per symbol (near/next/far expiry),
     kept current by every refresh path (see
     `fo_service.recompute_dashboard_metrics` and its TypeScript port in
     `supabase/functions/_shared/dashboardMetrics.ts`) instead of pulling
@@ -152,14 +152,14 @@ if not rows:
 df = pd.DataFrame([r.model_dump() for r in rows])
 
 # ---------------------------------------------------------------------
-# F&O-derived columns (5% CSP, 5% ITM PMCC) -- read from the precomputed
-# dashboard_fo_metrics cache (migration 0010) rather than recomputed
+# F&O-derived columns (5% CSP, 5% CC) -- read from the precomputed
+# dashboard_fo_metrics cache (migration 0011) rather than recomputed
 # here; see _load_dashboard_fo_metrics's docstring. Up to 3 rows per
 # symbol (near/next/far expiry) come back here; the "Options month"
 # selectbox further below (alongside "Sort By") picks which expiry's
 # rows actually populate the two columns -- a pure re-render over
 # already-cached data, no new fetch. Degrades to "N/A" in both columns,
-# not a crash, if migration 0007/0010 hasn't been applied yet -- same
+# not a crash, if migration 0007/0011 hasn't been applied yet -- same
 # APIError-catching pattern as pages/5_Options.py.
 # ---------------------------------------------------------------------
 try:
@@ -387,7 +387,7 @@ with month_col:
             available_expiries,
             key="dashboard_options_month",
             format_func=lambda d: date.fromisoformat(d).strftime("%b %Y"),
-            help="Which monthly options expiry feeds the 5% CSP / 5% ITM PMCC columns below.",
+            help="Which monthly options expiry feeds the 5% CSP / 5% CC columns below.",
         )
     else:
         selected_month = None
@@ -399,7 +399,7 @@ metrics_by_symbol = (
     else {}
 )
 filtered["csp_5pct"] = filtered["symbol"].map(lambda s: (metrics_by_symbol.get(s) or {}).get("csp_pct"))
-filtered["itm_pmcc_5pct"] = filtered["symbol"].map(lambda s: (metrics_by_symbol.get(s) or {}).get("pmcc_pct"))
+filtered["cc_5pct"] = filtered["symbol"].map(lambda s: (metrics_by_symbol.get(s) or {}).get("cc_pct"))
 
 filtered = filtered.sort_values(SORT_OPTION_TO_KEY[sort_col], ascending=not sort_desc, na_position="last")
 
@@ -417,7 +417,7 @@ for i, (_, r) in enumerate(filtered.iterrows(), start=1):
             "20D": f"{direction_arrow(r['return_20d'])} {format_pct(r['return_20d'])}",
             "Momentum": pass_fail_icon(r["criterion_b"]),
             "5% CSP": format_pct(r["csp_5pct"], signed=False) if pd.notna(r["csp_5pct"]) else "N/A",
-            "5% ITM PMCC": format_pct(r["itm_pmcc_5pct"], signed=False) if pd.notna(r["itm_pmcc_5pct"]) else "N/A",
+            "5% CC": format_pct(r["cc_5pct"], signed=False) if pd.notna(r["cc_5pct"]) else "N/A",
             "Dividend": f"{format_pct(r['ttm_dividend_yield'], signed=False)} {pass_fail_icon(r['criterion_a'])}",
             "PE": f"{r['pe_ratio']:.1f}" if pd.notna(r["pe_ratio"]) else "N/A",
             "PEG": f"{r['peg_ratio']:.2f} {pass_fail_icon(r['criterion_c'])}" if pd.notna(r["peg_ratio"]) else "N/A",

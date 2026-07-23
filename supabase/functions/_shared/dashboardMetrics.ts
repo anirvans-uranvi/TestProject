@@ -1,12 +1,11 @@
-// Direct TypeScript port of the "5% CSP" / "5% ITM PMCC" calculations in
+// Direct TypeScript port of the "5% CSP" / "5% CC" calculations in
 // src/services/fo_service.py (csp_5pct_map, csp_5pct_for_rows,
-// itm_pmcc_5pct_map, itm_pmcc_for_rows, _freshest_rows), plus
+// cc_5pct_map, cc_5pct_for_rows, _freshest_rows), plus
 // recomputeDashboardMetrics -- the entrypoint that reads the same two
 // Postgres views the Python side reads (latest_screener_view for spot,
 // latest_option_chain_view for option legs) and (re)writes
-// dashboard_fo_metrics (migration
-// 0010_dashboard_fo_metrics_per_expiry.sql), the Dashboard's precomputed
-// cache, one row per (symbol, expiry_date).
+// dashboard_fo_metrics (migration 0011_dashboard_cc_5pct.sql), the
+// Dashboard's precomputed cache, one row per (symbol, expiry_date).
 //
 // Lives in _shared/ (Supabase Edge Functions convention -- an
 // underscore-prefixed folder is bundled into whichever function imports
@@ -15,7 +14,7 @@
 // change) need to trigger this same recompute as their final step.
 //
 // IMPORTANT: this is a second copy of business logic that lives in
-// Python (src/services/fo_service.py). If you change the CSP/PMCC
+// Python (src/services/fo_service.py). If you change the CSP/CC
 // calculation there, mirror it here too -- there is no automated check
 // that these two stay in sync. Same accepted tradeoff as
 // manual-refresh/calculations.ts and fo-refresh/bhavcopy.ts (see
@@ -95,72 +94,39 @@ export function cspFivePct(peRows: OptionLegRow[], spot: number, expiryDate: str
   return { strike, putPrice, cspPct, spot, expiryDate, putTradeDate: bestRow.tradeDate };
 }
 
-export interface PmccResult {
-  itmCeStrike: number;
-  otmCeStrike: number;
-  buyCePrice: number;
-  sellPePrice: number;
-  sellCePrice: number;
-  netCredit: number;
-  pmccPct: number;
+export interface CcResult {
+  strike: number;
+  premium: number | null;
+  ccPct: number | null;
+  assignmentProfitPct: number | null;
   spot: number;
   expiryDate: string;
-  buyCeTradeDate: string | null;
-  sellPeTradeDate: string | null;
-  sellCeTradeDate: string | null;
+  tradeDate: string | null;
 }
 
-/** Mirrors fo_service.py::itm_pmcc_5pct_map's per-symbol body -- `legRows`
- * should already be filtered to one symbol + one expiry (both CE and PE
- * legs). Builds the "5% ITM PMCC": buy the ITM CE closest to spot
- * (preferring freshest-dated strikes, falling back to a stale one only
- * if no fresh strike is actually ITM), sell the PE at that same strike,
- * sell the CE nearest 5% below the bought strike. Returns null if any
- * leg is missing. */
-export function itmPmccFivePct(legRows: OptionLegRow[], spot: number, expiryDate: string): PmccResult | null {
-  const ceRows = legRows.filter((r) => r.optionType === "CE");
-  const peRows = legRows.filter((r) => r.optionType === "PE");
-  if (ceRows.length === 0 || peRows.length === 0) return null;
+/** Mirrors fo_service.py::cc_5pct_for_rows -- `ceRows` should already be
+ * filtered to one symbol + one expiry (any PE legs mixed in are
+ * ignored). "5% CC" is a covered-call yield: sell 1 lot of the OTM call
+ * whose strike is closest to 5% *above* spot (the mirror image of "5%
+ * CSP"'s strike search), preferring freshest-dated strikes (see
+ * freshestRows). Two percentages:
+ * - ccPct = premium / spot * 100 -- yield on the stock's own price.
+ * - assignmentProfitPct = premium / (strike - spot) * 100 -- premium as
+ *   a fraction of the capital-gain room left before assignment caps it;
+ *   null if strike === spot (undefined), not a divide-by-zero.
+ * Returns null if there's no priceable CE strike. */
+export function ccFivePct(ceRows: OptionLegRow[], spot: number, expiryDate: string): CcResult | null {
+  const nearRows = ceRows.filter((r) => r.optionType === "CE");
+  if (nearRows.length === 0) return null;
 
-  const freshCeRows = freshestRows(ceRows);
-  let itmCandidates = freshCeRows.filter((r) => r.strikePrice < spot);
-  if (itmCandidates.length === 0) {
-    itmCandidates = ceRows.filter((r) => r.strikePrice < spot);
-  }
-  if (itmCandidates.length === 0) return null;
+  const target = spot * 1.05;
+  const bestRow = nearestByStrike(freshestRows(nearRows), target);
+  const strike = bestRow.strikePrice;
+  const premium = legPrice(bestRow);
+  const ccPct = premium !== null && spot ? (premium / spot) * 100 : null;
+  const assignmentProfitPct = premium !== null && strike !== spot ? (premium / (strike - spot)) * 100 : null;
 
-  const buyCe = itmCandidates.reduce((best, r) => (r.strikePrice > best.strikePrice ? r : best));
-  const itmStrike = buyCe.strikePrice;
-  const buyCePrice = legPrice(buyCe);
-
-  const peSameStrike = peRows.filter((r) => r.strikePrice === itmStrike);
-  if (peSameStrike.length === 0) return null;
-  const sellPePrice = legPrice(peSameStrike[0]);
-
-  const target = itmStrike * 0.95;
-  const sellCe = nearestByStrike(freshCeRows, target);
-  const otmStrike = sellCe.strikePrice;
-  const sellCePrice = legPrice(sellCe);
-
-  if (buyCePrice === null || sellPePrice === null || sellCePrice === null || !itmStrike) return null;
-
-  const netCredit = sellPePrice + sellCePrice - buyCePrice;
-  const pmccPct = (netCredit / itmStrike) * 100;
-
-  return {
-    itmCeStrike: itmStrike,
-    otmCeStrike: otmStrike,
-    buyCePrice,
-    sellPePrice,
-    sellCePrice,
-    netCredit,
-    pmccPct,
-    spot,
-    expiryDate,
-    buyCeTradeDate: buyCe.tradeDate,
-    sellPeTradeDate: peSameStrike[0].tradeDate,
-    sellCeTradeDate: sellCe.tradeDate,
-  };
+  return { strike, premium, ccPct, assignmentProfitPct, spot, expiryDate, tradeDate: bestRow.tradeDate };
 }
 
 export interface DashboardMetricsRow {
@@ -171,27 +137,23 @@ export interface DashboardMetricsRow {
   cspPutPrice: number | null;
   cspPct: number | null;
   cspPutTradeDate: string | null;
-  pmccItmCeStrike: number | null;
-  pmccOtmCeStrike: number | null;
-  pmccBuyCePrice: number | null;
-  pmccSellPePrice: number | null;
-  pmccSellCePrice: number | null;
-  pmccNetCredit: number | null;
-  pmccPct: number | null;
-  pmccBuyCeTradeDate: string | null;
-  pmccSellPeTradeDate: string | null;
-  pmccSellCeTradeDate: string | null;
+  ccStrike: number | null;
+  ccPremium: number | null;
+  ccPct: number | null;
+  ccTradeDate: string | null;
 }
 
 /** Mirrors fo_service.py::dashboard_metrics_rows -- for each symbol with
- * a spot price and open option legs, computes "5% CSP" / "5% ITM PMCC"
- * for each of that symbol's **up to 3 nearest distinct expiries**
+ * a spot price and open option legs, computes "5% CSP" / "5% CC" for
+ * each of that symbol's **up to 3 nearest distinct expiries**
  * (near/next/far) and emits one flat row per (symbol, expiryDate). A
  * symbol with no spot or no option legs gets zero rows (there's no
  * expiryDate to key a row on); a symbol with fewer than 3 expiries just
- * gets fewer rows. cspPct/pmccPct are null independently of each other
+ * gets fewer rows. cspPct/ccPct are null independently of each other
  * when either calculation has no priceable result for that specific
- * expiry. */
+ * expiry. ccFivePct's assignmentProfitPct is deliberately NOT cached
+ * here -- the Dashboard only ever displays ccPct; the Options screen's
+ * "Assignment Profit" figure is computed live instead. */
 export function dashboardMetricsRows(
   optionRows: OptionLegRow[],
   spotBySymbol: Record<string, number | null>,
@@ -215,7 +177,7 @@ export function dashboardMetricsRows(
     for (const expiry of expiries) {
       const expiryRows = legs.filter((r) => r.expiryDate === expiry);
       const csp = cspFivePct(expiryRows, spot, expiry);
-      const pmcc = itmPmccFivePct(expiryRows, spot, expiry);
+      const cc = ccFivePct(expiryRows, spot, expiry);
 
       rows.push({
         symbol,
@@ -225,16 +187,10 @@ export function dashboardMetricsRows(
         cspPutPrice: csp?.putPrice ?? null,
         cspPct: csp?.cspPct ?? null,
         cspPutTradeDate: csp?.putTradeDate ?? null,
-        pmccItmCeStrike: pmcc?.itmCeStrike ?? null,
-        pmccOtmCeStrike: pmcc?.otmCeStrike ?? null,
-        pmccBuyCePrice: pmcc?.buyCePrice ?? null,
-        pmccSellPePrice: pmcc?.sellPePrice ?? null,
-        pmccSellCePrice: pmcc?.sellCePrice ?? null,
-        pmccNetCredit: pmcc?.netCredit ?? null,
-        pmccPct: pmcc?.pmccPct ?? null,
-        pmccBuyCeTradeDate: pmcc?.buyCeTradeDate ?? null,
-        pmccSellPeTradeDate: pmcc?.sellPeTradeDate ?? null,
-        pmccSellCeTradeDate: pmcc?.sellCeTradeDate ?? null,
+        ccStrike: cc?.strike ?? null,
+        ccPremium: cc?.premium ?? null,
+        ccPct: cc?.ccPct ?? null,
+        ccTradeDate: cc?.tradeDate ?? null,
       });
     }
   }
@@ -293,7 +249,7 @@ async function upsertChunked(client: AnyClient, table: string, rows: unknown[], 
 
 /** The entrypoint both manual-refresh and fo-refresh call as their final
  * step: reads spot prices (latest_screener_view) + open option legs
- * (latest_option_chain_view), recomputes CSP/PMCC for every symbol, and
+ * (latest_option_chain_view), recomputes CSP/CC for every symbol, and
  * upserts the whole dashboard_fo_metrics cache. Returns the row count for
  * logging. `serviceClient` must be service-role (bypasses RLS to write),
  * same as every other write in these Edge Functions. */
@@ -319,16 +275,10 @@ export async function recomputeDashboardMetrics(serviceClient: AnyClient): Promi
     csp_put_price: r.cspPutPrice,
     csp_pct: r.cspPct,
     csp_put_trade_date: r.cspPutTradeDate,
-    pmcc_itm_ce_strike: r.pmccItmCeStrike,
-    pmcc_otm_ce_strike: r.pmccOtmCeStrike,
-    pmcc_buy_ce_price: r.pmccBuyCePrice,
-    pmcc_sell_pe_price: r.pmccSellPePrice,
-    pmcc_sell_ce_price: r.pmccSellCePrice,
-    pmcc_net_credit: r.pmccNetCredit,
-    pmcc_pct: r.pmccPct,
-    pmcc_buy_ce_trade_date: r.pmccBuyCeTradeDate,
-    pmcc_sell_pe_trade_date: r.pmccSellPeTradeDate,
-    pmcc_sell_ce_trade_date: r.pmccSellCeTradeDate,
+    cc_strike: r.ccStrike,
+    cc_premium: r.ccPremium,
+    cc_pct: r.ccPct,
+    cc_trade_date: r.ccTradeDate,
   }));
 
   await upsertChunked(serviceClient, "dashboard_fo_metrics", payload, "symbol,expiry_date");
