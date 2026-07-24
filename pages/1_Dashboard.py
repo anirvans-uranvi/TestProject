@@ -14,7 +14,14 @@ from src.services.threshold_override import apply_user_thresholds
 from src.utils.formatting import direction_arrow, format_inr, format_pct, pass_fail_icon
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.timezones import format_ist, now_ist
-from src.utils.ui import inject_global_styles, market_state_label, render_disclaimer, render_pill, render_screener_table
+from src.utils.ui import (
+    inject_global_styles,
+    market_state_label,
+    render_disclaimer,
+    render_muted_note,
+    render_pill,
+    render_screener_table,
+)
 
 st.set_page_config(page_title="Dashboard | Nifty 50 Screener", page_icon="📊", layout="wide")
 require_login()  # already injects Tailwind + the light-theme CSS design system
@@ -403,13 +410,31 @@ filtered["cc_5pct"] = filtered["symbol"].map(lambda s: (metrics_by_symbol.get(s)
 
 filtered = filtered.sort_values(SORT_OPTION_TO_KEY[sort_col], ascending=not sort_desc, na_position="last")
 
+# latest_screener_view (migration 0013) falls back to the most recent
+# snapshot that actually has a price when today's fetch failed for a
+# symbol, rather than showing a blank -- but that means some rows may be
+# showing an older price than others. df["snapshot_date"].max() is the
+# best date *any* symbol in this batch actually got refreshed to, so any
+# row whose own snapshot_date falls short of it was a fallback -- flag
+# those with a small "as of <date>" caption under the LTP.
+_latest_snapshot_date = df["snapshot_date"].max() if df["snapshot_date"].notna().any() else None
+
 display_rows = []
 for i, (_, r) in enumerate(filtered.iterrows(), start=1):
+    ltp_cell = format_inr(r["latest_price"])
+    if (
+        pd.notna(r["latest_price"])
+        and pd.notna(r["snapshot_date"])
+        and _latest_snapshot_date is not None
+        and r["snapshot_date"] != _latest_snapshot_date
+    ):
+        as_of = pd.Timestamp(r["snapshot_date"]).strftime("%d %b %Y")
+        ltp_cell += f"<br>{render_muted_note(f'as of {as_of}', user_settings.theme)}"
     display_rows.append(
         {
             "#": i,
             "Stock": r["symbol"],
-            "LTP": format_inr(r["latest_price"]),
+            "LTP": ltp_cell,
             "52W High": f"{format_inr(r['week_52_high'])} {pass_fail_icon(r['criterion_52w_high'])}" if pd.notna(r["week_52_high"]) else "N/A",
             "52W Low": f"{format_inr(r['week_52_low'])} {pass_fail_icon(r['criterion_52w_low'])}" if pd.notna(r["week_52_low"]) else "N/A",
             "1D": f"{direction_arrow(r['return_1d'])} {format_pct(r['return_1d'])}",

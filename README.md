@@ -539,7 +539,13 @@ both the Portfolio page and now the Dashboard too.
 showing a blank "--" instead of the last known price. It now prefers the
 most recent row that actually has a price, falling back across days --
 the same resilience `get_latest_prices` (used by the Portfolio page)
-already had.
+already had. The Dashboard (`pages/1_Dashboard.py`) flags exactly which
+rows are showing a fallback price: it compares each row's
+`snapshot_date` to the newest `snapshot_date` seen anywhere in that
+load's batch, and any row falling short gets a small muted "as of
+<date>" caption under its LTP (`render_muted_note`,
+`src/utils/ui.py`) -- shown only when a fallback price is actually being
+displayed, never for a symbol with no price at all.
 
 ## Docker
 

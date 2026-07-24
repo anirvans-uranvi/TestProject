@@ -262,6 +262,16 @@ def render_card(inner_html: str, theme: Theme | str = Theme.SYSTEM, *, extra_cla
     return f'<div class="rounded-lg border {c["card_border"]} {c["card_bg"]} {c["card_text"]} p-4 shadow-sm {extra_classes}">{inner_html}</div>'
 
 
+def render_muted_note(text: str, theme: Theme | str = Theme.SYSTEM) -> str:
+    """Small muted inline note -- e.g. an "as of <date>" caption tucked
+    under a stale table cell's value. Deliberately a bare <span>, not a
+    block element, so callers can drop it inline after a <br> inside a
+    single table cell's string (see render_screener_table's docstring:
+    cell values are raw HTML, not escaped)."""
+    c = _surface_classes(theme)
+    return f'<span class="{c["muted"]} text-xs">{text}</span>'
+
+
 def render_pill(text: str, tone: str = "accent", theme: Theme | str = Theme.SYSTEM) -> str:
     """Small badge/pill -- alert-type labels, "coming soon" tags, active
     filter indicators. tone="accent" uses the indigo palette, "neutral"

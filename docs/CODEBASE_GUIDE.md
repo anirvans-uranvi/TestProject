@@ -658,6 +658,19 @@ Nifty50 constituents everyone sees. One consequence: "Total stocks" /
 — both already read `len(df)`/`len(filtered)` dynamically
 (`pages/1_Dashboard.py`), so no page code changed, only the view.
 
+Once the fallback could silently show a stale price, the Dashboard
+needed a way to say so: `pages/1_Dashboard.py` computes
+`df["snapshot_date"].max()` once per load (the newest date *any* symbol
+in the batch actually got refreshed to) and, per row, compares that
+against the row's own `snapshot_date`. A row that falls short gets a
+`<br>` + `render_muted_note("as of <date>", theme)`
+(`src/utils/ui.py`) appended straight into its `"LTP"` cell string --
+`render_screener_table`'s cells are raw HTML already (see its
+docstring), so no other change was needed to thread it through. Guarded
+on `pd.notna(latest_price)` too, so a symbol with no price at all
+(genuinely never fetched) still just shows "—", never a dangling "as
+of" with nothing to date.
+
 ## Auth: a non-obvious quirk
 
 **Password reset does not use Supabase's email link.** This was tried
