@@ -135,12 +135,13 @@ tests/                             Pytest suite -- almost entirely calculations/
 ## Database schema
 
 All migrations live in `supabase/migrations/`, applied in numeric order
-(`0001` → `0012`). Eighteen tables, in three groups (`0008` doesn't add a
+(`0001` → `0013`). Eighteen tables, in three groups (`0008` doesn't add a
 table -- it just extends `provider_fetch_log.fetch_type`'s CHECK
 constraint with `'fo'`, for the `fo-refresh` Edge Function's logging;
 `0010`/`0011` drop and recreate `dashboard_fo_metrics` with a different
 key/columns rather than adding a new table -- see "Dashboard cache"
-below; `0012` adds `portfolio_holdings`):
+below; `0012` adds `portfolio_holdings`; `0013` only redefines
+`latest_screener_view`, no new table):
 
 **Reference data** (written by `scripts/fetch_nifty50_constituents.py` /
 `seed.sql`, read-only to the app):
@@ -166,7 +167,7 @@ below; `0012` adds `portfolio_holdings`):
 
 Two generated helpers, defined in `0003_views_functions.sql` (and patched
 in `0004`):
-- `latest_screener_view` — one joined row per current constituent (companies + its latest daily_screener_snapshot). This is what the Dashboard queries in a single call instead of joining client-side. `0004` added `coalesce(status, 'unavailable')` / `coalesce(data_quality, '{}')` here because a constituent with no snapshot yet would otherwise return `NULL` for those columns, which fails Pydantic validation on the `ScreenerRow` model. `0006` added `week_52_high`/`week_52_low`/`criterion_52w_high`/`criterion_52w_low` — **a real deploy-time error hit here**: `create or replace view` can only *append* new output columns; inserting them positionally in the middle of the existing `select` list (as the first draft of `0006` did) makes Postgres think you're renaming the columns that got pushed down a slot, and it fails with `42P16: cannot change name of view column ... HINT: Use ALTER VIEW ... RENAME COLUMN ... instead`. The fix is to always append new columns at the very end of the `select` list in any future `create or replace view` migration, never insert them mid-list — column *order* doesn't matter to the app since every read is by name (`ScreenerRow.model_validate(dict)`), so this costs nothing.
+- `latest_screener_view` — one joined row per current constituent (companies + its latest daily_screener_snapshot), plus (as of `0013`) every symbol the *viewing* user holds in their own `portfolio_holdings`. This is what the Dashboard queries in a single call instead of joining client-side. `0004` added `coalesce(status, 'unavailable')` / `coalesce(data_quality, '{}')` here because a constituent with no snapshot yet would otherwise return `NULL` for those columns, which fails Pydantic validation on the `ScreenerRow` model. `0006` added `week_52_high`/`week_52_low`/`criterion_52w_high`/`criterion_52w_low` — **a real deploy-time error hit here**: `create or replace view` can only *append* new output columns; inserting them positionally in the middle of the existing `select` list (as the first draft of `0006` did) makes Postgres think you're renaming the columns that got pushed down a slot, and it fails with `42P16: cannot change name of view column ... HINT: Use ALTER VIEW ... RENAME COLUMN ... instead`. The fix is to always append new columns at the very end of the `select` list in any future `create or replace view` migration, never insert them mid-list — column *order* doesn't matter to the app since every read is by name (`ScreenerRow.model_validate(dict)`), so this costs nothing. `0013` made two further changes, both **real production bugs found after the Portfolio feature shipped** (see the Portfolio section's "Screener fallback" note below for the full story): the per-symbol lateral join now prefers the most recent snapshot row that actually has a price (falling back across days when today's fetch failed) instead of always taking literally the latest date regardless of whether it has data, and the join went from `nifty50_constituents` inner-join to `left join ... where nc.is_current or exists (select 1 from portfolio_holdings where symbol = c.symbol and user_id = auth.uid())` — `security_invoker = true` means `auth.uid()` here is the actual querying user, so this stays correctly scoped per user (reinforced by `portfolio_holdings`' own RLS policy on top).
 - `get_classification_history(symbol, days)` — a SQL function returning one symbol's snapshot history, used by the Stock Detail status-over-time chart.
 
 Migration `0007` adds two more views on the same `DISTINCT ON` pattern:
@@ -584,16 +585,25 @@ known LTP, with an `unpriced_count` the page uses to caption a partial
 total rather than silently showing a number that excludes some holdings.
 
 **Why LTP is read via `snapshot_repo.get_latest_prices`, not
-`latest_screener_view`**: the view (`0004_fix_constituents_fk_and_view_defaults.sql`)
-inner-joins `nifty50_constituents.is_current`, so it would silently
-exclude any portfolio-only symbol (an ETF/fund or non-Nifty50 stock) even
-after that symbol has been registered and priced. `get_latest_prices`
-instead queries `daily_screener_snapshots` directly for exactly the
-symbols asked for, keeping the newest row per symbol in Python — the
-same "latest per symbol" logic the view encodes in SQL, just without the
-constituents gate. `daily_screener_snapshots`'s own RLS policy
-(`authenticated read ... using (true)`, `0002_rls_policies.sql`) already
-has no such gate at the table level.
+`latest_screener_view`**: at the time this page was built, the view
+(`0004_fix_constituents_fk_and_view_defaults.sql`) inner-joined
+`nifty50_constituents.is_current`, so it would have silently excluded
+any portfolio-only symbol (an ETF/fund or non-Nifty50 stock) even after
+that symbol had been registered and priced. `get_latest_prices` instead
+queries `daily_screener_snapshots` directly for exactly the symbols
+asked for, keeping the newest *priced* row per symbol in Python.
+`0013_screener_fallback_and_portfolio_symbols.sql` later taught
+`latest_screener_view` itself to include the viewing user's portfolio
+symbols too (see below) and to do the same "fall back to the last row
+with a real price" logic — but this page still uses its own
+`get_latest_prices` rather than switching to the view, since it needs
+only `symbol`/`latest_price` for a caller-supplied symbol list (not a
+join against `companies`/`nifty50_constituents` for every column the
+Dashboard needs), and doesn't need the view's per-user `auth.uid()`
+scoping since the caller already knows exactly which symbols it's
+pricing. `daily_screener_snapshots`'s own RLS policy (`authenticated
+read ... using (true)`, `0002_rls_policies.sql`) has no gate at the
+table level either way.
 
 **Getting a new symbol tracked** (the "N/A until the next refresh" flow):
 neither `scripts/run_refresh.py` nor the `manual-refresh` Edge Function
@@ -615,11 +625,38 @@ other change to those loops, which already tolerate sparse fundamentals
 (ETFs/funds lack PE/EPS) via existing `is_stale`/`data_quality` handling.
 `nifty50_constituents` itself is **never** written by this path, so
 portfolio-only symbols get `companies` + `daily_screener_snapshots` rows
-but stay permanently excluded from `latest_screener_view` and therefore
-from the Dashboard, Stock Detail, Alerts, and Options pages — exactly as
-before this feature existed. Both paths are tolerant of the
-`portfolio_holdings` migration not being applied yet (catch-and-skip,
-same degrade-gracefully precedent as the F&O cache recompute).
+without ever becoming an official constituent. Both paths are tolerant
+of the `portfolio_holdings` migration not being applied yet
+(catch-and-skip, same degrade-gracefully precedent as the F&O cache
+recompute).
+
+**Screener fallback (`0013_screener_fallback_and_portfolio_symbols.sql`)**:
+shipping the above surfaced two real bugs once actually used against a
+live account. First, `latest_screener_view`'s lateral join always took
+the single most recent `daily_screener_snapshots` row per symbol, even
+on a day its price fetch failed (`latest_price` null, `status =
+'unavailable'`) — so a stock priced fine yesterday showed blank "--"
+on the Dashboard today instead of its last known value, even though
+`get_latest_prices` (above) already had the more resilient "most recent
+row that actually has a price" behavior for the Portfolio page. Second,
+because `nifty50_constituents` is deliberately never written for
+portfolio-only symbols, they never appeared on the Dashboard at all —
+which is what the original design intended, but the user explicitly
+asked for uploaded non-Nifty50
+holdings like Hindustan Zinc/IndusInd Bank to show up on the Dashboard
+screener too, once tracked. `0013` fixes both in the view itself: the
+lateral join now orders by `(latest_price is not null) desc,
+snapshot_date desc` instead of just `snapshot_date desc`, and the join
+from `companies` to `nifty50_constituents` changed from an inner join to
+`left join ... where nc.is_current or exists (select 1 from
+portfolio_holdings where symbol = c.symbol and user_id = auth.uid())` —
+`security_invoker = true` on the view means `auth.uid()` resolves to
+the actual querying user, so each user only ever sees their *own*
+uploaded symbols added to their Dashboard, on top of the shared 50
+Nifty50 constituents everyone sees. One consequence: "Total stocks" /
+"Screener (X of Y stocks)" on the Dashboard is no longer necessarily 50
+— both already read `len(df)`/`len(filtered)` dynamically
+(`pages/1_Dashboard.py`), so no page code changed, only the view.
 
 ## Auth: a non-obvious quirk
 

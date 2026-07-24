@@ -123,17 +123,21 @@ settings.
   separate client factories (`get_service_client` vs `get_user_client`) so
   pages can only construct a user-scoped client.
 - **Views/functions**: `latest_screener_view` (one joined row per current
-  constituent) and `get_classification_history(symbol, days)` back the
-  Dashboard and Stock Detail pages respectively -- see
-  `supabase/migrations/0003_views_functions.sql` and the fixes in
-  `0004_fix_constituents_fk_and_view_defaults.sql` (adds the
+  constituent, plus the viewing user's own tracked portfolio symbols) and
+  `get_classification_history(symbol, days)` back the Dashboard and Stock
+  Detail pages respectively -- see `supabase/migrations/0003_views_functions.sql`
+  and the fixes in `0004_fix_constituents_fk_and_view_defaults.sql` (adds the
   `nifty50_constituents -> companies` FK PostgREST needs for embedded
   queries, and defaults `status`/`data_quality` to Unavailable/`{}`
-  instead of `NULL` for constituents with no snapshot yet) and
+  instead of `NULL` for constituents with no snapshot yet),
   `0006_add_52week_high_low.sql` (adds 52-week high/low columns + the
   matching `criterion_52w_high`/`criterion_52w_low` display flags -- see
   its comments for a real `42P16` error hit while writing it: `create or
-  replace view` can only append new columns, never insert them mid-list).
+  replace view` can only append new columns, never insert them mid-list),
+  and `0013_screener_fallback_and_portfolio_symbols.sql` (falls back to
+  the last snapshot row that actually has a price instead of always
+  using today's, and folds in the viewing user's portfolio symbols --
+  see [Portfolio](#portfolio) for why).
 - **Password reset uses a 6-digit code, not the email's magic link.**
   Supabase's recovery link puts the session token in the URL fragment
   (`#access_token=...`), which no server (including ours) ever receives,
@@ -517,11 +521,25 @@ tracking it: they read the distinct symbols across every user's
 `portfolio_holdings`, register a minimal `companies` row for any not
 already known, and fold them into the same price/fundamentals/screener
 fetch every Nifty50 symbol already gets. `nifty50_constituents` is never
-touched by this, so portfolio-only symbols never appear on the
-Dashboard, Stock Detail, Alerts, or Options pages -- those all read
-through `latest_screener_view`, which inner-joins on
-`nifty50_constituents.is_current`. In short: upload → save → click
-"Manual refresh" (or wait for the next cron run) → real LTP appears.
+touched by this, so portfolio-only symbols never become an official
+constituent -- Stock Detail, Alerts, and Options all read from
+`companies_repo.list_current_constituents` (a plain
+`nifty50_constituents` query), so those three stay Nifty50-only exactly
+as before. The Dashboard is the one exception: `latest_screener_view`
+(migration `0013`) now also includes any symbol in the *viewing* user's
+own `portfolio_holdings`, scoped per-user via `auth.uid()`, so once a
+portfolio symbol is tracked it shows up on your own Dashboard screener
+alongside the 50 Nifty50 stocks (and "Total stocks" grows accordingly --
+that count is never hardcoded to 50). In short: upload → save → click
+"Manual refresh" (or wait for the next cron run) → real LTP appears, on
+both the Portfolio page and now the Dashboard too.
+
+`0013` also fixed a related bug: the view previously always used
+*today's* snapshot row per symbol even when today's price fetch failed,
+showing a blank "--" instead of the last known price. It now prefers the
+most recent row that actually has a price, falling back across days --
+the same resilience `get_latest_prices` (used by the Portfolio page)
+already had.
 
 ## Docker
 
