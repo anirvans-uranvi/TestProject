@@ -651,15 +651,36 @@ whichever tab was first alphabetically, not the new one. `key=` +
 enough that it wasn't available when this page was first written --
 worth checking `st.tabs()`'s own signature if this ever looks unsupported
 again) makes Streamlit track the active tab through
-`st.session_state["portfolio_active_tab"]`, which can also be *set*
-programmatically before a widget re-render: the "+ New portfolio" save
-path's `on_saved` callback sets it to the just-created name, and the
-delete path pops it entirely so a deleted portfolio's now-stale name
-doesn't linger (`st.tabs()` falls back to the first remaining tab). One
-side effect worth knowing: `on_change="rerun"` also opts into lazy
-per-tab execution (a plain round trip on every tab click, and only the
-open tab's own code actually runs) instead of every tab's content always
-computing regardless of visibility -- a reasonable trade since this page
+`st.session_state["portfolio_active_tab"]`.
+
+**A second real bug, found immediately after the first fix**: the "+ New
+portfolio" save path's `on_saved` callback originally wrote
+`st.session_state["portfolio_active_tab"] = created_name` directly —
+which raised `StreamlitAPIException: st.session_state.portfolio_active_tab
+cannot be modified after the widget with key portfolio_active_tab is
+instantiated` (confirmed live: creating "Portfolio 2" saved successfully,
+then crashed the very next line). The cause: `on_saved` runs from
+*inside* one of the tabs' content, which only executes *after*
+`st.tabs(..., key="portfolio_active_tab")` already ran earlier in that
+same script execution — Streamlit forbids writing to a widget's own
+`session_state` key once that widget has been instantiated in the
+current run, full stop, even from code that logically "belongs" to one
+of its children. The fix: never write `"portfolio_active_tab"` directly
+from inside a tab. Instead, stash the request in a plain (non-widget)
+`"portfolio_pending_active_tab"` key and call `st.rerun()`; right before
+`st.tabs(...)` is instantiated on the *next* run — i.e. before it exists
+for that run — a short block pops the pending key and promotes it into
+`"portfolio_active_tab"` (empty string `""` means "clear", used by the
+delete path so a deleted portfolio's now-stale name doesn't linger and
+`st.tabs()` falls back to the first remaining tab; any other string
+means "select this one"). Reproduced and confirmed both the crash (a
+direct write) and the fix (the pending-key indirection) in an isolated
+scratch script before shipping, mirroring exactly what the real page
+does. One side effect worth knowing about the `on_change="rerun"` choice
+itself: it also opts into lazy per-tab execution (a plain round trip on
+every tab click, and only the open tab's own code actually runs) instead
+of every tab's content always computing regardless of visibility -- a
+reasonable trade since this page
 already reruns on every other interaction anyway, and it avoids
 computing every portfolio's LTP lookups on every load.
 

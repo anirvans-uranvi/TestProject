@@ -221,11 +221,12 @@ def _render_portfolio_tab(portfolio_name: str, holdings_for_portfolio: list) -> 
             portfolio_repo.delete_portfolio(client, user_id, portfolio_name)
             st.session_state["portfolio_cache_bust"] += 1
             st.cache_data.clear()
-            # The deleted name no longer matches any tab -- clear the
-            # tracked active tab too, so st.tabs() falls back to its
-            # default (the first remaining portfolio) instead of holding
-            # a stale reference.
-            st.session_state.pop("portfolio_active_tab", None)
+            # The deleted name no longer matches any tab -- request
+            # clearing the tracked active tab (see _pending_active_tab
+            # below for why this can't be done directly here) so
+            # st.tabs() falls back to its default (the first remaining
+            # portfolio) instead of holding a stale reference.
+            st.session_state["portfolio_pending_active_tab"] = ""
             st.success(f'Deleted "{portfolio_name}".')
             st.rerun()
 
@@ -252,11 +253,28 @@ if not portfolio_names:
     )
 else:
     # key="portfolio_active_tab" + on_change="rerun" makes Streamlit track
-    # which tab is open in st.session_state, and -- critically -- lets us
-    # *set* st.session_state["portfolio_active_tab"] ourselves (e.g. right
-    # after creating a portfolio, before the rerun that follows) so the
-    # page opens straight to that portfolio's tab instead of defaulting
-    # back to the first one.
+    # which tab is open in st.session_state, and -- in principle -- lets
+    # us *set* st.session_state["portfolio_active_tab"] ourselves (e.g.
+    # right after creating a portfolio) so the page opens straight to
+    # that portfolio's tab instead of defaulting back to the first one.
+    #
+    # In practice, Streamlit forbids writing to a widget's session_state
+    # key after that widget has already been instantiated in the current
+    # run (StreamlitAPIException) -- and by the time a save/delete inside
+    # one of the tabs below calls back up to here, st.tabs() has already
+    # run earlier in *this* script execution. So a save/delete never
+    # writes "portfolio_active_tab" directly; it stashes the request in
+    # "portfolio_pending_active_tab" instead and calls st.rerun() --  on
+    # the fresh run that follows, this promotion happens here, safely
+    # *before* st.tabs() is instantiated for that run. "" means "clear"
+    # (fall back to the first tab); any other string means "select this
+    # one".
+    _pending_active_tab = st.session_state.pop("portfolio_pending_active_tab", None)
+    if _pending_active_tab == "":
+        st.session_state.pop("portfolio_active_tab", None)
+    elif _pending_active_tab:
+        st.session_state["portfolio_active_tab"] = _pending_active_tab
+
     tabs = st.tabs(portfolio_names + ["+ New portfolio"], key="portfolio_active_tab", on_change="rerun")
     for name, tab in zip(portfolio_names, tabs[:-1]):
         with tab:
@@ -277,7 +295,7 @@ else:
 
             def _open_new_portfolio_tab(created_name: str = resolved_name) -> None:
                 st.session_state.pop("portfolio_new_name", None)
-                st.session_state["portfolio_active_tab"] = created_name
+                st.session_state["portfolio_pending_active_tab"] = created_name
 
             _render_upload_section(
                 portfolio_name=resolved_name,
