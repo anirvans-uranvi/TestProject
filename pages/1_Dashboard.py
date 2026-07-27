@@ -69,6 +69,10 @@ if "dashboard_cache_bust" not in st.session_state:
     st.session_state["dashboard_cache_bust"] = 0
 
 st.title("📈 Nifty 50 Momentum & Dividend Screener")
+st.caption(
+    "Screens all current Nifty 50 constituents on momentum, dividend yield, and PEG, "
+    "and classifies each as Green, Amber, Red, or Unavailable."
+)
 
 header_col1, header_col2, header_col3, header_col4 = st.columns([2, 1, 1, 1])
 last_fetch = _load_last_fetch(client, st.session_state["dashboard_cache_bust"])
