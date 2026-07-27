@@ -194,6 +194,28 @@ def _render_portfolio_tab(portfolio_name: str, holdings_for_portfolio: list) -> 
         save_label="Save portfolio",
     )
 
+    st.divider()
+    with st.expander(f'🗑️ Delete "{portfolio_name}"'):
+        st.warning(
+            f'This permanently deletes every holding in "{portfolio_name}" (every broker within it). '
+            "This cannot be undone."
+        )
+        confirm = st.checkbox(
+            f'I understand -- permanently delete "{portfolio_name}"',
+            key=f"portfolio_delete_confirm_{portfolio_name}",
+        )
+        if st.button(
+            "Delete this portfolio",
+            key=f"portfolio_delete_btn_{portfolio_name}",
+            disabled=not confirm,
+            type="primary",
+        ):
+            portfolio_repo.delete_portfolio(client, user_id, portfolio_name)
+            st.session_state["portfolio_cache_bust"] += 1
+            st.cache_data.clear()
+            st.success(f'Deleted "{portfolio_name}".')
+            st.rerun()
+
 
 # ---------------------------------------------------------------------
 # One tab per portfolio -- each independent and never affected by

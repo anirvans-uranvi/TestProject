@@ -640,6 +640,17 @@ helper for the parse → preview → manual-symbol-form → save sequence
 (parameterized by `portfolio_name`/`broker`/`key_prefix`/`save_label`, so
 the ~50 lines of shared logic isn't duplicated three times).
 
+**Deleting a portfolio** (`portfolio_repo.delete_portfolio(client,
+user_id, portfolio_name)`) — an unconditional delete of every row for
+`(user_id, portfolio_name)`, every broker within it, leaving every other
+portfolio untouched. Rendered inside each tab as a collapsed
+`st.expander("🗑️ Delete \"<name>\"")` at the very bottom, below the
+upload section, so it's out of the way of the normal update flow: a
+warning, an `st.checkbox` the user must tick ("I understand -- permanently
+delete ..."), and an `st.button(..., disabled=not confirm)` that only
+becomes clickable once that box is checked -- a deliberate two-step
+confirmation, since there's no undo for this one.
+
 **Two broker CSV formats, one broker-agnostic shape after parsing**
 (`src/services/portfolio_service.py`):
 - **Zerodha** (`parse_zerodha_csv`) — the `Instrument` column is already

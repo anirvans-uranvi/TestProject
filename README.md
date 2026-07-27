@@ -534,7 +534,11 @@ every other portfolio, and every other broker within this one, is
 untouched. A "+ New portfolio" tab is always available at the end to
 start an entirely separate portfolio from scratch (pick a name -- it
 defaults to "Portfolio N" if left blank -- and a broker); creating one
-never deletes or modifies any existing portfolio.
+never deletes or modifies any existing portfolio. Each tab also has a
+collapsed "🗑️ Delete" section at the bottom to remove that portfolio
+entirely (every broker within it) -- it requires ticking a confirmation
+checkbox before the delete button becomes clickable, since this can't be
+undone; every other portfolio is unaffected.
 
 **LTP only comes from data already loaded in Supabase** -- never a fresh
 live fetch triggered by this page. The app's `companies`/

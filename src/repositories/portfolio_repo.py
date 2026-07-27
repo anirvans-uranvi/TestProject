@@ -40,3 +40,10 @@ def replace_broker_holdings(
         return
     payload = [h.model_dump(mode="json", exclude={"uploaded_at"}) for h in holdings]
     client.table("portfolio_holdings").insert(payload).execute()
+
+
+def delete_portfolio(client: Client, user_id: str, portfolio_name: str) -> None:
+    """Permanently deletes every row for (user_id, portfolio_name) --
+    every broker within it. Used by the Portfolio page's "Delete this
+    portfolio" control; every other portfolio is untouched."""
+    client.table("portfolio_holdings").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()

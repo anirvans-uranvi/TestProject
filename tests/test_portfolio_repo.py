@@ -138,6 +138,41 @@ class TestReplaceBrokerHoldings:
         assert "uploaded_at" not in insert_calls[0][2][0]
 
 
+class TestDeletePortfolio:
+    def test_deletes_every_broker_within_the_named_portfolio_only(self):
+        client = _FakeClient()
+        client.store["portfolio_holdings"] = [
+            _row("Portfolio 1", "Zerodha", "SBIN"),
+            _row("Portfolio 1", "Dhan", "COALINDIA"),
+            _row("Portfolio 2", "Zerodha", "KEEP"),
+        ]
+
+        portfolio_repo.delete_portfolio(client, "u1", "Portfolio 1")
+
+        assert (
+            "delete",
+            "portfolio_holdings",
+            {"user_id": "u1", "portfolio_name": "Portfolio 1"},
+        ) in client.calls
+        remaining = client.store["portfolio_holdings"]
+        assert len(remaining) == 1
+        assert remaining[0]["raw_name"] == "KEEP"
+        assert remaining[0]["portfolio_name"] == "Portfolio 2"
+
+    def test_does_not_touch_other_users_portfolio_of_the_same_name(self):
+        client = _FakeClient()
+        client.store["portfolio_holdings"] = [
+            _row("Portfolio 1", "Zerodha", "MINE"),
+            {**_row("Portfolio 1", "Zerodha", "OTHER_USER"), "user_id": "u2"},
+        ]
+
+        portfolio_repo.delete_portfolio(client, "u1", "Portfolio 1")
+
+        remaining = client.store["portfolio_holdings"]
+        assert len(remaining) == 1
+        assert remaining[0]["raw_name"] == "OTHER_USER"
+
+
 class TestListHoldings:
     def test_returns_only_the_requested_users_rows_as_models(self):
         client = _FakeClient()
