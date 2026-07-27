@@ -640,6 +640,29 @@ helper for the parse → preview → manual-symbol-form → save sequence
 (parameterized by `portfolio_name`/`broker`/`key_prefix`/`save_label`, so
 the ~50 lines of shared logic isn't duplicated three times).
 
+**Opening the tab you just acted on** (`st.tabs(..., key="portfolio_active_tab",
+on_change="rerun")`): by default `st.tabs()` doesn't expose which tab is
+selected to server-side code at all, and a plain `st.rerun()` (e.g. right
+after a save) reset the view back to the first tab regardless of which
+one the user had open or had just created — confirmed live: creating
+"Dhan Corporate" while "Zerodha Personal" already existed landed back on
+whichever tab was first alphabetically, not the new one. `key=` +
+`on_change="rerun"` (added to `st.tabs()` in a Streamlit release recent
+enough that it wasn't available when this page was first written --
+worth checking `st.tabs()`'s own signature if this ever looks unsupported
+again) makes Streamlit track the active tab through
+`st.session_state["portfolio_active_tab"]`, which can also be *set*
+programmatically before a widget re-render: the "+ New portfolio" save
+path's `on_saved` callback sets it to the just-created name, and the
+delete path pops it entirely so a deleted portfolio's now-stale name
+doesn't linger (`st.tabs()` falls back to the first remaining tab). One
+side effect worth knowing: `on_change="rerun"` also opts into lazy
+per-tab execution (a plain round trip on every tab click, and only the
+open tab's own code actually runs) instead of every tab's content always
+computing regardless of visibility -- a reasonable trade since this page
+already reruns on every other interaction anyway, and it avoids
+computing every portfolio's LTP lookups on every load.
+
 **A real bug found here**: right after successfully creating a portfolio
 from the "+ New portfolio" tab, that same tab immediately (and on the
 face of it, correctly) flagged the name it had *just* created as already
