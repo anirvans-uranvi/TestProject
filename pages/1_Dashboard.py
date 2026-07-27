@@ -440,7 +440,8 @@ filtered = filtered.sort_values(SORT_OPTION_TO_KEY[sort_col], ascending=not sort
 # best date *any* symbol in this batch actually got refreshed to, so any
 # row whose own snapshot_date falls short of it was a fallback -- flag
 # those with a small "as of <date>" caption under the LTP.
-_latest_snapshot_date = df["snapshot_date"].max() if df["snapshot_date"].notna().any() else None
+_known_snapshot_dates = df["snapshot_date"].dropna()
+_latest_snapshot_date = _known_snapshot_dates.max() if not _known_snapshot_dates.empty else None
 
 display_rows = []
 for i, (_, r) in enumerate(filtered.iterrows(), start=1):
