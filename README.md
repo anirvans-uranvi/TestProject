@@ -522,21 +522,19 @@ LTP, Investment, Cur Val, P&L, P&L%. Two broker formats are supported:
   -- you can type the correct NSE symbol in before saving, or leave it
   blank to keep that row as N/A.
 
-Holdings are saved per-user (`portfolio_holdings`, migration `0012`), via
-two separate upload tabs:
-
-- **Update portfolio** -- syncs one broker's holdings from a fresh
-  export, replacing just that broker's previously saved rows (any other
-  broker's holdings are untouched). Defaults to whichever broker your
-  saved portfolio already uses -- no need to pick it again -- and shows a
-  broker picker only if you already have holdings saved from more than
-  one broker.
-- **New portfolio** -- wipes your **entire** saved portfolio (every
-  broker) and replaces it with just this upload, for any broker you pick.
-  This is the "start over" option.
-
-The same stock held across multiple brokers is combined into one row for
-display.
+Holdings are saved per-user (`portfolio_holdings`, migrations `0012` and
+`0014`), and **you can maintain multiple, independently-named portfolios
+that all coexist** -- each one shown as its own tab (e.g. "Personal",
+"Family", "Retirement"), right below the disclaimer. Within a portfolio's
+tab: the holdings table (same stock held across multiple brokers within
+that one portfolio is combined into one row for display), then an upload
+section scoped to just that portfolio -- uploading a broker's file there
+replaces that broker's previously saved rows *in this portfolio only*;
+every other portfolio, and every other broker within this one, is
+untouched. A "+ New portfolio" tab is always available at the end to
+start an entirely separate portfolio from scratch (pick a name -- it
+defaults to "Portfolio N" if left blank -- and a broker); creating one
+never deletes or modifies any existing portfolio.
 
 **LTP only comes from data already loaded in Supabase** -- never a fresh
 live fetch triggered by this page. The app's `companies`/

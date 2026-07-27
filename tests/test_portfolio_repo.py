@@ -1,7 +1,9 @@
 """Tests for portfolio_repo's replace-on-upload semantics: re-uploading a
 broker's holdings should delete every existing row for that
-(user_id, broker) and insert only the freshly parsed set, leaving other
-brokers' rows untouched."""
+(user_id, portfolio_name, broker) and insert only the freshly parsed set,
+leaving every other broker/portfolio untouched -- including a portfolio
+that's never been uploaded to before, which is how a brand-new portfolio
+gets created (nothing to delete, just an insert)."""
 import types
 
 from src.models.portfolio import PortfolioHolding
@@ -50,9 +52,10 @@ class _FakeClient:
         return _FakeTable(self.store, self.calls, name)
 
 
-def _row(broker, raw_name, symbol="SYM"):
+def _row(portfolio_name, broker, raw_name, symbol="SYM"):
     return {
         "user_id": "u1",
+        "portfolio_name": portfolio_name,
         "broker": broker,
         "raw_name": raw_name,
         "symbol": symbol,
@@ -64,29 +67,57 @@ def _row(broker, raw_name, symbol="SYM"):
 
 
 class TestReplaceBrokerHoldings:
-    def test_deletes_only_the_target_brokers_rows_then_inserts_new_set(self):
+    def test_deletes_only_the_target_portfolio_and_brokers_rows(self):
         client = _FakeClient()
         client.store["portfolio_holdings"] = [
-            _row("Zerodha", "OLD"),
-            _row("Dhan", "KEEP"),
+            _row("Portfolio 1", "Zerodha", "OLD"),
+            _row("Portfolio 1", "Dhan", "KEEP_OTHER_BROKER"),
+            _row("Portfolio 2", "Zerodha", "KEEP_OTHER_PORTFOLIO"),
         ]
         holdings = [
-            PortfolioHolding(user_id="u1", broker="Zerodha", raw_name="SBIN", symbol="SBIN", qty=10, avg_price=900, investment=9000),
+            PortfolioHolding(
+                user_id="u1", portfolio_name="Portfolio 1", broker="Zerodha",
+                raw_name="SBIN", symbol="SBIN", qty=10, avg_price=900, investment=9000,
+            ),
         ]
 
-        portfolio_repo.replace_broker_holdings(client, "u1", "Zerodha", holdings)
+        portfolio_repo.replace_broker_holdings(client, "u1", "Portfolio 1", "Zerodha", holdings)
 
-        assert ("delete", "portfolio_holdings", {"user_id": "u1", "broker": "Zerodha"}) in client.calls
+        assert (
+            "delete",
+            "portfolio_holdings",
+            {"user_id": "u1", "portfolio_name": "Portfolio 1", "broker": "Zerodha"},
+        ) in client.calls
         remaining = client.store["portfolio_holdings"]
         assert not any(r["raw_name"] == "OLD" for r in remaining)
-        assert any(r["raw_name"] == "KEEP" and r["broker"] == "Dhan" for r in remaining)
+        assert any(r["raw_name"] == "KEEP_OTHER_BROKER" and r["portfolio_name"] == "Portfolio 1" for r in remaining)
+        assert any(r["raw_name"] == "KEEP_OTHER_PORTFOLIO" and r["portfolio_name"] == "Portfolio 2" for r in remaining)
         assert any(r["raw_name"] == "SBIN" and r["symbol"] == "SBIN" for r in remaining)
+
+    def test_a_never_before_seen_portfolio_name_just_inserts_with_nothing_to_delete(self):
+        # This is how "New portfolio" creates a portfolio: no existing
+        # rows match (user_id, portfolio_name, broker), so the delete is
+        # a no-op and only the insert has any effect.
+        client = _FakeClient()
+        client.store["portfolio_holdings"] = [_row("Portfolio 1", "Zerodha", "EXISTING")]
+        holdings = [
+            PortfolioHolding(
+                user_id="u1", portfolio_name="Brand New Portfolio", broker="Dhan",
+                raw_name="Coal India", symbol="COALINDIA", qty=5, avg_price=400, investment=2000,
+            ),
+        ]
+
+        portfolio_repo.replace_broker_holdings(client, "u1", "Brand New Portfolio", "Dhan", holdings)
+
+        remaining = client.store["portfolio_holdings"]
+        assert any(r["raw_name"] == "EXISTING" for r in remaining)
+        assert any(r["raw_name"] == "Coal India" and r["portfolio_name"] == "Brand New Portfolio" for r in remaining)
 
     def test_empty_holdings_deletes_existing_rows_and_inserts_nothing(self):
         client = _FakeClient()
-        client.store["portfolio_holdings"] = [_row("Zerodha", "OLD")]
+        client.store["portfolio_holdings"] = [_row("Portfolio 1", "Zerodha", "OLD")]
 
-        portfolio_repo.replace_broker_holdings(client, "u1", "Zerodha", [])
+        portfolio_repo.replace_broker_holdings(client, "u1", "Portfolio 1", "Zerodha", [])
 
         assert client.store["portfolio_holdings"] == []
         assert not any(call[0] == "insert" for call in client.calls)
@@ -94,73 +125,25 @@ class TestReplaceBrokerHoldings:
     def test_insert_payload_omits_uploaded_at_so_the_db_default_applies(self):
         client = _FakeClient()
         holdings = [
-            PortfolioHolding(user_id="u1", broker="Zerodha", raw_name="SBIN", symbol="SBIN", qty=10, avg_price=900, investment=9000),
+            PortfolioHolding(
+                user_id="u1", portfolio_name="Portfolio 1", broker="Zerodha",
+                raw_name="SBIN", symbol="SBIN", qty=10, avg_price=900, investment=9000,
+            ),
         ]
 
-        portfolio_repo.replace_broker_holdings(client, "u1", "Zerodha", holdings)
+        portfolio_repo.replace_broker_holdings(client, "u1", "Portfolio 1", "Zerodha", holdings)
 
         insert_calls = [c for c in client.calls if c[0] == "insert"]
         assert len(insert_calls) == 1
         assert "uploaded_at" not in insert_calls[0][2][0]
 
 
-class TestReplaceAllHoldings:
-    def test_deletes_every_brokers_rows_then_inserts_only_the_new_set(self):
-        client = _FakeClient()
-        client.store["portfolio_holdings"] = [
-            _row("Zerodha", "OLD_Z"),
-            _row("Dhan", "OLD_D"),
-        ]
-        holdings = [
-            PortfolioHolding(user_id="u1", broker="Dhan", raw_name="SBIN", symbol="SBIN", qty=10, avg_price=900, investment=9000),
-        ]
-
-        portfolio_repo.replace_all_holdings(client, "u1", "Dhan", holdings)
-
-        assert ("delete", "portfolio_holdings", {"user_id": "u1"}) in client.calls
-        remaining = client.store["portfolio_holdings"]
-        assert not any(r["raw_name"] in ("OLD_Z", "OLD_D") for r in remaining)
-        assert remaining == [
-            {
-                "user_id": "u1",
-                "broker": "Dhan",
-                "raw_name": "SBIN",
-                "symbol": "SBIN",
-                "qty": 10.0,
-                "avg_price": 900.0,
-                "investment": 9000.0,
-            }
-        ]
-
-    def test_does_not_touch_other_users_rows(self):
-        client = _FakeClient()
-        client.store["portfolio_holdings"] = [
-            _row("Zerodha", "MINE"),
-            {**_row("Dhan", "OTHER_USER"), "user_id": "u2"},
-        ]
-
-        portfolio_repo.replace_all_holdings(client, "u1", "Zerodha", [])
-
-        remaining = client.store["portfolio_holdings"]
-        assert len(remaining) == 1
-        assert remaining[0]["raw_name"] == "OTHER_USER"
-
-    def test_empty_holdings_deletes_existing_rows_and_inserts_nothing(self):
-        client = _FakeClient()
-        client.store["portfolio_holdings"] = [_row("Zerodha", "OLD"), _row("Dhan", "OLD2")]
-
-        portfolio_repo.replace_all_holdings(client, "u1", "Zerodha", [])
-
-        assert client.store["portfolio_holdings"] == []
-        assert not any(call[0] == "insert" for call in client.calls)
-
-
 class TestListHoldings:
     def test_returns_only_the_requested_users_rows_as_models(self):
         client = _FakeClient()
         client.store["portfolio_holdings"] = [
-            _row("Zerodha", "SBIN", symbol="SBIN"),
-            {**_row("Dhan", "OTHER", symbol="OTHER"), "user_id": "u2"},
+            _row("Portfolio 1", "Zerodha", "SBIN", symbol="SBIN"),
+            {**_row("Portfolio 1", "Dhan", "OTHER", symbol="OTHER"), "user_id": "u2"},
         ]
 
         result = portfolio_repo.list_holdings(client, "u1")
@@ -168,3 +151,14 @@ class TestListHoldings:
         assert len(result) == 1
         assert result[0].symbol == "SBIN"
         assert result[0].raw_name == "SBIN"
+
+    def test_holdings_across_multiple_portfolios_all_come_back(self):
+        client = _FakeClient()
+        client.store["portfolio_holdings"] = [
+            _row("Portfolio 1", "Zerodha", "SBIN"),
+            _row("Portfolio 2", "Dhan", "COALINDIA"),
+        ]
+
+        result = portfolio_repo.list_holdings(client, "u1")
+
+        assert {h.portfolio_name for h in result} == {"Portfolio 1", "Portfolio 2"}

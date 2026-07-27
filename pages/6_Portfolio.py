@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import streamlit as st
 from postgrest.exceptions import APIError
+from pydantic import ValidationError
 
 from src.repositories import companies_repo, portfolio_repo, settings_repo, snapshot_repo
 from src.services import portfolio_service
@@ -43,11 +44,16 @@ if "portfolio_cache_bust" not in st.session_state:
 
 try:
     saved_holdings = _load_holdings(client, user_id, st.session_state["portfolio_cache_bust"])
-except APIError:
-    # migration 0012 not applied yet
+except (APIError, ValidationError):
+    # Either portfolio_holdings doesn't exist yet (migration 0012 -- a
+    # postgrest APIError), or it exists but predates portfolio_name
+    # (migration 0014 -- every row then fails PortfolioHolding validation
+    # with a "field required" error, not an APIError).
     st.info(
-        "Portfolio isn't set up yet. Apply migration "
-        "`supabase/migrations/0012_portfolio_holdings.sql` in the Supabase SQL editor, then reload this page."
+        "Portfolio isn't set up yet. Apply migrations "
+        "`supabase/migrations/0012_portfolio_holdings.sql` and "
+        "`supabase/migrations/0014_portfolio_holdings_multi_portfolio.sql` "
+        "(in that order) in the Supabase SQL editor, then reload this page."
     )
     st.stop()
 
@@ -58,71 +64,13 @@ def _fmt_qty(value: float) -> str:
     return f"{value:,.2f}"
 
 
-# ---------------------------------------------------------------------
-# Holdings table -- merges holdings saved across every broker into one
-# row per stock, then values each against the app's own market data.
-# ---------------------------------------------------------------------
-if saved_holdings:
-    raw_rows = [
-        {
-            "raw_name": h.raw_name,
-            "symbol": h.symbol,
-            "qty": h.qty,
-            "avg_price": h.avg_price,
-            "investment": h.investment,
-        }
-        for h in saved_holdings
-    ]
-    merged = portfolio_service.merge_holdings(raw_rows)
-    symbols = tuple(sorted({r["symbol"] for r in merged if r["symbol"]}))
-    ltp_by_symbol = _load_latest_prices(client, symbols, st.session_state["portfolio_cache_bust"])
-    rows, totals = portfolio_service.compute_portfolio_view(merged, ltp_by_symbol)
-    rows.sort(key=lambda r: r["investment"], reverse=True)
-
-    stats = [
-        ("Total Investment", format_inr(totals["total_investment"]), None),
-        ("Total Current Value", format_inr(totals["total_cur_val"]), None),
-        ("Total P&L", format_inr(totals["total_pnl"]), None),
-        ("Total P&L %", format_pct(totals["total_pnl_pct"]), None),
-    ]
-    st.markdown(render_stat_grid(stats, user_settings.theme, cols=4), unsafe_allow_html=True)
-    if totals["unpriced_count"]:
-        st.caption(
-            f"Totals exclude {totals['unpriced_count']} holding(s) with no market data yet "
-            "(shown as N/A below -- they'll be picked up by the next data refresh)."
-        )
-
-    table_rows = []
-    for i, r in enumerate(rows, start=1):
-        stock = r["symbol"] or f'{r["raw_name"]} {render_pill("unmatched", "neutral", user_settings.theme)}'
-        table_rows.append(
-            {
-                "#": i,
-                "Stock": stock,
-                "Qty": _fmt_qty(r["qty"]),
-                "Avg Price": format_inr(r["avg_price"]),
-                "LTP": format_inr(r["ltp"]),
-                "Investment": format_inr(r["investment"]),
-                "Cur Val": format_inr(r["cur_val"]),
-                "P&L": format_inr(r["pnl"]),
-                "P&L %": format_pct(r["pnl_pct"]),
-            }
-        )
-    st.markdown(render_screener_table(table_rows, user_settings.theme), unsafe_allow_html=True)
-else:
-    st.info("No holdings saved yet -- upload a broker CSV below to get started.")
-
-# ---------------------------------------------------------------------
-# Upload holdings -- two distinct flows:
-#   "Update portfolio": syncs one broker's holdings from a fresh export,
-#     replacing that broker's previously saved rows only (other brokers'
-#     holdings are untouched). Defaults to whichever broker the saved
-#     portfolio already uses -- no broker picker needed when there's only
-#     one -- since the whole point is "update what's already there."
-#   "New portfolio": wipes the ENTIRE saved portfolio (every broker) and
-#     replaces it with just this upload, for any broker in BROKERS.
-# ---------------------------------------------------------------------
-def _render_upload_section(*, broker: str, key_prefix: str, save_fn, save_label: str) -> None:
+def _render_upload_section(*, portfolio_name: str, broker: str, key_prefix: str, save_label: str) -> None:
+    """Parse -> preview -> (manual symbol override for unresolved rows) ->
+    save. Always a full sync for this exact (portfolio_name, broker) pair
+    -- for a portfolio_name never used before this is simply an insert
+    (nothing exists yet to delete), which is how creating a brand-new
+    portfolio and updating an existing one end up sharing this one
+    function."""
     uploaded_file = st.file_uploader(f"{broker} holdings CSV", type="csv", key=f"portfolio_upload_{key_prefix}")
     if uploaded_file is None:
         return
@@ -177,46 +125,117 @@ def _render_upload_section(*, broker: str, key_prefix: str, save_fn, save_label:
                 manual = manual_symbols.get(h["raw_name"], "").strip().upper()
                 if manual:
                     h["symbol"] = manual
-        records = portfolio_service.holdings_to_records(user_id, broker, parsed)
-        save_fn(records)
+        records = portfolio_service.holdings_to_records(user_id, portfolio_name, broker, parsed)
+        portfolio_repo.replace_broker_holdings(client, user_id, portfolio_name, broker, records)
         st.session_state["portfolio_cache_bust"] += 1
         st.cache_data.clear()
-        st.success(f"Saved {len(records)} holding(s) from {broker}.")
+        st.success(f"Saved {len(records)} holding(s) from {broker} to \"{portfolio_name}\".")
         st.rerun()
 
 
-st.divider()
-st.subheader("Upload holdings")
+def _render_portfolio_tab(portfolio_name: str, holdings_for_portfolio: list) -> None:
+    """Holdings table (merged across brokers within this one portfolio)
+    plus this portfolio's own upload section -- everything a tab shows."""
+    raw_rows = [
+        {
+            "raw_name": h.raw_name,
+            "symbol": h.symbol,
+            "qty": h.qty,
+            "avg_price": h.avg_price,
+            "investment": h.investment,
+        }
+        for h in holdings_for_portfolio
+    ]
+    merged = portfolio_service.merge_holdings(raw_rows)
+    symbols = tuple(sorted({r["symbol"] for r in merged if r["symbol"]}))
+    ltp_by_symbol = _load_latest_prices(client, symbols, st.session_state["portfolio_cache_bust"])
+    rows, totals = portfolio_service.compute_portfolio_view(merged, ltp_by_symbol)
+    rows.sort(key=lambda r: r["investment"], reverse=True)
 
-update_tab, new_tab = st.tabs(["Update portfolio", "New portfolio"])
-existing_brokers = sorted({h.broker for h in saved_holdings})
-
-with update_tab:
-    st.caption(
-        "Syncs one broker's holdings from a fresh export -- replaces that broker's "
-        "previously saved rows, leaving any other broker's holdings untouched."
-    )
-    if not existing_brokers:
-        st.info("No existing holdings to update yet -- upload your first CSV under \"New portfolio\" instead.")
-    else:
-        if len(existing_brokers) == 1:
-            update_broker = existing_brokers[0]
-            st.caption(f"Broker: **{update_broker}** (matches your saved portfolio)")
-        else:
-            update_broker = st.selectbox("Broker", existing_brokers, key="portfolio_update_broker")
-        _render_upload_section(
-            broker=update_broker,
-            key_prefix=f"update_{update_broker}",
-            save_fn=lambda records, b=update_broker: portfolio_repo.replace_broker_holdings(client, user_id, b, records),
-            save_label="Update portfolio",
+    stats = [
+        ("Total Investment", format_inr(totals["total_investment"]), None),
+        ("Total Current Value", format_inr(totals["total_cur_val"]), None),
+        ("Total P&L", format_inr(totals["total_pnl"]), None),
+        ("Total P&L %", format_pct(totals["total_pnl_pct"]), None),
+    ]
+    st.markdown(render_stat_grid(stats, user_settings.theme, cols=4), unsafe_allow_html=True)
+    if totals["unpriced_count"]:
+        st.caption(
+            f"Totals exclude {totals['unpriced_count']} holding(s) with no market data yet "
+            "(shown as N/A below -- they'll be picked up by the next data refresh)."
         )
 
-with new_tab:
-    st.caption("Replaces your **entire** saved portfolio (every broker) with just this upload.")
-    new_broker = st.selectbox("Broker", BROKERS, key="portfolio_new_broker")
+    table_rows = []
+    for i, r in enumerate(rows, start=1):
+        stock = r["symbol"] or f'{r["raw_name"]} {render_pill("unmatched", "neutral", user_settings.theme)}'
+        table_rows.append(
+            {
+                "#": i,
+                "Stock": stock,
+                "Qty": _fmt_qty(r["qty"]),
+                "Avg Price": format_inr(r["avg_price"]),
+                "LTP": format_inr(r["ltp"]),
+                "Investment": format_inr(r["investment"]),
+                "Cur Val": format_inr(r["cur_val"]),
+                "P&L": format_inr(r["pnl"]),
+                "P&L %": format_pct(r["pnl_pct"]),
+            }
+        )
+    st.markdown(render_screener_table(table_rows, user_settings.theme), unsafe_allow_html=True)
+
+    st.divider()
+    st.subheader("Upload holdings")
+    st.caption("Uploading a broker's file replaces that broker's previously saved holdings in this portfolio.")
+    broker = st.selectbox("Broker", BROKERS, key=f"portfolio_broker_{portfolio_name}")
     _render_upload_section(
-        broker=new_broker,
-        key_prefix=f"new_{new_broker}",
-        save_fn=lambda records, b=new_broker: portfolio_repo.replace_all_holdings(client, user_id, b, records),
-        save_label="Create new portfolio",
+        portfolio_name=portfolio_name,
+        broker=broker,
+        key_prefix=f"{portfolio_name}_{broker}",
+        save_label="Save portfolio",
     )
+
+
+# ---------------------------------------------------------------------
+# One tab per portfolio -- each independent and never affected by
+# uploads to any other portfolio (multiple portfolios can freely
+# coexist). A "+ New portfolio" tab is always available to start another
+# one from scratch.
+# ---------------------------------------------------------------------
+portfolio_names = sorted({h.portfolio_name for h in saved_holdings})
+
+if not portfolio_names:
+    st.info("No holdings saved yet -- create your first portfolio below.")
+    st.divider()
+    st.subheader("Create a portfolio")
+    first_name = st.text_input("Portfolio name", value="Portfolio 1", key="portfolio_first_name")
+    first_broker = st.selectbox("Broker", BROKERS, key="portfolio_first_broker")
+    _render_upload_section(
+        portfolio_name=first_name.strip() or "Portfolio 1",
+        broker=first_broker,
+        key_prefix=f"first_{first_broker}",
+        save_label="Create portfolio",
+    )
+else:
+    tabs = st.tabs(portfolio_names + ["+ New portfolio"])
+    for name, tab in zip(portfolio_names, tabs[:-1]):
+        with tab:
+            _render_portfolio_tab(name, [h for h in saved_holdings if h.portfolio_name == name])
+    with tabs[-1]:
+        st.caption("Start a brand-new portfolio, separate from your existing one(s) -- nothing existing is affected.")
+        new_name = st.text_input(
+            "Portfolio name", key="portfolio_new_name", placeholder=f"Portfolio {len(portfolio_names) + 1}"
+        )
+        new_broker = st.selectbox("Broker", BROKERS, key="portfolio_new_broker")
+        resolved_name = new_name.strip() or f"Portfolio {len(portfolio_names) + 1}"
+        if resolved_name in portfolio_names:
+            st.error(
+                f'A portfolio named "{resolved_name}" already exists -- switch to that tab to update it, '
+                "or pick a different name here."
+            )
+        else:
+            _render_upload_section(
+                portfolio_name=resolved_name,
+                broker=new_broker,
+                key_prefix=f"newportfolio_{new_broker}",
+                save_label="Create portfolio",
+            )

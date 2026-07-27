@@ -217,12 +217,13 @@ def resolve_tracked_symbols(
     return [Company(symbol=symbol, name=raw_name_by_symbol.get(symbol, symbol)) for symbol in new_symbols]
 
 
-def holdings_to_records(user_id: str, broker: str, holdings: list[dict]) -> list[PortfolioHolding]:
+def holdings_to_records(user_id: str, portfolio_name: str, broker: str, holdings: list[dict]) -> list[PortfolioHolding]:
     """Converts parsed/merged holding dicts into PortfolioHolding rows
     ready for portfolio_repo.replace_broker_holdings."""
     return [
         PortfolioHolding(
             user_id=user_id,
+            portfolio_name=portfolio_name,
             broker=broker,
             raw_name=h["raw_name"],
             symbol=h["symbol"],

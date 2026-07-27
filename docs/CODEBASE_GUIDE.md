@@ -135,13 +135,14 @@ tests/                             Pytest suite -- almost entirely calculations/
 ## Database schema
 
 All migrations live in `supabase/migrations/`, applied in numeric order
-(`0001` → `0013`). Eighteen tables, in three groups (`0008` doesn't add a
+(`0001` → `0014`). Eighteen tables, in three groups (`0008` doesn't add a
 table -- it just extends `provider_fetch_log.fetch_type`'s CHECK
 constraint with `'fo'`, for the `fo-refresh` Edge Function's logging;
 `0010`/`0011` drop and recreate `dashboard_fo_metrics` with a different
 key/columns rather than adding a new table -- see "Dashboard cache"
 below; `0012` adds `portfolio_holdings`; `0013` only redefines
-`latest_screener_view`, no new table):
+`latest_screener_view`, no new table; `0014` only adds a column +
+widens `portfolio_holdings`' primary key, no new table):
 
 **Reference data** (written by `scripts/fetch_nifty50_constituents.py` /
 `seed.sql`, read-only to the app):
@@ -163,7 +164,7 @@ below; `0012` adds `portfolio_holdings`; `0013` only redefines
 - `user_positions` — entry/target/stop-loss/notes per symbol
 - `alerts` — alert configs
 - `notification_log` — alert-fired history, deduped via a unique `dedupe_key`
-- `portfolio_holdings` — broker-CSV-uploaded holdings (migration `0012`), keyed `(user_id, broker, raw_name)`. `symbol` is nullable and deliberately **not** FK'd to `companies` -- a resolved symbol may not exist there yet (an ETF/fund or non-Nifty50 stock the screener doesn't otherwise track); see the Portfolio section below for how it gets registered.
+- `portfolio_holdings` — broker-CSV-uploaded holdings (migration `0012`, `portfolio_name` added in `0014`), keyed `(user_id, portfolio_name, broker, raw_name)` -- a user can maintain multiple independently-named portfolios that all coexist. `symbol` is nullable and deliberately **not** FK'd to `companies` -- a resolved symbol may not exist there yet (an ETF/fund or non-Nifty50 stock the screener doesn't otherwise track); see the Portfolio section below for how it gets registered.
 
 Two generated helpers, defined in `0003_views_functions.sql` (and patched
 in `0004`):
@@ -569,7 +570,7 @@ page's own `st.set_page_config(page_title=..., page_icon=...)` call
 
   **A real bug found here, right after this section first shipped**: the CSP/CC breakdown's spot value (CC was still "ITM PMCC" at the time, but the bug and fix applied identically) was initially taken from `option_chain_summary(near_chain_rows)["spot"]` — the F&O bhavcopy's own `underlying_price` column — while the Dashboard's two columns (now the `dashboard_fo_metrics` cache, see above) use the cash-market `latest_price` from `latest_screener_view`. These two prices aren't the same value, so this page's numbers didn't match the Dashboard's for the same stock (confirmed live: ADANIENT showed 5% CSP = 0.54% on the Dashboard but 0.45% here, since a different spot picked a different nearest-5%-below strike, 3040 vs 3020). Fixed by fetching `snapshot_repo.get_latest_screener_row(client, symbol).latest_price` and using that as the spot for both calculations here too, instead of the chain's `underlying_price` — the top-of-page "Spot"/"ATM strike" summary tiles are unaffected and deliberately still use the chain's own `underlying_price` (correct for highlighting the ATM row in the actual option-chain data being displayed there). If you add another F&O-derived calculation to either screen, source spot the same way this one now does — from the screener, not the chain — to keep the two screens' numbers in agreement.
 
-- **`6_Portfolio.py`** — see the dedicated Portfolio section below for the full upload → match → save → refresh-registration pipeline. On the page itself: `_load_holdings` reads all of the signed-in user's saved rows (across every broker), `portfolio_service.merge_holdings` combines same-stock rows into one, then `compute_portfolio_view` joins in LTP via `snapshot_repo.get_latest_prices` (a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why) and computes Cur Val/P&L/P&L%. The holdings table reuses `render_screener_table()` exactly like the Dashboard's, since it already treats arbitrary dict keys as columns. The upload section is two `st.tabs` sharing one `_render_upload_section()` helper (parse/preview/manual-symbol-form/save, parameterized by broker/key-prefix/save-callback/button-label so the ~50 lines of shared logic isn't duplicated) — see the Portfolio section below for the "Update portfolio" vs. "New portfolio" distinction.
+- **`6_Portfolio.py`** — see the dedicated Portfolio section below for the full upload → match → save → refresh-registration pipeline, and for the multiple-coexisting-portfolios design (`portfolio_name`, migration `0014`). On the page itself: `_load_holdings` reads every one of the signed-in user's saved rows across every portfolio and broker; one `st.tabs` entry is rendered per distinct `portfolio_name`, each scoping `portfolio_service.merge_holdings`/`compute_portfolio_view` (LTP via `snapshot_repo.get_latest_prices`, a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why) to just that portfolio's own rows. The holdings table reuses `render_screener_table()` exactly like the Dashboard's, since it already treats arbitrary dict keys as columns.
 
 ## Portfolio
 
@@ -580,39 +581,64 @@ screener, similar in spirit to the F&O section above: its own table, its
 own service module, its own refresh-pipeline hook — nothing here changes
 `nifty50_constituents`, `latest_screener_view`, or any existing page.
 
-**Schema (migration `0012_portfolio_holdings.sql`)**: one table,
-`portfolio_holdings`, keyed `(user_id, broker, raw_name)`, RLS-scoped to
-`auth.uid() = user_id` like every other per-user table. `symbol` is
-nullable and **deliberately not FK'd to `companies`** — at upload time a
-correctly-resolved symbol (an ETF, a fund, a non-Nifty50 stock) may not
-have a `companies` row yet at all; forcing the FK would make saving a
-freshly-uploaded portfolio fail until some *other* process happened to
-register that symbol first.
+**Schema (migrations `0012_portfolio_holdings.sql` and
+`0014_portfolio_holdings_multi_portfolio.sql`)**: one table,
+`portfolio_holdings`, RLS-scoped to `auth.uid() = user_id` like every
+other per-user table. `symbol` is nullable and **deliberately not FK'd to
+`companies`** — at upload time a correctly-resolved symbol (an ETF, a
+fund, a non-Nifty50 stock) may not have a `companies` row yet at all;
+forcing the FK would make saving a freshly-uploaded portfolio fail until
+some *other* process happened to register that symbol first.
 
-**Two upload flows, two repo functions** (`portfolio_repo.py`), both a
-delete-then-insert (full sync, not a merge, so a position no longer in
-the file disappears rather than lingering):
-- **"Update portfolio"** (`replace_broker_holdings`) — deletes only the
-  existing rows for `(user_id, broker)`, leaving any other broker's
-  holdings untouched. The page defaults the broker to whichever one the
-  saved portfolio already uses (`sorted({h.broker for h in
-  saved_holdings})`) — no picker shown when there's exactly one, since
-  the whole point of "update" is syncing what's already there; a picker
-  (scoped to just the brokers actually present) only appears if the user
-  somehow already has holdings from more than one broker saved. Shows an
-  info message instead of an uploader if there are no existing holdings
-  at all (nothing to "update" yet).
-- **"New portfolio"** (`replace_all_holdings`) — deletes **every**
-  existing row for `user_id` regardless of broker, then inserts just the
-  new upload. This is the deliberate "start over" flow, for any broker
-  in `BROKERS` via a plain `st.selectbox` (not scoped to existing
-  holdings, since there may not be any, or the user wants to switch
-  brokers entirely).
+**Multiple portfolios per user, all coexisting** (`0014` — a real request
+after `0012` shipped: the first cut only ever supported one implicit
+portfolio per user, sync-only). `0014` adds `portfolio_name text not null
+default 'Portfolio 1'` (the default backfills existing rows so they stay
+visible under a real tab post-migration) and widens the primary key from
+`(user_id, broker, raw_name)` to `(user_id, portfolio_name, broker,
+raw_name)` — the same broker + raw instrument name can now be saved once
+per distinct portfolio without colliding. `PortfolioHolding` gained a
+required `portfolio_name: str` field to match; a deployment that's
+applied `0012` but not yet `0014` fails **every** row with a Pydantic
+`ValidationError` (`portfolio_name` missing), not a `postgrest.APIError`
+— `pages/6_Portfolio.py` catches both around `_load_holdings` and shows
+one combined "apply 0012 and 0014, in that order" message (confirmed live
+against the deployed project, which had `0012` but not yet `0014` at the
+time this shipped: `list_holdings` raised exactly this `ValidationError`,
+not an `APIError`).
 
-Both flows funnel through the same `_render_upload_section()` helper in
-`pages/6_Portfolio.py` for the parse → preview → manual-symbol-form →
-save sequence, differing only in which repo function the caller passes
-in as `save_fn`.
+**One repo function serves both "update an existing portfolio" and
+"create a new one"**: `portfolio_repo.replace_broker_holdings(client,
+user_id, portfolio_name, broker, holdings)` is a delete-then-insert
+scoped to `(user_id, portfolio_name, broker)` — full sync, not a merge,
+so a position no longer in the file disappears rather than lingering.
+For a `portfolio_name` that's never been used before, the delete simply
+matches nothing (no rows to remove), so calling this with a brand-new
+name *is* how a new portfolio gets created — there's no separate
+"replace everything" function, and deliberately isn't one anymore: an
+earlier version of this feature had the "new portfolio" flow wipe the
+user's *entire* portfolio (every broker) before inserting the fresh
+upload, which was corrected on request — creating a new portfolio must
+never touch any existing one.
+
+`pages/6_Portfolio.py` renders one `st.tabs` entry per distinct
+`portfolio_name` the user has (`sorted({h.portfolio_name for h in
+saved_holdings})`), each showing that portfolio's own holdings table
+(`_render_portfolio_tab`) plus its own upload section scoped to that
+`portfolio_name` — uploading a broker's file there only ever calls
+`replace_broker_holdings` for *this* `(portfolio_name, broker)` pair, so
+every other tab is untouched no matter what you upload. A permanent
+"+ New portfolio" tab at the end takes a portfolio name (`st.text_input`,
+defaulting to `f"Portfolio {len(portfolio_names) + 1}"` if left blank)
+and a broker; it refuses to proceed (shows `st.error`, no uploader) if
+the name collides with an existing tab, to avoid silently merging into
+what the user probably meant as a distinct portfolio. When the user has
+no portfolios at all yet, there's nothing to make tabs out of, so the
+page skips `st.tabs` entirely and renders the same name+broker+uploader
+creation flow directly. Both call sites share one `_render_upload_section()`
+helper for the parse → preview → manual-symbol-form → save sequence
+(parameterized by `portfolio_name`/`broker`/`key_prefix`/`save_label`, so
+the ~50 lines of shared logic isn't duplicated three times).
 
 **Two broker CSV formats, one broker-agnostic shape after parsing**
 (`src/services/portfolio_service.py`):

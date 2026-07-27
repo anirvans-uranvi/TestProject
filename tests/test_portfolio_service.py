@@ -176,8 +176,9 @@ class TestResolveTrackedSymbols:
 class TestHoldingsToRecords:
     def test_builds_portfolio_holding_models(self):
         holdings = [{"raw_name": "SBIN", "symbol": "SBIN", "qty": 10, "avg_price": 900, "investment": 9000}]
-        records = portfolio_service.holdings_to_records("u1", "Zerodha", holdings)
+        records = portfolio_service.holdings_to_records("u1", "Portfolio 1", "Zerodha", holdings)
         assert len(records) == 1
         assert records[0].user_id == "u1"
+        assert records[0].portfolio_name == "Portfolio 1"
         assert records[0].broker == "Zerodha"
         assert records[0].symbol == "SBIN"

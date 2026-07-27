@@ -14,6 +14,7 @@ class PortfolioHolding(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     user_id: str
+    portfolio_name: str
     broker: str
     raw_name: str
     symbol: str | None = None
