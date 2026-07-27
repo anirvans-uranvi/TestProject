@@ -438,10 +438,10 @@ The **Options** page (`pages/5_Options.py`) shows, per stock, the futures
 term structure and a full calculation breakdown for the Dashboard's two
 options-derived screener columns — **5% CSP** and **5% CC** — showing the
 actual strikes, premiums, and trade dates used, not just the final
-percentage (CSP as a near/next/far month table, CC as a single-leg
-breakdown that also shows an "Assignment Profit" figure the Dashboard
-doesn't). Open it from the Dashboard's "Open in Options →" section or
-the "View F&O / options" button on Stock Detail.
+percentage -- both **5% CSP** and **5% CC** are shown as a near/next/far
+month table (CC's table also carries an "Assignment Profit" column the
+Dashboard doesn't). Open it from the Dashboard's "Open in Options →"
+section or the "View F&O / options" button on Stock Detail.
 
 **5% CC** is a covered-call yield: sell 1 lot of the OTM call whose
 strike is closest to 5% above spot; `cc_pct` = premium ÷ spot × 100 (the
@@ -449,7 +449,8 @@ yield on the stock's own price), and Assignment Profit = premium ÷
 (strike − spot) × 100 (premium as a fraction of the capital-gain room
 left before the strike caps further upside). This replaced an earlier,
 more complex "5% ITM PMCC" (poor-man's-covered-call, three option legs)
-on request.
+on request, and originally only showed the nearest expiry's numbers
+before being extended to all three months to match 5% CSP's table.
 
 The Dashboard's own **5% CSP** / **5% CC** columns read from a small
 precomputed cache table (`dashboard_fo_metrics`, migration `0011`, keyed

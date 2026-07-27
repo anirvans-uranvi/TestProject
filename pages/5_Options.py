@@ -150,7 +150,7 @@ else:
     st.info("No open futures contracts for this symbol.")
 
 # ---------------------------------------------------------------------
-# 5% CSP / 5% CC -- both restricted to the nearest available expiry
+# 5% CSP / 5% CC -- both shown for the near/next/far monthly expiries
 # regardless of which expiry is selected above for viewing the chain,
 # and both use the stock's cash-market latest_price as spot (not the
 # option chain's own underlying_price, which is a snapshot from the F&O
@@ -158,18 +158,13 @@ else:
 # how the Dashboard's own columns for these two are computed, so the
 # numbers always line up between the two screens.
 # ---------------------------------------------------------------------
-near_expiry = expiries[0] if expiries else None
-if near_expiry is None:
-    near_chain_rows = []
-elif selected_expiry == near_expiry:
-    near_chain_rows = chain_rows
-else:
-    near_chain_rows = fo_repo.get_option_chain(client, symbol, near_expiry)
-
 screener_row = snapshot_repo.get_latest_screener_row(client, symbol)
 cash_spot = screener_row.latest_price if screener_row else None
-spot_map = {symbol: cash_spot} if cash_spot is not None else {}
-cc = fo_service.cc_5pct_map(near_chain_rows, spot_map).get(symbol)
+
+
+def _chain_rows_for(exp) -> list[dict]:
+    return chain_rows if exp == selected_expiry else fo_repo.get_option_chain(client, symbol, exp)
+
 
 st.divider()
 st.subheader("5% CSP (cash-secured put)")
@@ -187,13 +182,7 @@ else:
     term_labels = ["Near month", "Next month", "Far month"]
     csp_term_rows = []
     for label, exp in zip(term_labels, expiries[:3]):
-        if exp == selected_expiry:
-            rows_for_exp = chain_rows
-        elif exp == near_expiry:
-            rows_for_exp = near_chain_rows
-        else:
-            rows_for_exp = fo_repo.get_option_chain(client, symbol, exp)
-        exp_csp = fo_service.csp_5pct_for_rows(rows_for_exp, cash_spot, exp)
+        exp_csp = fo_service.csp_5pct_for_rows(_chain_rows_for(exp), cash_spot, exp)
         csp_term_rows.append(
             {
                 "Term": label,
@@ -216,28 +205,28 @@ st.caption(
     "shares you already hold. **Assignment Profit** = premium ÷ (strike − "
     "spot) × 100 -- the premium as a percentage of the extra capital gain "
     "still available between spot and the strike, i.e. the room left before "
-    "assignment caps further upside."
+    "assignment caps further upside. Shown for the near, next, and far "
+    "monthly expiries, same as 5% CSP above."
 )
-if cc is None:
-    st.info("Not enough option data to compute 5% CC for the nearest expiry.")
+if cash_spot is None or not expiries:
+    st.info("Not enough option data to compute 5% CC.")
 else:
-    leg_stats = [
-        ("Strike", format_inr(cc["strike"], decimals=0), "nearest 5% above spot"),
-        ("Premium", format_inr(cc["premium"]), None),
-        ("Spot", format_inr(cc["spot"]), "last traded price"),
-    ]
-    st.markdown(render_stat_grid(leg_stats, user_settings.theme, cols=3), unsafe_allow_html=True)
-    cc_stats = [
-        (
-            "5% CC",
-            format_pct(cc["cc_pct"], signed=False) if cc["cc_pct"] is not None else "N/A",
-            "premium ÷ spot × 100",
-        ),
-        (
-            "Assignment Profit",
-            format_pct(cc["assignment_profit_pct"], signed=False) if cc["assignment_profit_pct"] is not None else "N/A",
-            "premium ÷ (strike − spot) × 100",
-        ),
-    ]
-    st.markdown(render_stat_grid(cc_stats, user_settings.theme, cols=2), unsafe_allow_html=True)
-    st.caption(f"Trade date: {cc['trade_date'] or '—'} · Nearest expiry used: {cc['expiry_date']}")
+    term_labels = ["Near month", "Next month", "Far month"]
+    cc_term_rows = []
+    for label, exp in zip(term_labels, expiries[:3]):
+        exp_cc = fo_service.cc_5pct_for_rows(_chain_rows_for(exp), cash_spot, exp)
+        cc_term_rows.append(
+            {
+                "Term": label,
+                "Expiry": exp.strftime("%d %b %Y"),
+                "Spot": format_inr(exp_cc["spot"]) if exp_cc else "N/A",
+                "Strike (nearest 5% above spot)": format_inr(exp_cc["strike"], decimals=0) if exp_cc else "N/A",
+                "Premium": format_inr(exp_cc["premium"]) if exp_cc else "N/A",
+                "Trade Date": (exp_cc["trade_date"] or "—") if exp_cc else "N/A",
+                "5% CC": format_pct(exp_cc["cc_pct"], signed=False) if exp_cc and exp_cc["cc_pct"] is not None else "N/A",
+                "Assignment Profit": format_pct(exp_cc["assignment_profit_pct"], signed=False)
+                if exp_cc and exp_cc["assignment_profit_pct"] is not None
+                else "N/A",
+            }
+        )
+    st.dataframe(pd.DataFrame(cc_term_rows), use_container_width=True, hide_index=True)
