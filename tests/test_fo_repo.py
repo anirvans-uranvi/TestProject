@@ -11,6 +11,7 @@ the fix (`PE rows: 1000`) and after (`PE rows: 5053`, all 50 symbols
 present) -- see the F&O chapter of the session transcript.
 """
 import types
+from datetime import date
 
 from src.repositories import fo_repo
 
@@ -64,3 +65,51 @@ class TestPaginate:
         all_rows = [{"id": i} for i in range(1500)]
         result = fo_repo._paginate(lambda: _FakeRangeQuery(all_rows))
         assert len(result) == 1500
+
+
+class _FakeLatestDateTable:
+    """Mimics .select().order(...).limit(...).execute() -- just enough
+    for get_latest_fo_trade_date, which doesn't filter/paginate."""
+
+    def __init__(self, rows: list[dict]):
+        self.rows = rows
+
+    def select(self, *args, **kwargs):
+        return self
+
+    def order(self, *args, **kwargs):
+        return self
+
+    def limit(self, *args, **kwargs):
+        return self
+
+    def execute(self):
+        return types.SimpleNamespace(data=self.rows)
+
+
+class _FakeLatestDateClient:
+    def __init__(self, rows: list[dict]):
+        self.rows = rows
+
+    def table(self, name):
+        return _FakeLatestDateTable(self.rows)
+
+
+class TestGetLatestFoTradeDate:
+    def test_returns_the_row_the_query_already_sorted_to_the_top(self):
+        # get_latest_fo_trade_date relies entirely on order(desc=True) +
+        # limit(1) to pick the latest date -- it just reads whatever single
+        # row the query returns, so this only needs one row to prove the
+        # plumbing (parsing/return) works, not the DB's own sort.
+        client = _FakeLatestDateClient([{"trade_date": "2026-07-24"}])
+        result = fo_repo.get_latest_fo_trade_date(client)
+        assert result == date(2026, 7, 24)
+
+    def test_already_parsed_date_passed_through(self):
+        client = _FakeLatestDateClient([{"trade_date": date(2026, 7, 24)}])
+        result = fo_repo.get_latest_fo_trade_date(client)
+        assert result == date(2026, 7, 24)
+
+    def test_no_rows_returns_none(self):
+        client = _FakeLatestDateClient([])
+        assert fo_repo.get_latest_fo_trade_date(client) is None

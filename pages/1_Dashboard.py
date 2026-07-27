@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 from postgrest.exceptions import APIError
 
+from src.config import get_settings
 from src.models.user import SavedFilter
 from src.repositories import fetch_log_repo, fo_repo, settings_repo, snapshot_repo
 from src.services import edge_refresh
@@ -51,6 +52,11 @@ def _load_last_fo_fetch(_client, _cache_bust: int):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
+def _load_latest_fo_trade_date(_client, _cache_bust: int):
+    return fo_repo.get_latest_fo_trade_date(_client)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
 def _load_dashboard_fo_metrics(_client, _cache_bust: int):
     """The precomputed 5% CSP / 5% CC cache (`dashboard_fo_metrics`,
     migration 0011) -- up to 3 rows per symbol (near/next/far expiry),
@@ -68,10 +74,17 @@ def _load_dashboard_fo_metrics(_client, _cache_bust: int):
 if "dashboard_cache_bust" not in st.session_state:
     st.session_state["dashboard_cache_bust"] = 0
 
+app_settings = get_settings()
+
 st.title("📈 Nifty 50 Momentum & Dividend Screener")
 st.caption(
     "Screens all current Nifty 50 constituents on momentum, dividend yield, and PEG, "
     "and classifies each as Green, Amber, Red, or Unavailable."
+)
+st.caption(
+    f"Data sources — Stock prices: `{app_settings.market_data_provider}` · "
+    f"Fundamentals (PE/PEG/dividends): `{app_settings.fundamentals_provider}` · "
+    "Options/F&O: NSE Bhavcopy (end-of-day)"
 )
 
 header_col1, header_col2, header_col3, header_col4 = st.columns([2, 1, 1, 1])
@@ -79,6 +92,11 @@ last_fetch = _load_last_fetch(client, st.session_state["dashboard_cache_bust"])
 last_fetch_at = last_fetch.finished_at if last_fetch else None
 last_fo_fetch = _load_last_fo_fetch(client, st.session_state["dashboard_cache_bust"])
 last_fo_fetch_at = last_fo_fetch.finished_at if last_fo_fetch else None
+try:
+    latest_fo_trade_date = _load_latest_fo_trade_date(client, st.session_state["dashboard_cache_bust"])
+except APIError:
+    # F&O tables (migration 0007) not applied yet -- degrade to "--" rather than crashing the Dashboard.
+    latest_fo_trade_date = None
 market_state = get_market_state(
     now=now_ist(),
     last_successful_fetch_at=last_fetch_at,
@@ -94,6 +112,7 @@ with header_col2:
     else:
         age_min = (now_ist() - last_fetch_at.astimezone(now_ist().tzinfo)).total_seconds() / 60
         st.markdown(f"**Data freshness:** {age_min:.0f} min ago")
+    st.markdown(f"**Latest Bhavcopy:** {latest_fo_trade_date.strftime('%d %b %Y') if latest_fo_trade_date else '—'}")
 with header_col3:
     if st.button("🔄 Stock Data Refresh", use_container_width=True):
         with st.spinner("Refreshing live data from Yahoo Finance -- this can take up to a minute..."):

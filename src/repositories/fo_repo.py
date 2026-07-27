@@ -96,6 +96,23 @@ def list_fo_symbols(client: Client) -> list[str]:
     return sorted({r["symbol"] for r in (resp.data or [])})
 
 
+def get_latest_fo_trade_date(client: Client) -> date | None:
+    """The most recent NSE F&O bhavcopy trade_date actually loaded --
+    distinct from `fetch_log_repo`'s `finished_at` (when the ingestion job
+    last *ran*), since a bhavcopy is published for a specific trading day
+    that can lag the run itself (e.g. a run on a non-trading day finds
+    nothing new and reuses the prior session's file). Futures and options
+    are always ingested together from the same bhavcopy file, so either
+    table's max trade_date is equivalent -- futures_daily_prices is
+    smaller and queried here for that reason."""
+    resp = client.table("futures_daily_prices").select("trade_date").order("trade_date", desc=True).limit(1).execute()
+    rows = resp.data or []
+    if not rows:
+        return None
+    trade_date = rows[0]["trade_date"]
+    return date.fromisoformat(trade_date) if isinstance(trade_date, str) else trade_date
+
+
 def get_open_futures(client: Client, symbol: str) -> list[dict]:
     """Open futures term structure (near/next/far) with latest prices."""
     resp = (
