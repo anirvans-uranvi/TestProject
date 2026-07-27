@@ -6,7 +6,14 @@ from src.config import get_settings
 from src.models.enums import Theme
 from src.models.user import UserSettings
 from src.repositories import settings_repo
-from src.utils.session import current_user_email, current_user_id, get_user_client_cached, require_login, set_new_password
+from src.utils.session import (
+    current_user_email,
+    current_user_id,
+    get_user_client_cached,
+    require_login,
+    set_new_password,
+    sign_out,
+)
 from src.utils.ui import inject_global_styles, render_disclaimer, render_pill
 
 st.set_page_config(page_title="Settings | Nifty 50 Screener", page_icon="⚙️", layout="wide")
@@ -68,6 +75,9 @@ st.markdown(_coming_soon, unsafe_allow_html=True)
 st.divider()
 st.subheader("Account")
 st.markdown(f"**Signed in as:** {current_user_email()}")
+if st.button("Sign out"):
+    sign_out()
+    st.rerun()
 
 with st.expander("Change password"):
     with st.form("change_password_form"):

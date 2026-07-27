@@ -31,12 +31,14 @@ operations; that doc covers the code itself.
 ## Architecture
 
 ```
-app.py                  Login/landing page (Supabase Auth)
-pages/                  Streamlit multipage app
-  1_Dashboard.py         Screener table, metric cards, filters, CSV export
-  2_Stock_Detail.py       Price/volume/dividend charts, scorecard, alerts, position notes
+app.py                  Pure st.navigation() router -- no visible content of its
+                        own; see "Navigation" below for the sidebar it builds
+pages/                  Streamlit multipage app (each still its own script,
+                        registered by app.py rather than auto-discovered)
+  1_Dashboard.py         Screener table, metric cards, filters, CSV export -- sidebar label "Screener"
+  2_Stock_Detail.py       Price/volume/dividend charts, scorecard, alerts, position notes -- sidebar label "Equity"
   3_Alerts.py             Alert CRUD + notification history
-  4_Settings.py            Per-user thresholds, theme, notification channels
+  4_Settings.py            Per-user thresholds, theme, notification channels, sign out
   5_Options.py              F&O: futures term structure, 5% CSP / 5% CC breakdown
   6_Portfolio.py             Upload Zerodha/Dhan holdings, live-valued against app market data
 src/
@@ -71,6 +73,21 @@ pure calculation engine, and persists one row per symbol per day to
 `latest_screener_view` and re-apply the signed-in user's own thresholds
 client-side (see `src/services/threshold_override.py`) so per-user
 threshold changes don't require a server-side recompute.
+
+**Navigation**: `app.py` builds an explicit `st.navigation([st.Page(...), ...])`
+list and calls `.run()` -- there is no separate "app" home screen; the base
+URL runs whichever page is marked `default=True` (currently
+`1_Dashboard.py`). This replaced the legacy `pages/`-directory
+auto-discovery convention (which derived both the sidebar label and the
+display order from each file's name/numeric prefix) so the sidebar label
+can differ from the filename (`1_Dashboard.py` shows as "Screener",
+`2_Stock_Detail.py` as "Equity") and the order can be set independently
+of the numeric prefixes (Alerts/Settings deliberately listed last). Each
+page still keeps its own `st.set_page_config()` call for its browser-tab
+title/icon -- unaffected by which script registers it. The former
+sign-out control (previously only reachable from `app.py`'s own sidebar,
+now that there's no such screen) moved to `4_Settings.py`'s Account
+section.
 
 ## Setup
 

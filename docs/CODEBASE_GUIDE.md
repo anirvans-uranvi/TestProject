@@ -100,12 +100,12 @@ fast, no-mocking-required test in `tests/test_calculations_*.py`.
 
 ```
 .streamlit/config.toml          Streamlit's own [theme] (light base, indigo primaryColor) + toolbarMode
-app.py                          Login/landing page, Supabase Auth
+app.py                          Pure st.navigation() router, no visible content of its own -- see below
 pages/
-  1_Dashboard.py                 Screener table, metric cards, filters, CSV export
-  2_Stock_Detail.py               Price/volume/dividend charts, scorecard, alerts, position notes
+  1_Dashboard.py                 Screener table, metric cards, filters, CSV export -- sidebar label "Screener"
+  2_Stock_Detail.py               Price/volume/dividend charts, scorecard, alerts, position notes -- sidebar label "Equity"
   3_Alerts.py                     Alert CRUD + notification history
-  4_Settings.py                    Per-user thresholds, theme, change password
+  4_Settings.py                    Per-user thresholds, theme, change password, sign out
   5_Options.py                     F&O: futures term structure + 5% CSP/CC breakdown per stock
   6_Portfolio.py                    Upload Zerodha/Dhan holdings, live-valued against app market data
 src/
@@ -492,11 +492,51 @@ the Dashboard's own `except APIError` → "N/A" handling.
 
 ## Streamlit app (`app.py`, `pages/`)
 
-`app.py` is the landing page (Streamlit's "Home" in the sidebar nav,
-titled "app"). Every page in `pages/` starts with
-`require_login()` (from `src.utils.session`), which either lets the page
-proceed (a valid session exists) or renders the Sign in / Create account /
-Forgot password tabs and `st.stop()`s.
+`app.py` has no content of its own -- it's a pure router:
+
+```python
+pages = [
+    st.Page("pages/1_Dashboard.py", title="Screener", default=True),
+    st.Page("pages/2_Stock_Detail.py", title="Equity"),
+    st.Page("pages/5_Options.py", title="Options"),
+    st.Page("pages/6_Portfolio.py", title="Portfolio"),
+    st.Page("pages/3_Alerts.py", title="Alerts"),
+    st.Page("pages/4_Settings.py", title="Settings"),
+]
+st.navigation(pages).run()
+```
+
+This replaced the legacy `pages/`-directory auto-discovery convention
+(where the sidebar label and display order were both derived from each
+file's name/numeric prefix, and the entrypoint script itself always
+appeared as its own nav entry, labeled "app" from `app.py`) -- there used
+to be a real landing-page screen here (welcome text + quick links + a
+"data sources" info card reading `settings.market_data_provider`); it was
+dropped on request, along with that screen from the nav entirely, in
+favor of landing directly on a real page (`default=True` on the
+Dashboard/"Screener" entry). `st.Page`'s `title=` is independent of the
+underlying filename, which is why the sidebar shows "Screener"/"Equity"
+for files still named `1_Dashboard.py`/`2_Stock_Detail.py` -- nothing
+else about those files (including every `st.switch_page("pages/...")`
+call elsewhere that references them by path) needed to change. Order in
+the sidebar is just this list's order, independent of the files' numeric
+prefixes (which now only affect directory sort order, not app UI) --
+Alerts/Settings are listed last on request.
+
+The sign-out control used to live in `app.py`'s own sidebar (`with
+st.sidebar: st.button("Sign out")`) -- since that screen no longer
+exists, it moved into `4_Settings.py`'s Account section, right after the
+"Signed in as" line, as a plain `st.button()` (not a sidebar element;
+Settings has no sidebar content of its own to put it in).
+
+Every page in `pages/` still starts with `require_login()` (from
+`src.utils.session`), which either lets the page proceed (a valid
+session exists) or renders the Sign in / Create account / Forgot
+password tabs and `st.stop()`s -- unaffected by which script (legacy
+auto-discovery vs. `st.navigation`) actually invoked it. Likewise, each
+page's own `st.set_page_config(page_title=..., page_icon=...)` call
+(browser-tab metadata) is unaffected too -- it's independent of `st.Page`'s
+`title=` (sidebar label).
 
 - **`1_Dashboard.py`** — loads `latest_screener_view` via `snapshot_repo.get_latest_screener()`, applies the signed-in user's thresholds via `threshold_override.apply_user_thresholds()`, renders metric cards (also usable as quick filters, wired through `st.session_state["status_filter"]`), sidebar filters, a "Sort By" control, and the screener table. The Status sidebar filter is a `st.multiselect` over `ALL_STATUSES = ["Green", "Amber", "Red", "Unavailable"]` — `status_filter` is always a *list* (any combination, not one-or-all), and the final row filter is a single `df["status"].isin([...])`, so selecting all four is equivalent to no filter at all. Saved filter presets normalize old single-string `"status"` values (from before this was a multiselect) into a list on load for backward compatibility. The "Minimum dividend yield" / "Minimum PEG" sidebar filters default to `0.0`, **not** `user_settings.dividend_yield_threshold`/`peg_threshold` — they're a separate display filter from the criterion A/C pass/fail thresholds, and defaulting them to the threshold value silently hid every stock below it on first load (a real bug, since fixed). Keep these two concepts distinct if you touch this page: the Settings-page thresholds decide Green/Amber/Red/Unavailable; these sidebar inputs just additionally hide rows below a value the user dials in themselves, and should default to "show everything." The header has two on-demand refresh buttons, each hitting its own Edge Function (see [Edge Functions](#edge-functions-supabasefunctions) below): "🔄 Stock Data Refresh" (cash market, `manual-refresh`) and "📊 F&O Data Refresh" (futures/options, `fo-refresh` — a no-op with an "already up to date" message if NSE hasn't published anything newer than what's loaded).
 
@@ -967,8 +1007,10 @@ value in a new migration altering `alerts.alert_type`.
 
 **Add a new Streamlit page**: create `pages/N_Name.py`, start it with
 `require_login()`, use `get_user_client_cached()` for all data access
-(never `get_service_client()`), add a `st.page_link(...)` to it from
-`app.py`.
+(never `get_service_client()`), add an `st.Page("pages/N_Name.py",
+title="...")` entry to `app.py`'s `pages` list (this is what actually
+puts it in the sidebar now -- the file's numeric prefix no longer
+matters for that, only the list's own order does).
 
 **Add a new table**: write a new numbered migration in
 `supabase/migrations/`, add RLS policies for it (per-user tables need
