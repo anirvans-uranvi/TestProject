@@ -113,16 +113,20 @@ else:
     st.info("No holdings saved yet -- upload a broker CSV below to get started.")
 
 # ---------------------------------------------------------------------
-# Upload holdings
+# Upload holdings -- two distinct flows:
+#   "Update portfolio": syncs one broker's holdings from a fresh export,
+#     replacing that broker's previously saved rows only (other brokers'
+#     holdings are untouched). Defaults to whichever broker the saved
+#     portfolio already uses -- no broker picker needed when there's only
+#     one -- since the whole point is "update what's already there."
+#   "New portfolio": wipes the ENTIRE saved portfolio (every broker) and
+#     replaces it with just this upload, for any broker in BROKERS.
 # ---------------------------------------------------------------------
-st.divider()
-st.subheader("Upload holdings")
-st.caption("Uploading a broker's file replaces that broker's previously saved holdings.")
+def _render_upload_section(*, broker: str, key_prefix: str, save_fn, save_label: str) -> None:
+    uploaded_file = st.file_uploader(f"{broker} holdings CSV", type="csv", key=f"portfolio_upload_{key_prefix}")
+    if uploaded_file is None:
+        return
 
-broker = st.selectbox("Broker", BROKERS, key="portfolio_broker")
-uploaded_file = st.file_uploader(f"{broker} holdings CSV", type="csv", key=f"portfolio_upload_{broker}")
-
-if uploaded_file is not None:
     parse_failed = False
     try:
         if broker == "Zerodha":
@@ -138,43 +142,81 @@ if uploaded_file is not None:
     if not parsed:
         if not parse_failed:
             st.warning("No holding rows found in this file.")
-    else:
-        preview_rows = [
-            {
-                "Instrument": h["raw_name"],
-                "Matched symbol": h["symbol"] or "(unmatched)",
-                "Qty": _fmt_qty(h["qty"]),
-                "Avg Price": format_inr(h["avg_price"]),
-                "Investment": format_inr(h["investment"]),
-            }
-            for h in parsed
-        ]
-        st.dataframe(preview_rows, use_container_width=True, hide_index=True)
+        return
 
-        unresolved = [h for h in parsed if h["symbol"] is None]
-        with st.form(f"portfolio_save_form_{broker}"):
-            manual_symbols: dict[str, str] = {}
-            if unresolved:
-                st.info(
-                    f"{len(unresolved)} row(s) couldn't be matched to a known NSE symbol. "
-                    "Enter one to have it tracked from the next data refresh -- leave blank to keep as N/A."
+    preview_rows = [
+        {
+            "Instrument": h["raw_name"],
+            "Matched symbol": h["symbol"] or "(unmatched)",
+            "Qty": _fmt_qty(h["qty"]),
+            "Avg Price": format_inr(h["avg_price"]),
+            "Investment": format_inr(h["investment"]),
+        }
+        for h in parsed
+    ]
+    st.dataframe(preview_rows, use_container_width=True, hide_index=True)
+
+    unresolved = [h for h in parsed if h["symbol"] is None]
+    with st.form(f"portfolio_save_form_{key_prefix}"):
+        manual_symbols: dict[str, str] = {}
+        if unresolved:
+            st.info(
+                f"{len(unresolved)} row(s) couldn't be matched to a known NSE symbol. "
+                "Enter one to have it tracked from the next data refresh -- leave blank to keep as N/A."
+            )
+            for h in unresolved:
+                manual_symbols[h["raw_name"]] = st.text_input(
+                    f"NSE symbol for “{h['raw_name']}”",
+                    key=f"portfolio_symbol_{key_prefix}_{h['raw_name']}",
                 )
-                for h in unresolved:
-                    manual_symbols[h["raw_name"]] = st.text_input(
-                        f"NSE symbol for “{h['raw_name']}”",
-                        key=f"portfolio_symbol_{broker}_{h['raw_name']}",
-                    )
-            submitted = st.form_submit_button("Save portfolio")
+        submitted = st.form_submit_button(save_label)
 
-        if submitted:
-            for h in parsed:
-                if h["symbol"] is None:
-                    manual = manual_symbols.get(h["raw_name"], "").strip().upper()
-                    if manual:
-                        h["symbol"] = manual
-            records = portfolio_service.holdings_to_records(user_id, broker, parsed)
-            portfolio_repo.replace_broker_holdings(client, user_id, broker, records)
-            st.session_state["portfolio_cache_bust"] += 1
-            st.cache_data.clear()
-            st.success(f"Saved {len(records)} holding(s) from {broker}.")
-            st.rerun()
+    if submitted:
+        for h in parsed:
+            if h["symbol"] is None:
+                manual = manual_symbols.get(h["raw_name"], "").strip().upper()
+                if manual:
+                    h["symbol"] = manual
+        records = portfolio_service.holdings_to_records(user_id, broker, parsed)
+        save_fn(records)
+        st.session_state["portfolio_cache_bust"] += 1
+        st.cache_data.clear()
+        st.success(f"Saved {len(records)} holding(s) from {broker}.")
+        st.rerun()
+
+
+st.divider()
+st.subheader("Upload holdings")
+
+update_tab, new_tab = st.tabs(["Update portfolio", "New portfolio"])
+existing_brokers = sorted({h.broker for h in saved_holdings})
+
+with update_tab:
+    st.caption(
+        "Syncs one broker's holdings from a fresh export -- replaces that broker's "
+        "previously saved rows, leaving any other broker's holdings untouched."
+    )
+    if not existing_brokers:
+        st.info("No existing holdings to update yet -- upload your first CSV under \"New portfolio\" instead.")
+    else:
+        if len(existing_brokers) == 1:
+            update_broker = existing_brokers[0]
+            st.caption(f"Broker: **{update_broker}** (matches your saved portfolio)")
+        else:
+            update_broker = st.selectbox("Broker", existing_brokers, key="portfolio_update_broker")
+        _render_upload_section(
+            broker=update_broker,
+            key_prefix=f"update_{update_broker}",
+            save_fn=lambda records, b=update_broker: portfolio_repo.replace_broker_holdings(client, user_id, b, records),
+            save_label="Update portfolio",
+        )
+
+with new_tab:
+    st.caption("Replaces your **entire** saved portfolio (every broker) with just this upload.")
+    new_broker = st.selectbox("Broker", BROKERS, key="portfolio_new_broker")
+    _render_upload_section(
+        broker=new_broker,
+        key_prefix=f"new_{new_broker}",
+        save_fn=lambda records, b=new_broker: portfolio_repo.replace_all_holdings(client, user_id, b, records),
+        save_label="Create new portfolio",
+    )

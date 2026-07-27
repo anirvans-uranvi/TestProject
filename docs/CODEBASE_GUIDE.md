@@ -569,7 +569,7 @@ page's own `st.set_page_config(page_title=..., page_icon=...)` call
 
   **A real bug found here, right after this section first shipped**: the CSP/CC breakdown's spot value (CC was still "ITM PMCC" at the time, but the bug and fix applied identically) was initially taken from `option_chain_summary(near_chain_rows)["spot"]` — the F&O bhavcopy's own `underlying_price` column — while the Dashboard's two columns (now the `dashboard_fo_metrics` cache, see above) use the cash-market `latest_price` from `latest_screener_view`. These two prices aren't the same value, so this page's numbers didn't match the Dashboard's for the same stock (confirmed live: ADANIENT showed 5% CSP = 0.54% on the Dashboard but 0.45% here, since a different spot picked a different nearest-5%-below strike, 3040 vs 3020). Fixed by fetching `snapshot_repo.get_latest_screener_row(client, symbol).latest_price` and using that as the spot for both calculations here too, instead of the chain's `underlying_price` — the top-of-page "Spot"/"ATM strike" summary tiles are unaffected and deliberately still use the chain's own `underlying_price` (correct for highlighting the ATM row in the actual option-chain data being displayed there). If you add another F&O-derived calculation to either screen, source spot the same way this one now does — from the screener, not the chain — to keep the two screens' numbers in agreement.
 
-- **`6_Portfolio.py`** — see the dedicated Portfolio section below for the full upload → match → save → refresh-registration pipeline. On the page itself: `_load_holdings` reads all of the signed-in user's saved rows (across every broker), `portfolio_service.merge_holdings` combines same-stock rows into one, then `compute_portfolio_view` joins in LTP via `snapshot_repo.get_latest_prices` (a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why) and computes Cur Val/P&L/P&L%. The holdings table reuses `render_screener_table()` exactly like the Dashboard's, since it already treats arbitrary dict keys as columns. The upload section (broker `st.selectbox` + `st.file_uploader`, keyed per-broker so switching the dropdown clears any previously-selected file) previews parsed rows via `st.dataframe`, then an `st.form` collects a manual NSE-symbol override for any row `match_symbol` couldn't resolve before `portfolio_repo.replace_broker_holdings` saves.
+- **`6_Portfolio.py`** — see the dedicated Portfolio section below for the full upload → match → save → refresh-registration pipeline. On the page itself: `_load_holdings` reads all of the signed-in user's saved rows (across every broker), `portfolio_service.merge_holdings` combines same-stock rows into one, then `compute_portfolio_view` joins in LTP via `snapshot_repo.get_latest_prices` (a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why) and computes Cur Val/P&L/P&L%. The holdings table reuses `render_screener_table()` exactly like the Dashboard's, since it already treats arbitrary dict keys as columns. The upload section is two `st.tabs` sharing one `_render_upload_section()` helper (parse/preview/manual-symbol-form/save, parameterized by broker/key-prefix/save-callback/button-label so the ~50 lines of shared logic isn't duplicated) — see the Portfolio section below for the "Update portfolio" vs. "New portfolio" distinction.
 
 ## Portfolio
 
@@ -587,10 +587,32 @@ nullable and **deliberately not FK'd to `companies`** — at upload time a
 correctly-resolved symbol (an ETF, a fund, a non-Nifty50 stock) may not
 have a `companies` row yet at all; forcing the FK would make saving a
 freshly-uploaded portfolio fail until some *other* process happened to
-register that symbol first. Re-uploading a broker's CSV replaces every
-existing row for that `(user_id, broker)` (delete-then-insert,
-`portfolio_repo.replace_broker_holdings`) — a full sync, not a merge, so
-a position no longer in the file disappears rather than lingering.
+register that symbol first.
+
+**Two upload flows, two repo functions** (`portfolio_repo.py`), both a
+delete-then-insert (full sync, not a merge, so a position no longer in
+the file disappears rather than lingering):
+- **"Update portfolio"** (`replace_broker_holdings`) — deletes only the
+  existing rows for `(user_id, broker)`, leaving any other broker's
+  holdings untouched. The page defaults the broker to whichever one the
+  saved portfolio already uses (`sorted({h.broker for h in
+  saved_holdings})`) — no picker shown when there's exactly one, since
+  the whole point of "update" is syncing what's already there; a picker
+  (scoped to just the brokers actually present) only appears if the user
+  somehow already has holdings from more than one broker saved. Shows an
+  info message instead of an uploader if there are no existing holdings
+  at all (nothing to "update" yet).
+- **"New portfolio"** (`replace_all_holdings`) — deletes **every**
+  existing row for `user_id` regardless of broker, then inserts just the
+  new upload. This is the deliberate "start over" flow, for any broker
+  in `BROKERS` via a plain `st.selectbox` (not scoped to existing
+  holdings, since there may not be any, or the user wants to switch
+  brokers entirely).
+
+Both flows funnel through the same `_render_upload_section()` helper in
+`pages/6_Portfolio.py` for the parse → preview → manual-symbol-form →
+save sequence, differing only in which repo function the caller passes
+in as `save_fn`.
 
 **Two broker CSV formats, one broker-agnostic shape after parsing**
 (`src/services/portfolio_service.py`):

@@ -104,6 +104,57 @@ class TestReplaceBrokerHoldings:
         assert "uploaded_at" not in insert_calls[0][2][0]
 
 
+class TestReplaceAllHoldings:
+    def test_deletes_every_brokers_rows_then_inserts_only_the_new_set(self):
+        client = _FakeClient()
+        client.store["portfolio_holdings"] = [
+            _row("Zerodha", "OLD_Z"),
+            _row("Dhan", "OLD_D"),
+        ]
+        holdings = [
+            PortfolioHolding(user_id="u1", broker="Dhan", raw_name="SBIN", symbol="SBIN", qty=10, avg_price=900, investment=9000),
+        ]
+
+        portfolio_repo.replace_all_holdings(client, "u1", "Dhan", holdings)
+
+        assert ("delete", "portfolio_holdings", {"user_id": "u1"}) in client.calls
+        remaining = client.store["portfolio_holdings"]
+        assert not any(r["raw_name"] in ("OLD_Z", "OLD_D") for r in remaining)
+        assert remaining == [
+            {
+                "user_id": "u1",
+                "broker": "Dhan",
+                "raw_name": "SBIN",
+                "symbol": "SBIN",
+                "qty": 10.0,
+                "avg_price": 900.0,
+                "investment": 9000.0,
+            }
+        ]
+
+    def test_does_not_touch_other_users_rows(self):
+        client = _FakeClient()
+        client.store["portfolio_holdings"] = [
+            _row("Zerodha", "MINE"),
+            {**_row("Dhan", "OTHER_USER"), "user_id": "u2"},
+        ]
+
+        portfolio_repo.replace_all_holdings(client, "u1", "Zerodha", [])
+
+        remaining = client.store["portfolio_holdings"]
+        assert len(remaining) == 1
+        assert remaining[0]["raw_name"] == "OTHER_USER"
+
+    def test_empty_holdings_deletes_existing_rows_and_inserts_nothing(self):
+        client = _FakeClient()
+        client.store["portfolio_holdings"] = [_row("Zerodha", "OLD"), _row("Dhan", "OLD2")]
+
+        portfolio_repo.replace_all_holdings(client, "u1", "Zerodha", [])
+
+        assert client.store["portfolio_holdings"] == []
+        assert not any(call[0] == "insert" for call in client.calls)
+
+
 class TestListHoldings:
     def test_returns_only_the_requested_users_rows_as_models(self):
         client = _FakeClient()

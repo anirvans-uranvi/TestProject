@@ -17,8 +17,22 @@ def replace_broker_holdings(client: Client, user_id: str, broker: str, holdings:
     """Full sync for one broker: deletes every existing row for
     (user_id, broker), then inserts the freshly parsed set. A re-upload
     represents the broker's current holdings, not a merge -- positions
-    no longer in the file should disappear."""
+    no longer in the file should disappear. Used by the Portfolio page's
+    "Update portfolio" upload -- other brokers' rows are left untouched."""
     client.table("portfolio_holdings").delete().eq("user_id", user_id).eq("broker", broker).execute()
+    if not holdings:
+        return
+    payload = [h.model_dump(mode="json", exclude={"uploaded_at"}) for h in holdings]
+    client.table("portfolio_holdings").insert(payload).execute()
+
+
+def replace_all_holdings(client: Client, user_id: str, broker: str, holdings: list[PortfolioHolding]) -> None:
+    """Full portfolio reset: deletes every existing row for `user_id`
+    across ALL brokers, then inserts the freshly parsed set for just
+    `broker`. Used by the Portfolio page's "New portfolio" upload -- a
+    deliberate start-over, unlike replace_broker_holdings' per-broker-only
+    replace used by "Update portfolio"."""
+    client.table("portfolio_holdings").delete().eq("user_id", user_id).execute()
     if not holdings:
         return
     payload = [h.model_dump(mode="json", exclude={"uploaded_at"}) for h in holdings]

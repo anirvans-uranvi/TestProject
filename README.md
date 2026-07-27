@@ -512,8 +512,7 @@ published yet.
 The **Portfolio** page (`pages/6_Portfolio.py`) shows your own holdings --
 uploaded from a broker CSV export, not the Nifty50 screener universe --
 valued live against the app's own market data: Stock, Qty, Avg Price,
-LTP, Investment, Cur Val, P&L, P&L%. Two broker formats are supported
-today, picked from a dropdown before uploading:
+LTP, Investment, Cur Val, P&L, P&L%. Two broker formats are supported:
 
 - **Zerodha**: the `Instrument` column is already the exact NSE trading
   symbol, so it's trusted directly.
@@ -523,10 +522,21 @@ today, picked from a dropdown before uploading:
   -- you can type the correct NSE symbol in before saving, or leave it
   blank to keep that row as N/A.
 
-Holdings are saved per-user (`portfolio_holdings`, migration `0012`);
-re-uploading a broker's file replaces that broker's previously saved
-rows (a full sync, not a merge). The same stock held across multiple
-brokers is combined into one row for display.
+Holdings are saved per-user (`portfolio_holdings`, migration `0012`), via
+two separate upload tabs:
+
+- **Update portfolio** -- syncs one broker's holdings from a fresh
+  export, replacing just that broker's previously saved rows (any other
+  broker's holdings are untouched). Defaults to whichever broker your
+  saved portfolio already uses -- no need to pick it again -- and shows a
+  broker picker only if you already have holdings saved from more than
+  one broker.
+- **New portfolio** -- wipes your **entire** saved portfolio (every
+  broker) and replaces it with just this upload, for any broker you pick.
+  This is the "start over" option.
+
+The same stock held across multiple brokers is combined into one row for
+display.
 
 **LTP only comes from data already loaded in Supabase** -- never a fresh
 live fetch triggered by this page. The app's `companies`/
