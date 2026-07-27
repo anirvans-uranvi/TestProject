@@ -64,13 +64,19 @@ def _fmt_qty(value: float) -> str:
     return f"{value:,.2f}"
 
 
-def _render_upload_section(*, portfolio_name: str, broker: str, key_prefix: str, save_label: str) -> None:
+def _render_upload_section(
+    *, portfolio_name: str, broker: str, key_prefix: str, save_label: str, on_saved=None
+) -> None:
     """Parse -> preview -> (manual symbol override for unresolved rows) ->
     save. Always a full sync for this exact (portfolio_name, broker) pair
     -- for a portfolio_name never used before this is simply an insert
     (nothing exists yet to delete), which is how creating a brand-new
     portfolio and updating an existing one end up sharing this one
-    function."""
+    function. `on_saved`, if given, runs right before the rerun -- used by
+    the "+ New portfolio" tab to clear its name input, since otherwise the
+    just-created name lingers in that widget's session_state and the tab
+    immediately (and correctly, but confusingly) flags it as already
+    existing on the very next render."""
     uploaded_file = st.file_uploader(f"{broker} holdings CSV", type="csv", key=f"portfolio_upload_{key_prefix}")
     if uploaded_file is None:
         return
@@ -130,6 +136,8 @@ def _render_upload_section(*, portfolio_name: str, broker: str, key_prefix: str,
         st.session_state["portfolio_cache_bust"] += 1
         st.cache_data.clear()
         st.success(f"Saved {len(records)} holding(s) from {broker} to \"{portfolio_name}\".")
+        if on_saved:
+            on_saved()
         st.rerun()
 
 
@@ -260,4 +268,5 @@ else:
                 broker=new_broker,
                 key_prefix=f"newportfolio_{new_broker}",
                 save_label="Create portfolio",
+                on_saved=lambda: st.session_state.pop("portfolio_new_name", None),
             )

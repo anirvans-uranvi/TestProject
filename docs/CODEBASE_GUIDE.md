@@ -640,6 +640,24 @@ helper for the parse → preview → manual-symbol-form → save sequence
 (parameterized by `portfolio_name`/`broker`/`key_prefix`/`save_label`, so
 the ~50 lines of shared logic isn't duplicated three times).
 
+**A real bug found here**: right after successfully creating a portfolio
+from the "+ New portfolio" tab, that same tab immediately (and on the
+face of it, correctly) flagged the name it had *just* created as already
+existing — confirmed live: creating "Dhan Corporate" succeeded (the tab
+appeared), but the "+ New portfolio" tab then showed `A portfolio named
+"Dhan Corporate" already exists`. The cause: `st.text_input("Portfolio
+name", key="portfolio_new_name", ...)` keeps its typed value in
+`st.session_state` across Streamlit's `st.rerun()`, so after the save the
+widget still held the name just used, and `portfolio_names` on the next
+render now legitimately included it too — the collision check
+(correctly!) matched. Fixed with an optional `on_saved` callback on
+`_render_upload_section()`, run right before its `st.rerun()`; the "+ New
+portfolio" call site passes `on_saved=lambda:
+st.session_state.pop("portfolio_new_name", None)`, so the field resets to
+blank on the next render instead of re-showing what was just created. The
+`_render_portfolio_tab()`/first-portfolio call sites don't need this —
+their name isn't user-editable text that could re-collide with itself.
+
 **Deleting a portfolio** (`portfolio_repo.delete_portfolio(client,
 user_id, portfolio_name)`) — an unconditional delete of every row for
 `(user_id, portfolio_name)`, every broker within it, leaving every other
