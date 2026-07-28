@@ -587,19 +587,24 @@ load's batch, and any row falling short gets a small muted "as of
 displayed, never for a symbol with no price at all.
 
 **CC ROI / Assignment ROI** (per-holding covered-call suggestion): a
-"Covered call expiry" dropdown (Near/Next/Far month, defaulting to Near)
-sits above the tabs and applies to every portfolio. For each stock held,
-the strike targeted depends on whether the position is under water: if
-your average buy price is above the current LTP, it targets ~3% above
-your average buy price; otherwise (at or above breakeven) it targets ~5%
-above LTP -- picking whichever listed strike is nearest that target.
-**CC ROI** is the premium from writing 1 lot of that call, as a
-percentage of your full position's investment. **Assignment ROI** is the
-total return if the whole position were closed out at that strike
-(plus that lot's premium), relative to your original cost basis. Both
-show "N/A" for a holding with no listed options (ETFs/funds, or a
-non-Nifty50 stock with no derivatives) or fewer expiries than the
-selected month.
+"Covered call expiry" dropdown sits above the tabs and applies to every
+portfolio. Its choices are the actual nearest 3 monthly expiry dates
+(e.g. "Jul 2026", "Aug 2026", "Sep 2026"), taken live from the system
+rather than a fixed Near/Next/Far label, so they always match whatever
+NSE's current monthly contracts are. For each stock held, the strike
+targeted depends on whether the position is under water: if your average
+buy price is above the current LTP, it targets ~3% above your average
+buy price; otherwise (at or above breakeven) it targets ~5% above LTP --
+picking whichever listed strike is nearest that target. **CC ROI** is the
+premium from writing 1 lot of that call, as a percentage of your full
+position's investment. **Assignment ROI** is the total return if the
+whole position were closed out at that strike (plus that lot's premium),
+relative to your original cost basis. Both show "N/A" for a holding with
+no listed options (ETFs/funds, or a non-Nifty50 stock with no
+derivatives) or no contract for the selected expiry date. Each row also
+has a 🔍 button that opens the stock in Stock Detail, shown only for
+current Nifty50 constituents (the only symbols that page's picker knows
+about).
 
 ## Docker
 

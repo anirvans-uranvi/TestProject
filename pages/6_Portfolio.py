@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date
 
 import streamlit as st
@@ -11,8 +12,6 @@ from src.services import fo_service, portfolio_service
 from src.utils.formatting import format_inr, format_pct
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.ui import inject_global_styles, render_disclaimer, render_pill, render_screener_table, render_stat_grid
-
-CC_TERM_LABELS = ["Near month", "Next month", "Far month"]
 
 st.set_page_config(page_title="Portfolio | Nifty 50 Screener", page_icon="\U0001f4bc", layout="wide")
 require_login()  # already injects Tailwind + the light-theme CSS design system
@@ -36,6 +35,17 @@ def _load_holdings(_client, _user_id: str, _cache_bust: int):
 @st.cache_data(ttl=300, show_spinner=False)
 def _load_all_companies(_client, _cache_bust: int):
     return companies_repo.list_all_companies(_client)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_constituent_symbols(_client, _cache_bust: int) -> set[str]:
+    """Current Nifty50 constituents only -- pages/2_Stock_Detail.py's own
+    symbol picker is scoped to this same set, so a "view detail" link for
+    any other portfolio symbol (an ETF, or a non-Nifty50 stock like
+    Hindustan Zinc) would silently land on whatever stock happens to be
+    first alphabetically instead of the one clicked. Gating the search
+    icon on membership here avoids that footgun."""
+    return {c.symbol for c in companies_repo.list_current_constituents(_client)}
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -76,6 +86,12 @@ def _fmt_qty(value: float) -> str:
     if value == int(value):
         return f"{int(value):,}"
     return f"{value:,.2f}"
+
+
+def _slug(text: str) -> str:
+    """CSS-class-safe form of an arbitrary portfolio name, for the
+    `st-key-*` selectors the search-icon column's CSS scoping relies on."""
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "x"
 
 
 def _render_upload_section(
@@ -155,12 +171,16 @@ def _render_upload_section(
         st.rerun()
 
 
-def _load_covered_calls(symbols: tuple[str, ...], term_index: int) -> dict[str, dict | None]:
+def _load_covered_calls(symbols: tuple[str, ...], expiry_iso: str | None) -> dict[str, dict | None]:
     """Best-effort per-symbol covered-call chain lookup for the selected
-    term (near/next/far) -- returns {} entirely if the F&O tables aren't
-    migrated yet, and skips (rather than errors on) any individual symbol
-    with no F&O data at all (ETFs, ex-Nifty50 stocks) or fewer expiries
-    than the selected term."""
+    expiry -- returns {} entirely if the F&O tables aren't migrated yet
+    (or no expiry is selected), and skips (rather than errors on) any
+    individual symbol with no F&O data at all (ETFs, ex-Nifty50 stocks) or
+    that doesn't have a contract for this exact expiry date (matched by
+    actual date, not position, since NSE monthly expiries occasionally
+    drift out of alignment across symbols)."""
+    if expiry_iso is None:
+        return {}
     try:
         expiries_by_symbol = _load_option_expiries(client, symbols, st.session_state["portfolio_cache_bust"])
     except APIError:
@@ -168,10 +188,8 @@ def _load_covered_calls(symbols: tuple[str, ...], term_index: int) -> dict[str, 
 
     chains: dict[str, dict | None] = {}
     for symbol in symbols:
-        expiries = expiries_by_symbol.get(symbol) or []
-        if len(expiries) <= term_index:
+        if expiry_iso not in (expiries_by_symbol.get(symbol) or []):
             continue
-        expiry_iso = expiries[term_index]
         try:
             chains[symbol] = {
                 "rows": _load_option_chain(client, symbol, expiry_iso, st.session_state["portfolio_cache_bust"]),
@@ -182,7 +200,9 @@ def _load_covered_calls(symbols: tuple[str, ...], term_index: int) -> dict[str, 
     return chains
 
 
-def _render_portfolio_tab(portfolio_name: str, holdings_for_portfolio: list, cc_term_index: int) -> None:
+def _render_portfolio_tab(
+    portfolio_name: str, holdings_for_portfolio: list, cc_expiry_iso: str | None, constituent_symbols: set[str]
+) -> None:
     """Holdings table (merged across brokers within this one portfolio)
     plus this portfolio's own upload section -- everything a tab shows."""
     raw_rows = [
@@ -201,7 +221,7 @@ def _render_portfolio_tab(portfolio_name: str, holdings_for_portfolio: list, cc_
     rows, totals = portfolio_service.compute_portfolio_view(merged, ltp_by_symbol)
     rows.sort(key=lambda r: r["investment"], reverse=True)
 
-    cc_chains = _load_covered_calls(symbols, cc_term_index)
+    cc_chains = _load_covered_calls(symbols, cc_expiry_iso)
     cc_by_symbol: dict[str, dict | None] = {}
     for r in rows:
         symbol = r["symbol"]
@@ -246,7 +266,45 @@ def _render_portfolio_tab(portfolio_name: str, holdings_for_portfolio: list, cc_
                 "Assignment ROI": format_pct(cc["assignment_roi_pct"]) if cc and cc["assignment_roi_pct"] is not None else "N/A",
             }
         )
-    st.markdown(render_screener_table(table_rows, user_settings.theme), unsafe_allow_html=True)
+
+    # A slim native-widget column of "open detail" buttons sits beside the
+    # table, same pattern (and same reasoning -- render_screener_table is
+    # hand-rendered HTML with no way to trigger a same-session page
+    # switch) as pages/1_Dashboard.py. Gated to current Nifty50
+    # constituents since that's Stock Detail's own symbol universe --
+    # see _load_constituent_symbols's docstring.
+    table_col, link_col = st.columns([30, 1])
+    with table_col:
+        st.markdown(render_screener_table(table_rows, user_settings.theme), unsafe_allow_html=True)
+    with link_col:
+        container_key = f"portfolio-stock-links-{_slug(portfolio_name)}"
+        st.markdown(
+            f"""
+            <style>
+            .st-key-{container_key}.stVerticalBlock {{ gap: 0rem !important; }}
+            .st-key-{container_key} div[data-testid="stElementContainer"] {{ margin: 0; }}
+            .st-key-{container_key} button {{
+                height: 2.04rem; min-height: 2.04rem; width: 100%;
+                padding: 0; display: flex; align-items: center; justify-content: center;
+            }}
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        with st.container(key=container_key):
+            st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
+            for i, r in enumerate(rows):
+                symbol = r["symbol"]
+                if symbol and symbol in constituent_symbols:
+                    if st.button(
+                        "\U0001f50d",
+                        key=f"portfolio_open_detail_{portfolio_name}_{i}_{symbol}",
+                        help=f"Open {symbol} in Stock Detail",
+                    ):
+                        st.session_state["selected_symbol"] = symbol
+                        st.switch_page("pages/2_Stock_Detail.py")
+                else:
+                    st.markdown("<div style='height:2.04rem'></div>", unsafe_allow_html=True)
 
     st.divider()
     st.subheader("Upload holdings")
@@ -332,22 +390,47 @@ else:
     elif _pending_active_tab:
         st.session_state["portfolio_active_tab"] = _pending_active_tab
 
-    cc_term_label = st.selectbox(
-        "Covered call expiry",
-        CC_TERM_LABELS,
-        key="portfolio_cc_term",
-        help=(
-            "Which monthly expiry the CC ROI / Assignment ROI columns below use. "
-            "If avg buy price is above LTP, the strike targeted is ~3% above avg buy price; "
-            "otherwise it's ~5% above LTP."
-        ),
-    )
-    cc_term_index = CC_TERM_LABELS.index(cc_term_label)
+    # Options for the dropdown are the actual expiry dates present, taken
+    # live from the system (option_contracts) rather than a fixed "Near
+    # month" style label -- these shift every month as monthly contracts
+    # expire and new ones are listed, so a hardcoded label would drift out
+    # of sync with what's actually being priced. Union across every
+    # symbol held anywhere in this account (not just the active tab) so
+    # switching tabs never resets the choice.
+    all_portfolio_symbols = tuple(sorted({h.symbol for h in saved_holdings if h.symbol}))
+    constituent_symbols = _load_constituent_symbols(client, st.session_state["portfolio_cache_bust"])
+    try:
+        all_expiries_by_symbol = _load_option_expiries(
+            client, all_portfolio_symbols, st.session_state["portfolio_cache_bust"]
+        )
+    except APIError:
+        all_expiries_by_symbol = {}
+    cc_expiry_options = sorted({d for expiries in all_expiries_by_symbol.values() for d in expiries})[:3]
+
+    if cc_expiry_options:
+        if st.session_state.get("portfolio_cc_expiry") not in cc_expiry_options:
+            st.session_state["portfolio_cc_expiry"] = cc_expiry_options[0]
+        cc_expiry_iso = st.selectbox(
+            "Covered call expiry",
+            cc_expiry_options,
+            key="portfolio_cc_expiry",
+            format_func=lambda d: date.fromisoformat(d).strftime("%b %Y"),
+            help=(
+                "Which monthly expiry the CC ROI / Assignment ROI columns below use. "
+                "If avg buy price is above LTP, the strike targeted is ~3% above avg buy price; "
+                "otherwise it's ~5% above LTP."
+            ),
+        )
+    else:
+        st.selectbox("Covered call expiry", ["N/A"], disabled=True)
+        cc_expiry_iso = None
 
     tabs = st.tabs(portfolio_names + ["+ New portfolio"], key="portfolio_active_tab", on_change="rerun")
     for name, tab in zip(portfolio_names, tabs[:-1]):
         with tab:
-            _render_portfolio_tab(name, [h for h in saved_holdings if h.portfolio_name == name], cc_term_index)
+            _render_portfolio_tab(
+                name, [h for h in saved_holdings if h.portfolio_name == name], cc_expiry_iso, constituent_symbols
+            )
     with tabs[-1]:
         st.caption("Start a brand-new portfolio, separate from your existing one(s) -- nothing existing is affected.")
         new_name = st.text_input(

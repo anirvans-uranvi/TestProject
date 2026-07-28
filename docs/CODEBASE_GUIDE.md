@@ -879,17 +879,29 @@ buy price, not just the spot price:
   derivatives, like VAML).
 
 `pages/6_Portfolio.py` renders one shared "Covered call expiry" selectbox
-(`Near month`/`Next month`/`Far month`, defaulting to Near) above the
-tabs, applying uniformly across every portfolio. For each row's symbol,
-`fo_repo.list_option_expiries(client, symbol)` gives that symbol's own
-sorted list of open expiries; the selected term picks index 0/1/2 from
-it (a symbol with fewer expiries than the selected term, or none at all,
-just gets "N/A" for that row) -- `fo_repo.get_option_chain(client,
-symbol, expiry_date)` then supplies the CE rows `covered_call_for_holding`
-needs. Both are wrapped in `_load_covered_calls`, cached via
+above the tabs, applying uniformly across every portfolio. Its options
+are real expiry dates, not fixed "Near/Next/Far" labels: it unions
+`fo_repo.list_option_expiries(client, symbol)` across every symbol held
+anywhere in the account, sorts the distinct dates, and keeps the nearest
+3 -- formatted `%b %Y` (e.g. "Jul 2026") the same way the Dashboard's
+"Options month" selectbox already does, so the choices always reflect
+whatever NSE's current monthly contracts actually are instead of drifting
+out of sync as months roll over. The selected date is matched against
+each row's *own* expiry list by actual date (not position index) before
+`fo_repo.get_option_chain(client, symbol, expiry_date)` supplies the CE
+rows `covered_call_for_holding` needs -- a symbol missing a contract for
+that exact date (or with no F&O data at all) just gets "N/A" for that
+row. Both lookups are wrapped in `_load_covered_calls`, cached via
 `st.cache_data` and tolerant of `APIError` (F&O tables not migrated yet
 degrades the whole feature to "N/A" rather than crashing the page) the
 same way every other Portfolio-page query already is.
+
+Each row also gets a 🔍 button (`_load_constituent_symbols`, gated to
+current Nifty50 constituents -- `pages/2_Stock_Detail.py`'s own symbol
+picker doesn't know about portfolio-only ETFs/non-Nifty50 stocks, so
+linking to it for those would silently open the wrong stock) that sets
+`st.session_state["selected_symbol"]` and switches to Stock Detail,
+mirroring the identical pattern already used on the Dashboard.
 
 ## Auth: a non-obvious quirk
 
