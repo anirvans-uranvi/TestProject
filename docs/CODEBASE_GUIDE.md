@@ -365,7 +365,29 @@ All four use the shared-market-data RLS pattern from `0002` (authenticated
 read; writes only via the service-role key, which bypasses RLS). `is_open`
 can't be derived from any single file (a contract appears in the bhavcopy
 only while live, so expiry ≥ that file's date always holds); it's finalized
-against the real calendar once per run by `fo_repo.refresh_open_flags`.
+against the real calendar once per run by `fo_repo.refresh_open_flags` --
+every newly-upserted contract row defaults to `is_open: true` at insert
+time (both the Python parser and its TypeScript port), so this
+finalization step is what actually closes out anything whose expiry has
+since passed.
+
+**A real incident this caused**: `scripts/fetch_fo_data.py --days 60`
+calls `refresh_open_flags` exactly once, *after* its whole oldest→newest
+ingest loop finishes -- so a run that dies partway through (confirmed
+live: a transient Cloudflare 502 from Supabase's own REST endpoint,
+mid-backfill) never reaches it at all. The already-ingested days aren't
+lost (each `ingest_fo_day` call commits independently), but every contract
+that run inserted stays `is_open: true` forever, including ones for
+expiries the backfill deliberately reached back through that have since
+passed (e.g. a 60-day backfill run in late July surfaces April/May/June
+expiries, all of which are stale by then) -- so the Options screen's
+futures/option-chain tables start showing long-expired contracts
+alongside the real current ones, with no error anywhere to flag it. Fixed
+by simply calling `fo_repo.refresh_open_flags(client, date.today())`
+directly (safe to run any time, fully idempotent) rather than re-running
+the whole backfill. If you see stale expiries on the Options screen after
+a `fetch_fo_data.py` run, check whether it actually completed (its final
+log line is `F&O ingest complete: ...`) before assuming it's a data bug.
 
 **Code layout:**
 - `src/models/fo.py` — the four Pydantic models; `OptionType` (CE/PE) in

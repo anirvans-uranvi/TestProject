@@ -507,7 +507,14 @@ each run). `scripts/seed_mock_data.py` also seeds ~30 days of synthetic
 F&O so the Options screen works locally with no network. This is
 **end-of-day** data (NSE publishes the file ~6pm IST after close); re-run
 the script daily (or via the same schedulers as the cash data) to keep it
-current — see [Limitations](#limitations).
+current — see [Limitations](#limitations). A large `--days N` backfill
+only recalculates which contracts count as expired (`is_open`) once, at
+the very end -- if the run dies partway through (a transient network
+error, say), re-run it (or just call `fo_repo.refresh_open_flags`
+directly) rather than assuming the already-ingested days are somehow
+broken; otherwise already-expired contracts from those days can be left
+showing as open on the Options screen. See `docs/CODEBASE_GUIDE.md`'s
+Futures & Options section for the full incident this caused.
 
 Day-to-day, once the initial backfill is done, the Dashboard's **📊 F&O
 Data Refresh** button (see [On-demand refresh](#on-demand-refresh-dashboard-refresh-buttons)
