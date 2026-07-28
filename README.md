@@ -477,6 +477,16 @@ option legs). The table originally only showed the nearest expiry's
 numbers before being extended to all three months to match 5% CSP's
 table.
 
+If you hold this stock in one of your own saved portfolios, a third
+**"Portfolio CC"** table appears below 5% CC (silently absent otherwise)
+-- the same per-holding covered-call figure as the Portfolio page's own
+"CC ROI"/"Assignment ROI" columns (avg-buy-price-vs-LTP-dependent target,
+nearest strike, not 5% CC's fixed-5%-OTM floor), so the numbers always
+match that page for this exact stock. One table per named portfolio that
+holds it, each showing its own qty/avg price plus Strike/Premium/Trade
+Date/Invested Amount/CC ROI/Assignment ROI for the near, next, and far
+monthly expiries.
+
 The Dashboard's own **5% CSP** / **5% CC** columns read from a small
 precomputed cache table (`dashboard_fo_metrics`, migration `0011`, keyed
 by `(symbol, expiry_date)` -- up to 3 rows per symbol, near/next/far)

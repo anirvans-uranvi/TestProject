@@ -8,7 +8,7 @@ import streamlit as st
 from postgrest.exceptions import APIError
 
 from src.repositories import companies_repo, fo_repo, portfolio_repo, settings_repo, snapshot_repo
-from src.services import fo_service
+from src.services import fo_service, portfolio_service
 from src.utils.formatting import format_inr, format_pct
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.ui import inject_global_styles, plotly_template, render_disclaimer, render_stat_grid
@@ -29,6 +29,12 @@ def _fmt_int(value) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return "—"
     return f"{int(value):,}"
+
+
+def _fmt_qty(value: float) -> str:
+    if value == int(value):
+        return f"{int(value):,}"
+    return f"{value:,.2f}"
 
 
 # ---------------------------------------------------------------------
@@ -246,3 +252,75 @@ else:
             }
         )
     st.dataframe(pd.DataFrame(cc_term_rows), use_container_width=True, hide_index=True)
+
+# ---------------------------------------------------------------------
+# Portfolio CC -- only shown when the signed-in user actually holds this
+# stock in at least one of their own saved portfolios (silently absent
+# otherwise, unlike 5% CSP/CC above which always render). Mirrors
+# fo_service.covered_call_for_holding -- the same per-holding formula
+# behind the Portfolio page's own "CC ROI"/"Assignment ROI" columns
+# (avg-buy-price-vs-LTP-dependent target, nearest-strike, not the fixed
+# 5%-OTM floor-filtered target 5% CC above uses) -- so the numbers here
+# always agree with that page for this exact stock. Tolerant of
+# portfolio_holdings not existing yet (migration 0012).
+# ---------------------------------------------------------------------
+try:
+    all_holdings = portfolio_repo.list_holdings(client, user_id)
+except APIError:
+    all_holdings = []
+
+holdings_for_symbol = [h for h in all_holdings if h.symbol == symbol]
+if holdings_for_symbol:
+    st.divider()
+    st.subheader("Portfolio CC")
+    st.caption(
+        "The covered-call suggestion from your own Portfolio page's \"CC ROI\" / "
+        "\"Assignment ROI\" columns for this stock, broken out by monthly expiry. "
+        "Uses each holding's own avg buy price and quantity, not a fixed 5% OTM "
+        "target off spot: if avg buy price is above the last traded price, the "
+        "strike targeted is ~3% above avg buy price; otherwise it's ~5% above the "
+        "last traded price -- picking whichever listed strike is nearest that "
+        "target (not floor-filtered, unlike 5% CC above)."
+    )
+    if cash_spot is None or not expiries:
+        st.info("Not enough option data to compute Portfolio CC.")
+    else:
+        term_labels = ["Near month", "Next month", "Far month"]
+        for portfolio_name in sorted({h.portfolio_name for h in holdings_for_symbol}):
+            raw_rows = [
+                {
+                    "raw_name": h.raw_name,
+                    "symbol": h.symbol,
+                    "qty": h.qty,
+                    "avg_price": h.avg_price,
+                    "investment": h.investment,
+                }
+                for h in holdings_for_symbol
+                if h.portfolio_name == portfolio_name
+            ]
+            holding = portfolio_service.merge_holdings(raw_rows)[0]
+            qty, avg_price = holding["qty"], holding["avg_price"]
+
+            st.markdown(f"**{portfolio_name}** -- {_fmt_qty(qty)} shares @ {format_inr(avg_price)} avg")
+            portfolio_cc_rows = []
+            for label, exp in zip(term_labels, expiries[:3]):
+                exp_cc = fo_service.covered_call_for_holding(_chain_rows_for(exp), avg_price, cash_spot, qty, exp)
+                portfolio_cc_rows.append(
+                    {
+                        "Term": label,
+                        "Expiry": exp.strftime("%d %b %Y"),
+                        "Strike": format_inr(exp_cc["strike"], decimals=0) if exp_cc else "N/A",
+                        "Premium": format_inr(exp_cc["premium_per_share"])
+                        if exp_cc and exp_cc["premium_per_share"] is not None
+                        else "N/A",
+                        "Trade Date": (exp_cc["trade_date"] or "—") if exp_cc else "N/A",
+                        "Invested Amount": format_inr(exp_cc["invested_amount"]) if exp_cc else "N/A",
+                        "CC ROI": format_pct(exp_cc["cc_roi_pct"], signed=False)
+                        if exp_cc and exp_cc["cc_roi_pct"] is not None
+                        else "N/A",
+                        "Assignment ROI": format_pct(exp_cc["assignment_roi_pct"])
+                        if exp_cc and exp_cc["assignment_roi_pct"] is not None
+                        else "N/A",
+                    }
+                )
+            st.dataframe(pd.DataFrame(portfolio_cc_rows), use_container_width=True, hide_index=True)
