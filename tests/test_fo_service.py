@@ -229,8 +229,10 @@ class TestCc5PctMap:
     def test_computes_cc_pct_and_assignment_profit_pct(self):
         result = fo_service.cc_5pct_map(self._rows(), {"RELIANCE": 1000.0})
         assert abs(result["RELIANCE"]["premium"] - 15.0) < 1e-9
+        assert abs(result["RELIANCE"]["gross_investment"] - 1000.0) < 1e-9
+        assert abs(result["RELIANCE"]["net_investment"] - 985.0) < 1e-9  # 1000 - 15
         assert abs(result["RELIANCE"]["cc_pct"] - (15.0 / 1000.0 * 100)) < 1e-9
-        assert abs(result["RELIANCE"]["assignment_profit_pct"] - (15.0 / 50.0 * 100)) < 1e-9
+        assert abs(result["RELIANCE"]["assignment_profit_pct"] - ((1050.0 / 985.0 - 1) * 100)) < 1e-9
 
     def test_restricts_to_nearest_expiry_only(self):
         # far-expiry leg is priced at 999 -- if it leaked in, premium
@@ -282,10 +284,25 @@ class TestCc5PctForRows:
         result = fo_service.cc_5pct_for_rows(rows, spot=1000.0, expiry_date="2026-07-28")
         assert result["strike"] == 1050.0
         assert result["premium"] == 15.0
+        assert abs(result["gross_investment"] - 1000.0) < 1e-9
+        assert abs(result["net_investment"] - 985.0) < 1e-9  # 1000 - 15
         assert abs(result["cc_pct"] - (15.0 / 1000.0 * 100)) < 1e-9
-        assert abs(result["assignment_profit_pct"] - (15.0 / 50.0 * 100)) < 1e-9
+        assert abs(result["assignment_profit_pct"] - ((1050.0 / 985.0 - 1) * 100)) < 1e-9
         assert result["spot"] == 1000.0
         assert result["expiry_date"] == "2026-07-28"
+
+    def test_picks_lowest_strike_at_or_above_5pct_otm_not_merely_nearest(self):
+        # spot 1000 -> target 1050. 1040 is nearer to target in absolute
+        # distance (10 vs 30) but falls BELOW the 5% OTM line, so it must
+        # lose to 1080 -- the lowest strike that actually clears "5% or
+        # more OTM".
+        rows = [
+            {"symbol": "RELIANCE", "option_type": "CE", "strike_price": 1040.0, "expiry_date": "2026-07-28", "last_price": 20.0},
+            {"symbol": "RELIANCE", "option_type": "CE", "strike_price": 1080.0, "expiry_date": "2026-07-28", "last_price": 8.0},
+        ]
+        result = fo_service.cc_5pct_for_rows(rows, spot=1000.0, expiry_date="2026-07-28")
+        assert result["strike"] == 1080.0
+        assert result["premium"] == 8.0
 
     def test_echoes_back_the_expiry_date_argument_not_a_row_field(self):
         rows = [{"symbol": "RELIANCE", "option_type": "CE", "strike_price": 1050.0, "expiry_date": "2026-08-25", "last_price": 15.0}]
@@ -299,10 +316,25 @@ class TestCc5PctForRows:
     def test_empty_rows_returns_none(self):
         assert fo_service.cc_5pct_for_rows([], spot=1000.0, expiry_date="2026-07-28") is None
 
-    def test_assignment_profit_pct_is_none_when_strike_equals_spot(self):
-        rows = [{"symbol": "RELIANCE", "option_type": "CE", "strike_price": 1000.0, "expiry_date": "2026-07-28", "last_price": 30.0}]
+    def test_falls_back_to_highest_available_strike_when_none_reach_5pct_otm(self):
+        # spot 1000 -> target 1050, but the highest strike listed is only
+        # 1000 (0% OTM) -- no strike genuinely satisfies "5% OTM or more",
+        # so the highest available strike is used instead of picking
+        # whichever is merely nearest to the unreachable target.
+        rows = [
+            {"symbol": "RELIANCE", "option_type": "CE", "strike_price": 950.0, "expiry_date": "2026-07-28", "last_price": 40.0},
+            {"symbol": "RELIANCE", "option_type": "CE", "strike_price": 1000.0, "expiry_date": "2026-07-28", "last_price": 30.0},
+        ]
         result = fo_service.cc_5pct_for_rows(rows, spot=1000.0, expiry_date="2026-07-28")
         assert result["strike"] == 1000.0
+
+    def test_assignment_profit_pct_is_none_when_premium_at_least_covers_spot(self):
+        # net_investment = gross_investment (spot) - premium; a premium
+        # this large would make net_investment <= 0, which is
+        # mathematically undefined for the assignment-profit ratio.
+        rows = [{"symbol": "RELIANCE", "option_type": "CE", "strike_price": 1050.0, "expiry_date": "2026-07-28", "last_price": 1000.0}]
+        result = fo_service.cc_5pct_for_rows(rows, spot=1000.0, expiry_date="2026-07-28")
+        assert result["net_investment"] == 0.0
         assert result["assignment_profit_pct"] is None
 
     def test_prefers_freshest_trade_date(self):

@@ -199,14 +199,17 @@ else:
 st.divider()
 st.subheader("5% CC (covered call)")
 st.caption(
-    "A covered-call yield: sell 1 lot of the call whose strike is closest to "
-    "5% above spot. **5% CC** = premium ÷ last traded price of the stock × "
-    "100 -- the yield on the stock itself, as if writing this call against "
-    "shares you already hold. **Assignment Profit** = premium ÷ (strike − "
-    "spot) × 100 -- the premium as a percentage of the extra capital gain "
-    "still available between spot and the strike, i.e. the room left before "
-    "assignment caps further upside. Shown for the near, next, and far "
-    "monthly expiries, same as 5% CSP above."
+    "A covered-call yield: sell 1 lot of the call whose strike is the "
+    "lowest one still at or above 5% above spot (not merely the nearest "
+    "strike to that line, which could round down below it). **Net "
+    "Investment** = last traded price of the stock − premium collected -- "
+    "the real capital outlay after the premium reduces it. **5% CC** = "
+    "premium ÷ last traded price × 100 -- the yield on the stock itself, "
+    "as if writing this call against shares you already hold. "
+    "**Assignment Profit** = (strike ÷ Net Investment − 1) × 100 -- the "
+    "total return of the whole covered-call trade if the shares are called "
+    "away at the strike. Shown for the near, next, and far monthly "
+    "expiries, same as 5% CSP above."
 )
 if cash_spot is None or not expiries:
     st.info("Not enough option data to compute 5% CC.")
@@ -220,9 +223,10 @@ else:
                 "Term": label,
                 "Expiry": exp.strftime("%d %b %Y"),
                 "Spot": format_inr(exp_cc["spot"]) if exp_cc else "N/A",
-                "Strike (nearest 5% above spot)": format_inr(exp_cc["strike"], decimals=0) if exp_cc else "N/A",
+                "Strike (lowest ≥5% above spot)": format_inr(exp_cc["strike"], decimals=0) if exp_cc else "N/A",
                 "Premium": format_inr(exp_cc["premium"]) if exp_cc else "N/A",
                 "Trade Date": (exp_cc["trade_date"] or "—") if exp_cc else "N/A",
+                "Net Investment": format_inr(exp_cc["net_investment"]) if exp_cc and exp_cc["net_investment"] is not None else "N/A",
                 "5% CC": format_pct(exp_cc["cc_pct"], signed=False) if exp_cc and exp_cc["cc_pct"] is not None else "N/A",
                 "Assignment Profit": format_pct(exp_cc["assignment_profit_pct"], signed=False)
                 if exp_cc and exp_cc["assignment_profit_pct"] is not None

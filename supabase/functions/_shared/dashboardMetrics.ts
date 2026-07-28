@@ -97,6 +97,8 @@ export function cspFivePct(peRows: OptionLegRow[], spot: number, expiryDate: str
 export interface CcResult {
   strike: number;
   premium: number | null;
+  grossInvestment: number;
+  netInvestment: number | null;
   ccPct: number | null;
   assignmentProfitPct: number | null;
   spot: number;
@@ -104,29 +106,50 @@ export interface CcResult {
   tradeDate: string | null;
 }
 
+function highestStrike<T extends { strikePrice: number }>(rows: T[]): T {
+  return rows.reduce((best, r) => (r.strikePrice > best.strikePrice ? r : best));
+}
+
 /** Mirrors fo_service.py::cc_5pct_for_rows -- `ceRows` should already be
  * filtered to one symbol + one expiry (any PE legs mixed in are
  * ignored). "5% CC" is a covered-call yield: sell 1 lot of the OTM call
- * whose strike is closest to 5% *above* spot (the mirror image of "5%
- * CSP"'s strike search), preferring freshest-dated strikes (see
- * freshestRows). Two percentages:
- * - ccPct = premium / spot * 100 -- yield on the stock's own price.
- * - assignmentProfitPct = premium / (strike - spot) * 100 -- premium as
- *   a fraction of the capital-gain room left before assignment caps it;
- *   null if strike === spot (undefined), not a divide-by-zero.
+ * whose strike is the *lowest one at or above* 5% above spot (`target =
+ * spot * 1.05`) -- i.e. the cheapest strike that genuinely satisfies "at
+ * least 5% OTM", not merely the strike nearest to target in absolute
+ * distance (which could round down to a strike below the 5% line).
+ * Falls back to the single highest available strike if none reach the
+ * 5% line at all. Prefers freshest-dated strikes among the candidates
+ * (see freshestRows).
+ *
+ * - grossInvestment = spot -- the cost of buying 1 share at the current
+ *   price.
+ * - netInvestment = grossInvestment - premium -- the premium collected
+ *   up front reduces the real capital outlay for the covered-call
+ *   position.
+ * - ccPct = premium / grossInvestment * 100 -- the premium alone as a
+ *   yield on the stock's own price.
+ * - assignmentProfitPct = (strike / netInvestment - 1) * 100 -- if
+ *   assigned, the seller receives `strike` per share for a position that
+ *   only cost `netInvestment` per share, so this is the total return of
+ *   the whole covered-call trade if called away; null if netInvestment
+ *   is zero or negative (premium >= spot), not a divide-by-zero.
  * Returns null if there's no priceable CE strike. */
 export function ccFivePct(ceRows: OptionLegRow[], spot: number, expiryDate: string): CcResult | null {
   const nearRows = ceRows.filter((r) => r.optionType === "CE");
   if (nearRows.length === 0) return null;
 
   const target = spot * 1.05;
-  const bestRow = nearestByStrike(freshestRows(nearRows), target);
+  const freshest = freshestRows(nearRows);
+  const otmEnough = freshest.filter((r) => r.strikePrice >= target);
+  const bestRow = otmEnough.length > 0 ? nearestByStrike(otmEnough, target) : highestStrike(freshest);
   const strike = bestRow.strikePrice;
   const premium = legPrice(bestRow);
-  const ccPct = premium !== null && spot ? (premium / spot) * 100 : null;
-  const assignmentProfitPct = premium !== null && strike !== spot ? (premium / (strike - spot)) * 100 : null;
+  const grossInvestment = spot;
+  const netInvestment = premium !== null ? grossInvestment - premium : null;
+  const ccPct = premium !== null && grossInvestment ? (premium / grossInvestment) * 100 : null;
+  const assignmentProfitPct = netInvestment !== null && netInvestment > 0 ? (strike / netInvestment - 1) * 100 : null;
 
-  return { strike, premium, ccPct, assignmentProfitPct, spot, expiryDate, tradeDate: bestRow.tradeDate };
+  return { strike, premium, grossInvestment, netInvestment, ccPct, assignmentProfitPct, spot, expiryDate, tradeDate: bestRow.tradeDate };
 }
 
 export interface DashboardMetricsRow {

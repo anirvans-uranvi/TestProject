@@ -404,20 +404,35 @@ against the real calendar once per run by `fo_repo.refresh_open_flags`.
   keeps updating daily.
 
   **"5% CC" (covered call)** is deliberately simple: sell 1 lot of the
-  OTM call whose strike is closest to **5% above** spot (the mirror
-  image of "5% CSP"'s `target = spot * 0.95` search) — no ITM leg, no PE
-  leg, just the one call. Two percentages come out of `cc_5pct_for_rows`:
-  `cc_pct` = premium ÷ spot × 100 (the covered-call yield on the stock's
-  own price — this is the value both the Dashboard and the Options
-  screen label "5% CC"), and `assignment_profit_pct` = premium ÷ (strike
-  − spot) × 100 (premium as a fraction of the capital-gain room left
-  before assignment caps further upside — shown on the Options screen
-  only, as "Assignment Profit"; `None` when strike equals spot rather
-  than dividing by zero). This replaced an earlier "5% ITM PMCC"
-  (poor-man's-covered-call: buy an ITM call, sell a PE at the same
-  strike, sell a further OTM call, net-credit ÷ ITM strike) on request —
-  if you find references to `itm_pmcc_5pct_map`/`itm_pmcc_for_rows`
-  anywhere (old commits, cached docs), that calculation no longer exists.
+  OTM call whose strike is the **lowest one still at or above 5% above
+  spot** (`target = spot * 1.05`, the mirror image of "5% CSP"'s `target
+  = spot * 0.95` search) — no ITM leg, no PE leg, just the one call.
+  **This is a strike filter, not a nearest-match**: a strike below the 5%
+  line never wins even if it happens to be closer to `target` in absolute
+  distance than every strike that actually clears it (e.g. spot 1000 →
+  target 1050: a 1040 strike loses to a 1080 strike, even though 1040 is
+  numerically closer to 1050) — falls back to the single highest
+  available strike only if none reach the 5% line at all. `cc_5pct_for_rows`
+  returns, beyond the strike/premium themselves:
+  `gross_investment` = spot (the cost of buying 1 share at the current
+  price); `net_investment` = `gross_investment − premium` (the premium
+  collected up front reduces the real capital outlay); `cc_pct` = premium
+  ÷ `gross_investment` × 100 (the covered-call yield on the stock's own
+  price — this is the value both the Dashboard and the Options screen
+  label "5% CC"); and `assignment_profit_pct` = (strike ÷ `net_investment`
+  − 1) × 100 — if assigned, the seller receives `strike` per share for a
+  position that only cost `net_investment` per share, so this is the
+  *total return of the whole covered-call trade if called away*, shown on
+  the Options screen only as "Assignment Profit" (`None` when
+  `net_investment` is zero or negative — premium ≥ spot — rather than
+  dividing by zero or a negative number). This replaced an earlier,
+  simpler formula (`assignment_profit_pct = premium ÷ (strike − spot) ×
+  100`, and strike selection was pure nearest-by-absolute-distance to
+  `target` with no "must actually be ≥5% OTM" filter) on request — if you
+  find code or docs describing that version, or an even earlier "5% ITM
+  PMCC" (poor-man's-covered-call: buy an ITM call, sell a PE at the same
+  strike, sell a further OTM call, net-credit ÷ ITM strike, exposed as
+  `itm_pmcc_5pct_map`/`itm_pmcc_for_rows`), neither exists anymore.
 - `dashboard_metrics_rows(option_rows, spot_by_symbol)` / `recompute_dashboard_metrics(client)`
   — the Dashboard's precomputed-cache write path (`dashboard_fo_metrics`,
   migration `0011`). For each symbol with a spot price and open option

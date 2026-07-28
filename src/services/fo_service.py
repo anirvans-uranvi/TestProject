@@ -249,44 +249,66 @@ def cc_5pct_for_rows(ce_rows: list[dict], spot: float, expiry_date) -> dict | No
     PE legs mixed in are ignored).
 
     "5% CC" is a covered-call yield: sell 1 lot of the OTM call whose
-    strike is closest to 5% *above* spot -- the mirror image of "5% CSP"'s
-    strike search (`target = spot * 1.05` instead of `spot * 0.95`),
-    preferring strikes with the freshest available trade_date (see
-    `_freshest_rows`, falls back to every strike at that expiry if none
-    of them carry one). Two percentages are returned:
+    strike is the *lowest one that is still at or above* 5% above spot
+    (`target = spot * 1.05`) -- i.e. the cheapest strike that genuinely
+    satisfies "at least 5% OTM", not merely the strike nearest to target
+    in absolute distance (which could round down to a strike *below* the
+    5% line if that happened to be closer). Falls back to the single
+    highest available strike if none reach the 5% line at all. Prefers
+    strikes with the freshest available trade_date among the candidates
+    (see `_freshest_rows`, falls back to every strike at that expiry if
+    none of them carry one).
 
-    - `cc_pct` = premium / spot * 100 -- the premium as a fraction of the
-      stock's own price, i.e. the yield on capital already held if
-      writing this covered call against it.
-    - `assignment_profit_pct` = premium / (strike - spot) * 100 -- the
-      premium as a fraction of the extra capital gain still available
-      between spot and the strike (the "room" before assignment caps
-      further upside); `None` if strike == spot (mathematically
-      undefined) rather than raising.
+    Two figures beyond the premium/strike themselves:
 
-    Returns `{"strike", "premium", "cc_pct", "assignment_profit_pct",
-    "spot", "expiry_date", "trade_date"}`, or `None` if there's no
-    priceable CE strike in `ce_rows`. `spot`/`expiry_date` are just the
-    inputs echoed back (same convention as `csp_5pct_for_rows`) so a
-    caller can display the calculation without separately tracking which
-    expiry/spot were used.
+    - `net_investment` = `gross_investment - premium`, where
+      `gross_investment` is just `spot` (the cost of buying 1 share at
+      the current price) -- the premium collected up front reduces the
+      seller's real capital outlay for the covered-call position.
+    - `assignment_profit_pct` = `(strike / net_investment - 1) * 100` --
+      if the call is assigned, the seller receives `strike` per share for
+      a position that only cost `net_investment` per share, so this is
+      the total return of the whole covered-call trade if called away.
+      `None` if `net_investment` is zero or negative (premium >= spot --
+      mathematically undefined/nonsensical) rather than raising.
+    - `cc_pct` = premium / gross_investment * 100 = premium / spot * 100
+      -- the premium alone as a yield on the stock's own price, i.e. the
+      yield on capital already held if writing this covered call against
+      shares bought before the premium was collected.
+
+    Returns `{"strike", "premium", "gross_investment", "net_investment",
+    "cc_pct", "assignment_profit_pct", "spot", "expiry_date",
+    "trade_date"}`, or `None` if there's no priceable CE strike in
+    `ce_rows`. `spot`/`expiry_date` are just the inputs echoed back (same
+    convention as `csp_5pct_for_rows`) so a caller can display the
+    calculation without separately tracking which expiry/spot were used.
     """
     near_rows = [r for r in ce_rows if str(r.get("option_type")) == "CE" and r.get("strike_price") is not None]
     if not near_rows:
         return None
     target = spot * 1.05
-    best_row = min(_freshest_rows(near_rows), key=lambda r: abs(_num(r["strike_price"]) - target))
+    freshest = _freshest_rows(near_rows)
+    otm_enough = [r for r in freshest if _num(r["strike_price"]) >= target]
+    best_row = (
+        min(otm_enough, key=lambda r: _num(r["strike_price"]))
+        if otm_enough
+        else max(freshest, key=lambda r: _num(r["strike_price"]))
+    )
     strike = _num(best_row["strike_price"])
     premium = _num(best_row.get("last_price")) or _num(best_row.get("close")) or _num(best_row.get("settlement_price"))
-    cc_pct = (premium / spot * 100) if (premium is not None and spot) else None
+    gross_investment = spot
+    net_investment = (gross_investment - premium) if premium is not None else None
+    cc_pct = (premium / gross_investment * 100) if (premium is not None and gross_investment) else None
     assignment_profit_pct = (
-        premium / (strike - spot) * 100
-        if (premium is not None and strike is not None and strike != spot)
+        (strike / net_investment - 1) * 100
+        if (strike is not None and net_investment is not None and net_investment > 0)
         else None
     )
     return {
         "strike": strike,
         "premium": premium,
+        "gross_investment": gross_investment,
+        "net_investment": net_investment,
         "cc_pct": cc_pct,
         "assignment_profit_pct": assignment_profit_pct,
         "spot": spot,

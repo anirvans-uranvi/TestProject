@@ -456,18 +456,26 @@ term structure and a full calculation breakdown for the Dashboard's two
 options-derived screener columns — **5% CSP** and **5% CC** — showing the
 actual strikes, premiums, and trade dates used, not just the final
 percentage -- both **5% CSP** and **5% CC** are shown as a near/next/far
-month table (CC's table also carries an "Assignment Profit" column the
-Dashboard doesn't). Open it from the Dashboard's "Open in Options →"
-section or the "View F&O / options" button on Stock Detail.
+month table (CC's table also carries "Net Investment" and "Assignment
+Profit" columns the Dashboard doesn't). Open it from the Dashboard's
+"Open in Options →" section or the "View F&O / options" button on Stock
+Detail.
 
 **5% CC** is a covered-call yield: sell 1 lot of the OTM call whose
-strike is closest to 5% above spot; `cc_pct` = premium ÷ spot × 100 (the
-yield on the stock's own price), and Assignment Profit = premium ÷
-(strike − spot) × 100 (premium as a fraction of the capital-gain room
-left before the strike caps further upside). This replaced an earlier,
-more complex "5% ITM PMCC" (poor-man's-covered-call, three option legs)
-on request, and originally only showed the nearest expiry's numbers
-before being extended to all three months to match 5% CSP's table.
+strike is the *lowest one still at or above* 5% above spot (not merely
+whichever strike is nearest to that line, which could round down below
+it). Net Investment = last traded price of the stock − premium collected
+(the real capital outlay after the premium reduces it); `cc_pct` =
+premium ÷ last traded price × 100 (the yield on the stock's own price);
+and Assignment Profit = (strike ÷ Net Investment − 1) × 100 (the total
+return of the whole covered-call trade if the shares are called away at
+the strike). This replaced an earlier, simpler formula (nearest-strike
+match with no "must actually be ≥5% OTM" filter, and Assignment Profit =
+premium ÷ (strike − spot) × 100) on request, which itself had replaced an
+even earlier, more complex "5% ITM PMCC" (poor-man's-covered-call, three
+option legs). The table originally only showed the nearest expiry's
+numbers before being extended to all three months to match 5% CSP's
+table.
 
 The Dashboard's own **5% CSP** / **5% CC** columns read from a small
 precomputed cache table (`dashboard_fo_metrics`, migration `0011`, keyed

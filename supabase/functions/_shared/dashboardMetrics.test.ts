@@ -93,16 +93,40 @@ Deno.test("ccFivePct: picks the strike nearest 5% above spot", () => {
   assertEquals(result?.premium, 15.0);
 });
 
-Deno.test("ccFivePct: computes ccPct and assignmentProfitPct", () => {
+Deno.test("ccFivePct: computes grossInvestment, netInvestment, ccPct, and assignmentProfitPct", () => {
   const result = ccFivePct(ccBaseRows(), 1000.0, EXPIRY);
+  assertEquals(result?.grossInvestment, 1000.0);
+  assertAlmostEquals(result!.netInvestment!, 985.0); // 1000 - 15
   assertAlmostEquals(result!.ccPct!, (15.0 / 1000.0) * 100);
-  assertAlmostEquals(result!.assignmentProfitPct!, (15.0 / 50.0) * 100);
+  assertAlmostEquals(result!.assignmentProfitPct!, (1050.0 / 985.0 - 1) * 100);
 });
 
-Deno.test("ccFivePct: assignmentProfitPct is null when strike equals spot", () => {
-  const rows = [leg({ optionType: "CE", strikePrice: 1000.0, lastPrice: 30.0 })];
+Deno.test("ccFivePct: picks lowest strike at or above 5% OTM, not merely nearest", () => {
+  // spot 1000 -> target 1050. 1040 is nearer to target in absolute
+  // distance (10 vs 30) but falls BELOW the 5% OTM line, so it must lose
+  // to 1080 -- the lowest strike that actually clears "5% or more OTM".
+  const rows = [
+    leg({ optionType: "CE", strikePrice: 1040.0, lastPrice: 20.0 }),
+    leg({ optionType: "CE", strikePrice: 1080.0, lastPrice: 8.0 }),
+  ];
+  const result = ccFivePct(rows, 1000.0, EXPIRY);
+  assertEquals(result?.strike, 1080.0);
+  assertEquals(result?.premium, 8.0);
+});
+
+Deno.test("ccFivePct: falls back to highest available strike when none reach 5% OTM", () => {
+  const rows = [
+    leg({ optionType: "CE", strikePrice: 950.0, lastPrice: 40.0 }),
+    leg({ optionType: "CE", strikePrice: 1000.0, lastPrice: 30.0 }),
+  ];
   const result = ccFivePct(rows, 1000.0, EXPIRY);
   assertEquals(result?.strike, 1000.0);
+});
+
+Deno.test("ccFivePct: assignmentProfitPct is null when premium at least covers spot", () => {
+  const rows = [leg({ optionType: "CE", strikePrice: 1050.0, lastPrice: 1000.0 })];
+  const result = ccFivePct(rows, 1000.0, EXPIRY);
+  assertEquals(result?.netInvestment, 0);
   assertEquals(result?.assignmentProfitPct, null);
 });
 
