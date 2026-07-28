@@ -12,6 +12,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { findLatestAvailableBhavcopy, parseFoBhavcopy, type ParsedBhavcopy } from "./bhavcopy.ts";
 import { recomputeDashboardMetrics } from "../_shared/dashboardMetrics.ts";
+import { resolveTrackedSymbols } from "../_shared/portfolioSymbols.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -140,6 +141,37 @@ Deno.serve(async (req: Request) => {
   }
   // deno-lint-ignore no-explicit-any
   const universe = new Set<string>(constituents.map((c: any) => c.symbol as string));
+
+  // Also fetch F&O for any symbol referenced by uploaded portfolios (ETFs,
+  // non-Nifty50 stocks) that has derivatives -- same widening
+  // manual-refresh already does for cash-market data, applied here so a
+  // portfolio stock like Hindustan Zinc actually gets its futures/options
+  // ingested too, not just its equity LTP. Registers a minimal companies
+  // row for any not seen before. Tolerant of the portfolio_holdings
+  // migration not being applied yet.
+  try {
+    const { data: portfolioRows } = await serviceClient
+      .from("portfolio_holdings")
+      .select("symbol, raw_name")
+      .not("symbol", "is", null);
+    if (portfolioRows && portfolioRows.length > 0) {
+      const { data: companies } = await serviceClient.from("companies").select("symbol");
+      const knownSymbols = new Set<string>((companies ?? []).map((c: any) => c.symbol as string));
+      const rawNameBySymbol: Record<string, string> = {};
+      const portfolioSymbols: string[] = [];
+      for (const row of portfolioRows as any[]) {
+        portfolioSymbols.push(row.symbol as string);
+        rawNameBySymbol[row.symbol as string] = row.raw_name as string;
+      }
+      const newCompanies = resolveTrackedSymbols(portfolioSymbols, knownSymbols, rawNameBySymbol);
+      if (newCompanies.length > 0) {
+        await serviceClient.from("companies").upsert(newCompanies, { onConflict: "symbol" });
+      }
+      for (const symbol of portfolioSymbols) universe.add(symbol);
+    }
+  } catch (err) {
+    console.error("portfolio symbol tracking skipped:", err instanceof Error ? err.message : String(err));
+  }
 
   // "Already loaded" watermark: newest trade_date across any symbol's
   // futures (options are always ingested in the same run, so they share

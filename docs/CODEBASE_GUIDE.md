@@ -449,6 +449,14 @@ against the real calendar once per run by `fo_repo.refresh_open_flags`.
   `--date`, `--mock`), run by the operator (like the other seed scripts);
   processes oldest→newest then calls `refresh_open_flags(today)`.
   `scripts/seed_mock_data.py` also seeds ~30 mock F&O days for local dev.
+  Its `universe` (which symbols the bhavcopy parse keeps) starts as the
+  current Nifty50 constituents, then widens with every distinct resolved
+  symbol across all users' `portfolio_holdings` -- same pattern
+  `scripts/run_refresh.py` already uses for cash-market data (registering
+  a minimal `companies` row for any not seen before), applied here too so
+  a portfolio-only stock like Hindustan Zinc actually gets its
+  futures/options ingested, not just its equity LTP. Tolerant of
+  `portfolio_holdings` not existing yet (migration `0012`).
 
 **On-demand refresh**: the Dashboard's "📊 F&O Data Refresh" button hits a
 second Edge Function, `supabase/functions/fo-refresh/` (see the Edge
@@ -458,6 +466,11 @@ actually published something newer than what's already loaded (checked via
 `max(trade_date)` in `futures_daily_prices`), so a click when nothing's
 new is a cheap read-only no-op rather than a silent re-fetch. It has no
 external zip-library dependency — see the Edge Functions section for why.
+Its `universe` set gets the identical portfolio-symbol widening as
+`fetch_fo_data.py` above (mirrored in TypeScript via the same
+`resolveTrackedSymbols`/`portfolioSymbols.ts` helper `manual-refresh`
+already uses), so a symbol newly tracked from a portfolio upload starts
+getting its F&O data via this button too, not just a manual backfill run.
 
 **Dashboard cache (`dashboard_fo_metrics`, migration `0011`)**: the
 Dashboard used to compute its "5% CSP"/"5% CC" columns live, on every

@@ -554,14 +554,19 @@ live fetch triggered by this page. The app's `companies`/
 `daily_screener_snapshots` tables normally only cover the 50 Nifty
 constituents, so ETFs, gilt/liquid funds, and non-Nifty50 stocks show
 "N/A" for LTP/Cur Val/P&L/P&L% right after upload. Once a symbol is
-resolved (matched automatically or entered manually), both refresh paths
-(`scripts/run_refresh.py` and the `manual-refresh` Edge Function) start
-tracking it: they read the distinct symbols across every user's
-`portfolio_holdings`, register a minimal `companies` row for any not
-already known, and fold them into the same price/fundamentals/screener
-fetch every Nifty50 symbol already gets. `nifty50_constituents` is never
-touched by this, so portfolio-only symbols never become an official
-constituent -- Alerts still reads from `companies_repo.list_current_constituents`
+resolved (matched automatically or entered manually), all four refresh
+paths -- `scripts/run_refresh.py`, the `manual-refresh` Edge Function
+(equity), and `scripts/fetch_fo_data.py`/the `fo-refresh` Edge Function
+(futures & options) -- start tracking it: each reads the distinct
+symbols across every user's `portfolio_holdings`, registers a minimal
+`companies` row for any not already known, and folds them into the same
+price/fundamentals/screener (or F&O bhavcopy) fetch every Nifty50 symbol
+already gets. So a portfolio stock with listed derivatives (like
+Hindustan Zinc or IndusInd Bank) gets both its equity LTP *and* its
+futures/options chain populated, purely from being uploaded and resolved
+-- no separate step needed. `nifty50_constituents` is never touched by
+this, so portfolio-only symbols never become an official constituent --
+Alerts still reads from `companies_repo.list_current_constituents`
 (a plain `nifty50_constituents` query), so its "Applies to" symbol list
 stays Nifty50-only. The Dashboard, Stock Detail, and Options all widen
 their own symbol universe with the *viewing* user's own portfolio

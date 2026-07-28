@@ -22,6 +22,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import requests
+from postgrest.exceptions import APIError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -30,6 +31,7 @@ from src.data_providers.mock_provider import MockFOProvider  # noqa: E402
 from src.data_providers.nse_fo_provider import FOBhavcopy  # noqa: E402
 from src.repositories import companies_repo, fo_repo  # noqa: E402
 from src.repositories.supabase_client import get_service_client  # noqa: E402
+from src.services import portfolio_service  # noqa: E402
 from src.services.fo_service import ingest_fo_day, recompute_dashboard_metrics  # noqa: E402
 from src.utils.logging import get_logger  # noqa: E402
 
@@ -79,6 +81,30 @@ def main() -> None:
     if not universe:
         logger.warning("No constituents found -- apply supabase/seed.sql first")
         return
+
+    # Also fetch F&O for any symbol referenced by uploaded portfolios (ETFs,
+    # non-Nifty50 stocks) that has derivatives -- same widening
+    # scripts/run_refresh.py already does for cash-market data, applied
+    # here so a portfolio stock like Hindustan Zinc actually gets its
+    # futures/options ingested too, not just its equity LTP. Registers a
+    # minimal companies row for any not seen before. Tolerant of the
+    # portfolio_holdings migration not being applied yet.
+    try:
+        portfolio_rows = (
+            client.table("portfolio_holdings").select("symbol, raw_name").not_.is_("symbol", "null").execute().data
+            or []
+        )
+    except APIError:
+        portfolio_rows = []
+    if portfolio_rows:
+        known_symbols = {c.symbol for c in companies_repo.list_all_companies(client)}
+        raw_name_by_symbol = {r["symbol"]: r["raw_name"] for r in portfolio_rows}
+        portfolio_symbols = [r["symbol"] for r in portfolio_rows]
+        new_companies = portfolio_service.resolve_tracked_symbols(portfolio_symbols, known_symbols, raw_name_by_symbol)
+        if new_companies:
+            companies_repo.upsert_companies(client, new_companies)
+            logger.info("portfolio tracking: registered %d new symbol(s)", len(new_companies))
+        universe = universe | set(portfolio_symbols)
 
     end = date.fromisoformat(args.date) if args.date else date.today()
     days = 1 if args.date else args.days
