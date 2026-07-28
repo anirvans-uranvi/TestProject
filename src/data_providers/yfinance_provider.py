@@ -19,6 +19,7 @@ real ex-dividend dates.
 """
 from __future__ import annotations
 
+import math
 import threading
 import time
 from datetime import date, datetime, timedelta
@@ -50,6 +51,23 @@ def _throttle() -> None:
 
 def _yf_symbol(symbol: str) -> str:
     return f"{symbol}.NS"
+
+
+def _finite(value: object) -> float | None:
+    """yfinance derives some ratios (e.g. trailingPE = price / trailingEps)
+    itself rather than passing through a value Yahoo's API already
+    computed, so a near-zero denominator can surface as Infinity/-Infinity/
+    NaN (seen for VAML: Vedanta Aluminium Metal Limited, newly listed with
+    trailingEps == 0.0). Postgres's `numeric` columns can't necessarily
+    store that, and worse, Python's `json.dumps` renders it as the bare
+    token `Infinity`/`NaN` -- not valid JSON -- which breaks the upsert
+    with an APIError that isn't a ProviderError, silently aborting the
+    rest of that day's (alphabetically-sorted) fundamentals refresh loop
+    for every symbol after this one. Treat as missing instead."""
+    if not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
 
 
 _retry_yf_call = retry(
@@ -147,12 +165,12 @@ class YFinanceFundamentalsProvider(FundamentalsDataProvider):
         return FundamentalSnapshot(
             symbol=symbol,
             as_of_date=as_of,
-            pe_ratio=info.get("trailingPE"),
-            peg_ratio=info.get("pegRatio") or info.get("trailingPegRatio"),
-            eps=info.get("trailingEps"),
-            market_cap=info.get("marketCap"),
-            week_52_high=info.get("fiftyTwoWeekHigh"),
-            week_52_low=info.get("fiftyTwoWeekLow"),
+            pe_ratio=_finite(info.get("trailingPE")),
+            peg_ratio=_finite(info.get("pegRatio") or info.get("trailingPegRatio")),
+            eps=_finite(info.get("trailingEps")),
+            market_cap=_finite(info.get("marketCap")),
+            week_52_high=_finite(info.get("fiftyTwoWeekHigh")),
+            week_52_low=_finite(info.get("fiftyTwoWeekLow")),
             source=self.name,
             is_stale=False,
         )

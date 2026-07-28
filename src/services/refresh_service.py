@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
+from postgrest.exceptions import APIError
 from supabase import Client
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -72,7 +73,16 @@ def refresh_intraday_prices(client: Client, symbols: list[str], provider: PriceD
             adjusted_close=quote.latest_price,
             source=quote.source,
         )
-        price_repo.upsert_price_history(client, [point])
+        try:
+            price_repo.upsert_price_history(client, [point])
+        except APIError as exc:
+            # A bad value for one symbol (e.g. a non-finite ratio a
+            # provider computed itself) must not abort every symbol after
+            # it in this loop -- see the matching guard in
+            # refresh_fundamentals() below for the full story.
+            _log(client, provider.name, FetchType.INTRADAY_PRICE, symbol, started, str(exc))
+            failed.append(symbol)
+            continue
         _log(client, provider.name, FetchType.INTRADAY_PRICE, symbol, started, None)
     return failed
 
@@ -93,7 +103,7 @@ def refresh_eod_prices(
             points = _retry_provider_call(provider.get_historical_daily)(symbol, from_date, as_of)
             price_repo.upsert_price_history(client, points)
             _log(client, provider.name, FetchType.PRICE, symbol, started, None)
-        except ProviderError as exc:
+        except (ProviderError, APIError) as exc:
             _log(client, provider.name, FetchType.PRICE, symbol, started, str(exc))
             failed.append(symbol)
     return failed
@@ -115,7 +125,13 @@ def refresh_fundamentals(
             if snapshot is not None:
                 fundamentals_repo.upsert_fundamental_snapshot(client, snapshot)
             _log(client, provider.name, FetchType.FUNDAMENTALS, symbol, started, None)
-        except ProviderError as exc:
+        except (ProviderError, APIError) as exc:
+            # APIError (not just ProviderError) must be caught here: a bad
+            # value for one symbol's upsert (e.g. VAML's yfinance-derived
+            # trailingPE coming back as Infinity, which serializes to the
+            # invalid JSON token `Infinity` and gets rejected by PostgREST)
+            # must not silently abort every symbol after it in this
+            # alphabetically-sorted loop for the rest of the run.
             _log(client, provider.name, FetchType.FUNDAMENTALS, symbol, started, str(exc))
             failed.append(symbol)
             continue
@@ -125,7 +141,7 @@ def refresh_fundamentals(
             events = _retry_provider_call(provider.get_dividend_history)(symbol, dividend_from, as_of)
             dividends_repo.upsert_dividend_events(client, events)
             _log(client, provider.name, FetchType.DIVIDEND, symbol, started, None)
-        except ProviderError as exc:
+        except (ProviderError, APIError) as exc:
             _log(client, provider.name, FetchType.DIVIDEND, symbol, started, str(exc))
             failed.append(symbol)
     return failed
