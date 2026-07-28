@@ -7,6 +7,8 @@ screen renders, so they're unit-testable without Streamlit or a live DB.
 """
 from __future__ import annotations
 
+from datetime import date
+
 from supabase import Client
 
 from src.data_providers.nse_fo_provider import FOBhavcopy
@@ -474,10 +476,18 @@ def recompute_dashboard_metrics(client: Client) -> int:
     `latest_screener_view`, open option legs from
     `latest_option_chain_view`) and writes the result (up to 3 rows per
     symbol, one per near/next/far expiry) so the Dashboard can just read
-    the small cache table instead. Returns the row count for logging."""
+    the small cache table instead. Returns the row count for logging.
+
+    Also prunes any row whose `expiry_date` has since passed --
+    `dashboard_metrics_rows` only ever emits a symbol's *current* up-to-3
+    nearest expiries, so a month that just expired stops being emitted
+    but its old cached row would otherwise never be deleted, leaving it
+    to linger in the Dashboard's "Options month" dropdown forever. See
+    `fo_repo.delete_expired_dashboard_fo_metrics`."""
     screener_rows = snapshot_repo.get_latest_screener(client)
     spot_by_symbol = {r.symbol: r.latest_price for r in screener_rows}
     option_rows = fo_repo.get_all_open_options(client)
     rows = dashboard_metrics_rows(option_rows, spot_by_symbol)
     fo_repo.upsert_dashboard_fo_metrics(client, rows)
+    fo_repo.delete_expired_dashboard_fo_metrics(client, date.today())
     return len(rows)

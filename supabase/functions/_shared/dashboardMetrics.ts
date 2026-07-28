@@ -270,6 +270,16 @@ async function upsertChunked(client: AnyClient, table: string, rows: unknown[], 
   }
 }
 
+/** dashboardMetricsRows only ever emits a symbol's *current* up-to-3
+ * nearest expiries -- a month that just expired stops being emitted, but
+ * its old cached row from a previous run is never otherwise deleted, so
+ * it would linger in the Dashboard's "Options month" dropdown forever.
+ * Mirrors fo_repo.py::delete_expired_dashboard_fo_metrics. */
+async function deleteExpiredDashboardMetrics(serviceClient: AnyClient, asOfIso: string): Promise<void> {
+  const { error } = await serviceClient.from("dashboard_fo_metrics").delete().lt("expiry_date", asOfIso);
+  if (error) throw new Error(`dashboard_fo_metrics prune: ${error.message}`);
+}
+
 /** The entrypoint both manual-refresh and fo-refresh call as their final
  * step: reads spot prices (latest_screener_view) + open option legs
  * (latest_option_chain_view), recomputes CSP/CC for every symbol, and
@@ -305,5 +315,6 @@ export async function recomputeDashboardMetrics(serviceClient: AnyClient): Promi
   }));
 
   await upsertChunked(serviceClient, "dashboard_fo_metrics", payload, "symbol,expiry_date");
+  await deleteExpiredDashboardMetrics(serviceClient, new Date().toISOString().slice(0, 10));
   return payload.length;
 }

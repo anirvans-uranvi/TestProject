@@ -523,6 +523,22 @@ separate schedule:
   reason (a truly instant on-demand path). If you change the CSP/CC
   calculation in `fo_service.py`, mirror it here too.
 
+**A real bug this caused**: `recompute_dashboard_metrics` (and its
+TypeScript port) only ever *upserted* -- `dashboard_metrics_rows` emits a
+symbol's *current* up-to-3 nearest expiries each run, but a month that
+just expired simply stops being emitted; nothing ever deleted its old
+cached row. Left unchecked, the Dashboard's "Options month" dropdown
+(built from every distinct `expiry_date` still present in the table)
+kept offering already-expired months forever -- confirmed live: the
+dropdown still listed "Jul 2026" a day after that expiry had passed,
+even though the Options screen (which reads live contracts, gated on
+`is_open`, not this cache) had already stopped showing it. Fixed by
+`fo_repo.delete_expired_dashboard_fo_metrics(client, as_of)` (and its
+TypeScript mirror in `dashboardMetrics.ts`), called at the end of every
+`recompute_dashboard_metrics` run -- same finalization pattern as
+`refresh_open_flags` above, just a straight delete rather than a
+two-way flag flip since this cache has no `is_open` column of its own.
+
 `dashboard_fo_metrics` was originally one row per symbol (migration
 `0009`, holding only the nearest expiry); migration `0010` dropped and
 recreated it keyed by `(symbol, expiry_date)` instead once a per-month

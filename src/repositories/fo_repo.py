@@ -76,6 +76,19 @@ def upsert_dashboard_fo_metrics(client: Client, rows: list[dict]) -> None:
         client.table("dashboard_fo_metrics").upsert(chunk, on_conflict="symbol,expiry_date").execute()
 
 
+def delete_expired_dashboard_fo_metrics(client: Client, as_of: date) -> None:
+    """This cache is only ever upserted, never pruned by the write path
+    itself -- a symbol's near/next/far expiries roll forward over time
+    (last month's near expiry falls off the "up to 3 nearest" set once it
+    expires), but the old row for it was never deleted, just no longer
+    refreshed. Left unchecked, the Dashboard's "Options month" dropdown
+    (built from every distinct `expiry_date` in this table) keeps
+    offering already-expired months forever. Called at the end of every
+    `recompute_dashboard_metrics` run, same finalization pattern as
+    `refresh_open_flags`."""
+    client.table("dashboard_fo_metrics").delete().lt("expiry_date", as_of.isoformat()).execute()
+
+
 def refresh_open_flags(client: Client, as_of: date) -> None:
     """Contracts appear in the bhavcopy only while live, so `is_open` must be
     (re)derived against the real calendar, not the file's own trade date:
