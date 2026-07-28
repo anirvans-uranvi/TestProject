@@ -541,6 +541,31 @@ TypeScript mirror in `dashboardMetrics.ts`), called at the end of every
 `refresh_open_flags` above, just a straight delete rather than a
 two-way flag flip since this cache has no `is_open` column of its own.
 
+**A second, more subtle real bug found right after fixing the above**:
+even after fixing the stale-row issue, a portfolio-only symbol (e.g.
+Hindustan Zinc) still never got a `dashboard_fo_metrics` row at all --
+confirmed live on the Options screen (which reads live contracts
+directly) but permanently "N/A" on the Dashboard. Root cause:
+`recompute_dashboard_metrics` sourced spot prices from
+`snapshot_repo.get_latest_screener()` (`latest_screener_view`), whose
+per-user portfolio-symbol widening (migration 0013, see the Portfolio
+section) keys off `auth.uid()` -- but every caller of
+`recompute_dashboard_metrics` runs under the **service-role** client
+(cron, `fetch_fo_data.py`, both on-demand refresh Edge Functions), where
+`auth.uid()` is null. So the view silently fell back to only the 50
+Nifty50 constituents regardless of whose portfolio a symbol came from
+-- confirmed directly: `latest_screener_view` returned exactly 50 rows
+under a service-role query even though `daily_screener_snapshots` had a
+real, current row for Hindustan Zinc. Fixed by sourcing spot prices from
+`snapshot_repo.get_latest_prices(client, all_company_symbols)` instead
+-- the exact same fix that function's own docstring already describes
+for the Portfolio page's identical problem -- mirrored in the TypeScript
+port as `fetchSpotBySymbol`. **If you add another `recompute_*`-style
+function that runs under the service-role client, do not read spot/price
+data from `latest_screener_view`** -- reach for `get_latest_prices` (or
+a raw `daily_screener_snapshots` query) instead; the view's widening is
+correct only when the caller's own `auth.uid()` is the relevant user.
+
 `dashboard_fo_metrics` was originally one row per symbol (migration
 `0009`, holding only the nearest expiry); migration `0010` dropped and
 recreated it keyed by `(symbol, expiry_date)` instead once a per-month

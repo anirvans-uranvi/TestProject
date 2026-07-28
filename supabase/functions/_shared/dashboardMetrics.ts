@@ -280,22 +280,49 @@ async function deleteExpiredDashboardMetrics(serviceClient: AnyClient, asOfIso: 
   if (error) throw new Error(`dashboard_fo_metrics prune: ${error.message}`);
 }
 
-/** The entrypoint both manual-refresh and fo-refresh call as their final
- * step: reads spot prices (latest_screener_view) + open option legs
- * (latest_option_chain_view), recomputes CSP/CC for every symbol, and
- * upserts the whole dashboard_fo_metrics cache. Returns the row count for
- * logging. `serviceClient` must be service-role (bypasses RLS to write),
- * same as every other write in these Edge Functions. */
-export async function recomputeDashboardMetrics(serviceClient: AnyClient): Promise<number> {
-  const { data: screenerRows, error: screenerErr } = await serviceClient
-    .from("latest_screener_view")
-    .select("symbol,latest_price");
-  if (screenerErr) throw new Error(`latest_screener_view read: ${screenerErr.message}`);
+/** Spot prices for every registered company, read directly from
+ * daily_screener_snapshots -- deliberately **not** latest_screener_view.
+ * Every caller of recomputeDashboardMetrics runs under the service-role
+ * client (both Edge Functions), and that view's per-user
+ * portfolio-symbol widening (migration 0013) keys off auth.uid(), which
+ * is null under service-role -- so it silently falls back to only the 50
+ * Nifty50 constituents no matter which user's portfolio a symbol came
+ * from. Confirmed live: latest_screener_view returned only 50 rows under
+ * the service client even though daily_screener_snapshots had real rows
+ * for portfolio-only symbols like Hindustan Zinc, so those symbols could
+ * never get a dashboard_fo_metrics row at all. Mirrors
+ * fo_service.py::recompute_dashboard_metrics' identical fix (same
+ * pattern snapshot_repo.get_latest_prices already uses for the
+ * Portfolio page). */
+async function fetchSpotBySymbol(serviceClient: AnyClient): Promise<Record<string, number | null>> {
+  const { data: companies, error: companiesErr } = await serviceClient.from("companies").select("symbol");
+  if (companiesErr) throw new Error(`companies read: ${companiesErr.message}`);
+  const symbols = (companies ?? []).map((c: any) => c.symbol as string);
+  if (symbols.length === 0) return {};
+
+  const { data: snapshotRows, error: snapshotErr } = await serviceClient
+    .from("daily_screener_snapshots")
+    .select("symbol, latest_price")
+    .in("symbol", symbols)
+    .order("snapshot_date", { ascending: false });
+  if (snapshotErr) throw new Error(`daily_screener_snapshots read: ${snapshotErr.message}`);
 
   const spotBySymbol: Record<string, number | null> = {};
-  for (const r of (screenerRows ?? []) as any[]) {
+  for (const r of (snapshotRows ?? []) as any[]) {
+    if (r.symbol in spotBySymbol) continue; // already have this symbol's latest (newest-first order)
     spotBySymbol[r.symbol] = r.latest_price === null || r.latest_price === undefined ? null : Number(r.latest_price);
   }
+  return spotBySymbol;
+}
+
+/** The entrypoint both manual-refresh and fo-refresh call as their final
+ * step: reads spot prices + open option legs (latest_option_chain_view),
+ * recomputes CSP/CC for every symbol, and upserts the whole
+ * dashboard_fo_metrics cache. Returns the row count for logging.
+ * `serviceClient` must be service-role (bypasses RLS to write), same as
+ * every other write in these Edge Functions. */
+export async function recomputeDashboardMetrics(serviceClient: AnyClient): Promise<number> {
+  const spotBySymbol = await fetchSpotBySymbol(serviceClient);
 
   const optionRows = await fetchAllOpenOptionLegs(serviceClient);
   const rows = dashboardMetricsRows(optionRows, spotBySymbol);

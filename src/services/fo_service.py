@@ -12,7 +12,7 @@ from datetime import date
 from supabase import Client
 
 from src.data_providers.nse_fo_provider import FOBhavcopy
-from src.repositories import fo_repo, snapshot_repo
+from src.repositories import companies_repo, fo_repo, snapshot_repo
 
 
 def ingest_fo_day(client: Client, book: FOBhavcopy) -> dict[str, int]:
@@ -471,12 +471,26 @@ def dashboard_metrics_rows(option_rows: list[dict], spot_by_symbol: dict[str, fl
 def recompute_dashboard_metrics(client: Client) -> int:
     """Recomputes and upserts the whole `dashboard_fo_metrics` cache table
     -- the single Python entrypoint every refresh path calls (cron's
-    `scripts/run_refresh.py`, `scripts/fetch_fo_data.py`). Reads the same
-    two inputs the Dashboard used to read live (spot prices from
-    `latest_screener_view`, open option legs from
-    `latest_option_chain_view`) and writes the result (up to 3 rows per
-    symbol, one per near/next/far expiry) so the Dashboard can just read
-    the small cache table instead. Returns the row count for logging.
+    `scripts/run_refresh.py`, `scripts/fetch_fo_data.py`). Reads spot
+    prices + open option legs (`latest_option_chain_view`) and writes the
+    result (up to 3 rows per symbol, one per near/next/far expiry) so the
+    Dashboard can just read the small cache table instead. Returns the
+    row count for logging.
+
+    Spot prices come from `snapshot_repo.get_latest_prices` (a direct
+    `daily_screener_snapshots` query across every registered company),
+    deliberately **not** `latest_screener_view` -- every caller of this
+    function runs under the service-role client (cron, fetch_fo_data.py,
+    the on-demand refresh Edge Functions), and that view's per-user
+    portfolio-symbol widening (migration 0013) keys off `auth.uid()`,
+    which is null under service-role. A real bug this caused, confirmed
+    live: `latest_screener_view` returned only the 50 Nifty50
+    constituents under the service client even though
+    `daily_screener_snapshots` had real Hindustan Zinc/IndusInd Bank rows
+    -- so no portfolio-only symbol could ever get a `dashboard_fo_metrics`
+    row, no matter how good its F&O/equity data was. Same fix
+    `get_latest_prices`'s own docstring already describes for the
+    Portfolio page's identical problem.
 
     Also prunes any row whose `expiry_date` has since passed --
     `dashboard_metrics_rows` only ever emits a symbol's *current* up-to-3
@@ -484,8 +498,8 @@ def recompute_dashboard_metrics(client: Client) -> int:
     but its old cached row would otherwise never be deleted, leaving it
     to linger in the Dashboard's "Options month" dropdown forever. See
     `fo_repo.delete_expired_dashboard_fo_metrics`."""
-    screener_rows = snapshot_repo.get_latest_screener(client)
-    spot_by_symbol = {r.symbol: r.latest_price for r in screener_rows}
+    all_symbols = [c.symbol for c in companies_repo.list_all_companies(client)]
+    spot_by_symbol = snapshot_repo.get_latest_prices(client, all_symbols)
     option_rows = fo_repo.get_all_open_options(client)
     rows = dashboard_metrics_rows(option_rows, spot_by_symbol)
     fo_repo.upsert_dashboard_fo_metrics(client, rows)
