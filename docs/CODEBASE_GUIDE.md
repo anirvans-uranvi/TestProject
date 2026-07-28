@@ -401,7 +401,9 @@ log line is `F&O ingest complete: ...`) before assuming it's a data bug.
   spot), shaped as the same `FOBhavcopy` object, so the ingest path,
   Options screen and tests run offline.
 - `src/repositories/fo_repo.py` — natural-key upserts (chunked, since one
-  day is ~9k option rows), `refresh_open_flags`, and reads off the views.
+  day is ~9k option rows), `refresh_open_flags`,
+  `delete_expired_dashboard_fo_metrics` (see "A real bug this caused"
+  below), and reads off the views.
 - `src/services/fo_service.py` — `ingest_fo_day(client, book)` persists a
   parsed day; `option_chain_summary` / `futures_term_structure` are pure
   presentation helpers (tested in
