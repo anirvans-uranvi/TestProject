@@ -520,7 +520,8 @@ published yet.
 The **Portfolio** page (`pages/6_Portfolio.py`) shows your own holdings --
 uploaded from a broker CSV export, not the Nifty50 screener universe --
 valued live against the app's own market data: Stock, Qty, Avg Price,
-LTP, Investment, Cur Val, P&L, P&L%. Two broker formats are supported:
+LTP, Investment, Cur Val, P&L, P&L%, plus two covered-call columns (see
+below). Two broker formats are supported:
 
 - **Zerodha**: the `Instrument` column is already the exact NSE trading
   symbol, so it's trusted directly.
@@ -584,6 +585,21 @@ load's batch, and any row falling short gets a small muted "as of
 <date>" caption under its LTP (`render_muted_note`,
 `src/utils/ui.py`) -- shown only when a fallback price is actually being
 displayed, never for a symbol with no price at all.
+
+**CC ROI / Assignment ROI** (per-holding covered-call suggestion): a
+"Covered call expiry" dropdown (Near/Next/Far month, defaulting to Near)
+sits above the tabs and applies to every portfolio. For each stock held,
+the strike targeted depends on whether the position is under water: if
+your average buy price is above the current LTP, it targets ~3% above
+your average buy price; otherwise (at or above breakeven) it targets ~5%
+above LTP -- picking whichever listed strike is nearest that target.
+**CC ROI** is the premium from writing 1 lot of that call, as a
+percentage of your full position's investment. **Assignment ROI** is the
+total return if the whole position were closed out at that strike
+(plus that lot's premium), relative to your original cost basis. Both
+show "N/A" for a holding with no listed options (ETFs/funds, or a
+non-Nifty50 stock with no derivatives) or fewer expiries than the
+selected month.
 
 ## Docker
 

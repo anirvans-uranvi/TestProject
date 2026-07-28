@@ -847,6 +847,50 @@ on `pd.notna(latest_price)` too, so a symbol with no price at all
 (genuinely never fetched) still just shows "—", never a dangling "as
 of" with nothing to date.
 
+**Per-holding covered-call suggestion ("CC ROI" / "Assignment ROI"
+columns)**: distinct from the Dashboard/Options "5% CC" figure
+(`cc_5pct_for_rows`, always spot-based, fixed 5% OTM, floor-filtered
+strike) -- this one is `fo_service.covered_call_for_holding(ce_rows,
+avg_price, ltp, qty, expiry_date)`, keyed off the *holding's own* avg
+buy price, not just the spot price:
+
+- If `avg_price > ltp` (a loss so far), the target is 3% above
+  `avg_price` -- writing a call struck near the original cost basis
+  rather than the current (lower) price, so it isn't implicitly locking
+  in the loss at assignment. Otherwise (`ltp >= avg_price`), the target
+  is 5% above `ltp`, matching the app's usual 5% OTM convention.
+- The strike is the single one *nearest* that target (either side), not
+  floor-filtered like the Dashboard/Options "5% CC" -- "about 3%/5%
+  above" here is an approximate target, not a floor the strike must
+  clear.
+- `invested_amount` = `avg_price * qty` (the real, full cost basis) but
+  `premium_collected` = premium per share × `lot_size` (a covered call is
+  written per-lot, not scaled to however many shares are actually held)
+  -- these two deliberately use different scales. `cc_roi_pct` =
+  `premium_collected / invested_amount * 100`. `assignment_roi_pct` =
+  `(premium_collected + strike * qty - invested_amount) / invested_amount
+  * 100` -- the total return if the *entire* position (not just the 1
+  lot the premium came from) were closed out at the strike, plus that
+  lot's premium, relative to the original cost basis.
+- Returns `None` (→ "N/A" in the UI) if `qty` is 0, `avg_price`/`ltp`
+  isn't a positive number (an unpriced holding has no LTP to compare
+  against), or there's no priceable CE strike at all (no F&O for that
+  symbol -- ETFs/funds, or a non-Nifty50 stock with no listed
+  derivatives, like VAML).
+
+`pages/6_Portfolio.py` renders one shared "Covered call expiry" selectbox
+(`Near month`/`Next month`/`Far month`, defaulting to Near) above the
+tabs, applying uniformly across every portfolio. For each row's symbol,
+`fo_repo.list_option_expiries(client, symbol)` gives that symbol's own
+sorted list of open expiries; the selected term picks index 0/1/2 from
+it (a symbol with fewer expiries than the selected term, or none at all,
+just gets "N/A" for that row) -- `fo_repo.get_option_chain(client,
+symbol, expiry_date)` then supplies the CE rows `covered_call_for_holding`
+needs. Both are wrapped in `_load_covered_calls`, cached via
+`st.cache_data` and tolerant of `APIError` (F&O tables not migrated yet
+degrades the whole feature to "N/A" rather than crashing the page) the
+same way every other Portfolio-page query already is.
+
 ## Auth: a non-obvious quirk
 
 **Password reset does not use Supabase's email link.** This was tried

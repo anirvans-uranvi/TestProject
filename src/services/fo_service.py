@@ -317,6 +317,93 @@ def cc_5pct_for_rows(ce_rows: list[dict], spot: float, expiry_date) -> dict | No
     }
 
 
+def covered_call_for_holding(
+    ce_rows: list[dict], avg_price: float, ltp: float, qty: float, expiry_date
+) -> dict | None:
+    """Pure: the Portfolio page's per-holding covered-call suggestion --
+    distinct from `cc_5pct_for_rows` above (which is always spot-based and
+    fixed at 5% OTM). Here the strike target depends on whether the
+    position is under water:
+
+    - If `avg_price > ltp` (a loss so far): target 3% above `avg_price`,
+      the strike is picked nearest to that target (not `ltp`, so a
+      profit isn't assumed before it exists).
+    - Otherwise (`ltp >= avg_price`, at or above breakeven): target 5%
+      above `ltp`, matching the same 5% OTM convention as the rest of the
+      app's covered-call figures.
+
+    Unlike `cc_5pct_for_rows`, this always picks the single strike nearest
+    the target (either side), since "about 3%/5% above" is an
+    approximate target here, not a floor the strike must clear.
+
+    `ce_rows` should already be filtered to one symbol + one expiry (any
+    PE legs mixed in are ignored). Figures, all keyed off the *actual*
+    number of shares held (`qty`) except the premium itself, which is
+    only ever collected on whole lots:
+
+    - `invested_amount` = avg_price * qty -- the real cost basis of the
+      whole position.
+    - `premium_collected` = premium per share * `lot_size` -- the premium
+      from writing exactly 1 lot (a covered call is sold per-lot, not
+      scaled to however many shares happen to be held).
+    - `cc_roi_pct` = premium_collected / invested_amount * 100 -- the
+      extra yield that one lot's premium adds on top of the whole
+      position, expressed as a percentage.
+    - `assignment_roi_pct` = (premium_collected + strike * qty -
+      invested_amount) / invested_amount * 100 -- the total return if the
+      position were fully closed out at the strike (every share, not just
+      the 1 lot the premium came from) plus that lot's premium, relative
+      to the original cost basis.
+
+    Returns `None` if there's no priceable CE strike, `qty` is 0, or
+    `avg_price`/`ltp` isn't a positive number (an unpriced holding has no
+    LTP to compare against)."""
+    if not qty or avg_price is None or ltp is None or avg_price <= 0 or ltp <= 0:
+        return None
+    near_rows = [r for r in ce_rows if str(r.get("option_type")) == "CE" and r.get("strike_price") is not None]
+    if not near_rows:
+        return None
+
+    if avg_price > ltp:
+        target_base, target_pct = avg_price, 0.03
+    else:
+        target_base, target_pct = ltp, 0.05
+    target = target_base * (1 + target_pct)
+    best_row = min(_freshest_rows(near_rows), key=lambda r: abs(_num(r["strike_price"]) - target))
+    strike = _num(best_row["strike_price"])
+    premium_per_share = (
+        _num(best_row.get("last_price")) or _num(best_row.get("close")) or _num(best_row.get("settlement_price"))
+    )
+    lot_size = _int(best_row.get("lot_size"))
+    invested_amount = avg_price * qty
+
+    premium_collected = (
+        premium_per_share * lot_size if (premium_per_share is not None and lot_size) else None
+    )
+    cc_roi_pct = (
+        premium_collected / invested_amount * 100 if (premium_collected is not None and invested_amount) else None
+    )
+    sale_amount = strike * qty if strike is not None else None
+    assignment_roi_pct = (
+        (premium_collected + sale_amount - invested_amount) / invested_amount * 100
+        if (premium_collected is not None and sale_amount is not None and invested_amount)
+        else None
+    )
+    return {
+        "strike": strike,
+        "premium_per_share": premium_per_share,
+        "lot_size": lot_size,
+        "invested_amount": invested_amount,
+        "premium_collected": premium_collected,
+        "cc_roi_pct": cc_roi_pct,
+        "assignment_roi_pct": assignment_roi_pct,
+        "target_base": target_base,
+        "target_pct": target_pct,
+        "expiry_date": expiry_date,
+        "trade_date": best_row.get("trade_date"),
+    }
+
+
 def dashboard_metrics_rows(option_rows: list[dict], spot_by_symbol: dict[str, float | None]) -> list[dict]:
     """Pure: for each symbol with a spot price and open option legs,
     computes "5% CSP" / "5% CC" (via `csp_5pct_for_rows` /

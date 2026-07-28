@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from datetime import date
+
 import streamlit as st
 from postgrest.exceptions import APIError
 from pydantic import ValidationError
 
-from src.repositories import companies_repo, portfolio_repo, settings_repo, snapshot_repo
-from src.services import portfolio_service
+from src.repositories import companies_repo, fo_repo, portfolio_repo, settings_repo, snapshot_repo
+from src.services import fo_service, portfolio_service
 from src.utils.formatting import format_inr, format_pct
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.ui import inject_global_styles, render_disclaimer, render_pill, render_screener_table, render_stat_grid
+
+CC_TERM_LABELS = ["Near month", "Next month", "Far month"]
 
 st.set_page_config(page_title="Portfolio | Nifty 50 Screener", page_icon="\U0001f4bc", layout="wide")
 require_login()  # already injects Tailwind + the light-theme CSS design system
@@ -37,6 +41,16 @@ def _load_all_companies(_client, _cache_bust: int):
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_latest_prices(_client, symbols: tuple[str, ...], _cache_bust: int):
     return snapshot_repo.get_latest_prices(_client, list(symbols))
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_option_expiries(_client, symbols: tuple[str, ...], _cache_bust: int) -> dict[str, list[str]]:
+    return {symbol: [d.isoformat() for d in fo_repo.list_option_expiries(_client, symbol)] for symbol in symbols}
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_option_chain(_client, symbol: str, expiry_iso: str, _cache_bust: int) -> list[dict]:
+    return fo_repo.get_option_chain(_client, symbol, date.fromisoformat(expiry_iso))
 
 
 if "portfolio_cache_bust" not in st.session_state:
@@ -141,7 +155,34 @@ def _render_upload_section(
         st.rerun()
 
 
-def _render_portfolio_tab(portfolio_name: str, holdings_for_portfolio: list) -> None:
+def _load_covered_calls(symbols: tuple[str, ...], term_index: int) -> dict[str, dict | None]:
+    """Best-effort per-symbol covered-call chain lookup for the selected
+    term (near/next/far) -- returns {} entirely if the F&O tables aren't
+    migrated yet, and skips (rather than errors on) any individual symbol
+    with no F&O data at all (ETFs, ex-Nifty50 stocks) or fewer expiries
+    than the selected term."""
+    try:
+        expiries_by_symbol = _load_option_expiries(client, symbols, st.session_state["portfolio_cache_bust"])
+    except APIError:
+        return {}
+
+    chains: dict[str, dict | None] = {}
+    for symbol in symbols:
+        expiries = expiries_by_symbol.get(symbol) or []
+        if len(expiries) <= term_index:
+            continue
+        expiry_iso = expiries[term_index]
+        try:
+            chains[symbol] = {
+                "rows": _load_option_chain(client, symbol, expiry_iso, st.session_state["portfolio_cache_bust"]),
+                "expiry_iso": expiry_iso,
+            }
+        except APIError:
+            continue
+    return chains
+
+
+def _render_portfolio_tab(portfolio_name: str, holdings_for_portfolio: list, cc_term_index: int) -> None:
     """Holdings table (merged across brokers within this one portfolio)
     plus this portfolio's own upload section -- everything a tab shows."""
     raw_rows = [
@@ -160,6 +201,19 @@ def _render_portfolio_tab(portfolio_name: str, holdings_for_portfolio: list) -> 
     rows, totals = portfolio_service.compute_portfolio_view(merged, ltp_by_symbol)
     rows.sort(key=lambda r: r["investment"], reverse=True)
 
+    cc_chains = _load_covered_calls(symbols, cc_term_index)
+    cc_by_symbol: dict[str, dict | None] = {}
+    for r in rows:
+        symbol = r["symbol"]
+        chain = cc_chains.get(symbol) if symbol else None
+        cc_by_symbol[symbol] = (
+            fo_service.covered_call_for_holding(
+                chain["rows"], avg_price=r["avg_price"], ltp=r["ltp"], qty=r["qty"], expiry_date=chain["expiry_iso"]
+            )
+            if chain
+            else None
+        )
+
     stats = [
         ("Total Investment", format_inr(totals["total_investment"]), None),
         ("Total Current Value", format_inr(totals["total_cur_val"]), None),
@@ -176,6 +230,7 @@ def _render_portfolio_tab(portfolio_name: str, holdings_for_portfolio: list) -> 
     table_rows = []
     for i, r in enumerate(rows, start=1):
         stock = r["symbol"] or f'{r["raw_name"]} {render_pill("unmatched", "neutral", user_settings.theme)}'
+        cc = cc_by_symbol.get(r["symbol"]) if r["symbol"] else None
         table_rows.append(
             {
                 "#": i,
@@ -187,6 +242,8 @@ def _render_portfolio_tab(portfolio_name: str, holdings_for_portfolio: list) -> 
                 "Cur Val": format_inr(r["cur_val"]),
                 "P&L": format_inr(r["pnl"]),
                 "P&L %": format_pct(r["pnl_pct"]),
+                "CC ROI": format_pct(cc["cc_roi_pct"], signed=False) if cc and cc["cc_roi_pct"] is not None else "N/A",
+                "Assignment ROI": format_pct(cc["assignment_roi_pct"]) if cc and cc["assignment_roi_pct"] is not None else "N/A",
             }
         )
     st.markdown(render_screener_table(table_rows, user_settings.theme), unsafe_allow_html=True)
@@ -275,10 +332,22 @@ else:
     elif _pending_active_tab:
         st.session_state["portfolio_active_tab"] = _pending_active_tab
 
+    cc_term_label = st.selectbox(
+        "Covered call expiry",
+        CC_TERM_LABELS,
+        key="portfolio_cc_term",
+        help=(
+            "Which monthly expiry the CC ROI / Assignment ROI columns below use. "
+            "If avg buy price is above LTP, the strike targeted is ~3% above avg buy price; "
+            "otherwise it's ~5% above LTP."
+        ),
+    )
+    cc_term_index = CC_TERM_LABELS.index(cc_term_label)
+
     tabs = st.tabs(portfolio_names + ["+ New portfolio"], key="portfolio_active_tab", on_change="rerun")
     for name, tab in zip(portfolio_names, tabs[:-1]):
         with tab:
-            _render_portfolio_tab(name, [h for h in saved_holdings if h.portfolio_name == name])
+            _render_portfolio_tab(name, [h for h in saved_holdings if h.portfolio_name == name], cc_term_index)
     with tabs[-1]:
         st.caption("Start a brand-new portfolio, separate from your existing one(s) -- nothing existing is affected.")
         new_name = st.text_input(
