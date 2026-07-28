@@ -197,3 +197,38 @@ class TestListHoldings:
         result = portfolio_repo.list_holdings(client, "u1")
 
         assert {h.portfolio_name for h in result} == {"Portfolio 1", "Portfolio 2"}
+
+
+class TestListPortfolioSymbols:
+    def test_returns_distinct_resolved_symbols_for_the_requested_user_only(self):
+        client = _FakeClient()
+        client.store["portfolio_holdings"] = [
+            _row("Portfolio 1", "Zerodha", "SBIN", symbol="SBIN"),
+            _row("Portfolio 2", "Dhan", "Hindustan Zinc", symbol="HINDZINC"),
+            {**_row("Portfolio 1", "Zerodha", "OTHER", symbol="OTHER"), "user_id": "u2"},
+        ]
+
+        result = portfolio_repo.list_portfolio_symbols(client, "u1")
+
+        assert result == ["HINDZINC", "SBIN"]
+
+    def test_same_symbol_across_brokers_or_portfolios_is_not_duplicated(self):
+        client = _FakeClient()
+        client.store["portfolio_holdings"] = [
+            _row("Portfolio 1", "Zerodha", "SBIN", symbol="SBIN"),
+            _row("Portfolio 2", "Dhan", "SBIN", symbol="SBIN"),
+        ]
+
+        result = portfolio_repo.list_portfolio_symbols(client, "u1")
+
+        assert result == ["SBIN"]
+
+    def test_unresolved_rows_with_no_symbol_are_excluded(self):
+        client = _FakeClient()
+        client.store["portfolio_holdings"] = [
+            _row("Portfolio 1", "Dhan", "Some Unmatched Fund", symbol=None),
+        ]
+
+        result = portfolio_repo.list_portfolio_symbols(client, "u1")
+
+        assert result == []

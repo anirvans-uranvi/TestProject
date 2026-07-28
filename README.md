@@ -561,17 +561,26 @@ tracking it: they read the distinct symbols across every user's
 already known, and fold them into the same price/fundamentals/screener
 fetch every Nifty50 symbol already gets. `nifty50_constituents` is never
 touched by this, so portfolio-only symbols never become an official
-constituent -- Stock Detail, Alerts, and Options all read from
-`companies_repo.list_current_constituents` (a plain
-`nifty50_constituents` query), so those three stay Nifty50-only exactly
-as before. The Dashboard is the one exception: `latest_screener_view`
-(migration `0013`) now also includes any symbol in the *viewing* user's
-own `portfolio_holdings`, scoped per-user via `auth.uid()`, so once a
-portfolio symbol is tracked it shows up on your own Dashboard screener
-alongside the 50 Nifty50 stocks (and "Total stocks" grows accordingly --
-that count is never hardcoded to 50). In short: upload → save → click
-"Manual refresh" (or wait for the next cron run) → real LTP appears, on
-both the Portfolio page and now the Dashboard too.
+constituent -- Alerts still reads from `companies_repo.list_current_constituents`
+(a plain `nifty50_constituents` query), so its "Applies to" symbol list
+stays Nifty50-only. The Dashboard, Stock Detail, and Options all widen
+their own symbol universe with the *viewing* user's own portfolio
+symbols: the Dashboard's `latest_screener_view` (migration `0013`) does
+it via `auth.uid()` at the SQL level, while Stock Detail and Options
+each union `companies_repo.list_current_constituents`/`fo_repo.list_fo_symbols`
+with `portfolio_repo.list_portfolio_symbols(client, user_id)` in Python
+-- so a portfolio-only stock (an ETF, or a non-Nifty50 stock like
+Hindustan Zinc or IndusInd Bank) becomes selectable on all three pages
+the moment it's tracked, and "Total stocks" grows accordingly (never
+hardcoded to 50). Options gracefully shows "No open F&O contracts"
+instead of a blank/missing entry for a portfolio symbol with no listed
+derivatives (most ETFs). The Portfolio page's own 🔍 "open in Stock
+Detail" button follows directly from this: any resolved holding is, by
+construction, one of the viewing user's own portfolio symbols, so it's
+always selectable there -- no separate constituent check needed. In
+short: upload → save → click "Manual refresh" (or wait for the next cron
+run) → real LTP appears, and the symbol becomes viewable everywhere
+except Alerts.
 
 `0013` also fixed a related bug: the view previously always used
 *today's* snapshot row per symbol even when today's price fetch failed,

@@ -6,6 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+from postgrest.exceptions import APIError
 
 from src.calculations.moving_averages import moving_average_series
 from src.models.alert import Alert
@@ -16,6 +17,7 @@ from src.repositories import (
     companies_repo,
     dividends_repo,
     fundamentals_repo,
+    portfolio_repo,
     price_repo,
     settings_repo,
     snapshot_repo,
@@ -38,9 +40,19 @@ inject_global_styles(user_settings.theme)  # re-inject with the user's actual th
 st.title("🔍 Stock Detail")
 
 companies = companies_repo.list_current_constituents(client)
-symbol_options = sorted(c.symbol for c in companies)
+# Union with this user's own resolved portfolio symbols (ETFs, non-Nifty50
+# stocks) -- once the Portfolio page registers and starts tracking one,
+# it should be viewable here too, not just on the Dashboard (which already
+# widens the same way via latest_screener_view, migration 0013). Tolerant
+# of portfolio_holdings not existing yet (migration 0012) -- degrades to
+# Nifty50-only, same as before this widening existed.
+try:
+    portfolio_symbols = portfolio_repo.list_portfolio_symbols(client, user_id)
+except APIError:
+    portfolio_symbols = []
+symbol_options = sorted({c.symbol for c in companies} | set(portfolio_symbols))
 if not symbol_options:
-    st.info("No constituents loaded yet. Apply supabase/seed.sql first.")
+    st.info("No stocks available yet. Apply supabase/seed.sql first.")
     st.stop()
 
 default_symbol = st.session_state.get("selected_symbol", symbol_options[0])

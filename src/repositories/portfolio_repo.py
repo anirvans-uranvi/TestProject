@@ -17,6 +17,18 @@ def list_holdings(client: Client, user_id: str) -> list[PortfolioHolding]:
     return [PortfolioHolding.model_validate(r) for r in (resp.data or [])]
 
 
+def list_portfolio_symbols(client: Client, user_id: str) -> list[str]:
+    """Distinct resolved symbols across every one of the user's
+    portfolios (any broker, any portfolio_name) -- used to widen Stock
+    Detail's and Options' symbol pickers (and the Portfolio page's own
+    search-icon gating) to cover portfolio-only stocks (ETFs, non-Nifty50
+    stocks) alongside the current Nifty50 constituents, once a symbol is
+    actually resolved. Unresolved rows (symbol is NULL) are excluded --
+    there's nothing else in the app to look them up by."""
+    resp = client.table("portfolio_holdings").select("symbol").eq("user_id", user_id).execute()
+    return sorted({r["symbol"] for r in (resp.data or []) if r.get("symbol")})
+
+
 def replace_broker_holdings(
     client: Client, user_id: str, portfolio_name: str, broker: str, holdings: list[PortfolioHolding]
 ) -> None:

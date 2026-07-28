@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from postgrest.exceptions import APIError
 
-from src.repositories import companies_repo, fo_repo, settings_repo, snapshot_repo
+from src.repositories import companies_repo, fo_repo, portfolio_repo, settings_repo, snapshot_repo
 from src.services import fo_service
 from src.utils.formatting import format_inr, format_pct
 from src.utils.session import current_user_id, get_user_client_cached, require_login
@@ -50,6 +50,18 @@ except APIError:
 
 if not fo_symbols:
     fo_symbols = sorted(c.symbol for c in companies_repo.list_current_constituents(client))
+
+# Union with this user's own resolved portfolio symbols (ETFs, non-Nifty50
+# stocks) -- so a portfolio-only stock is at least selectable here, even
+# one with no F&O contracts at all (handled gracefully below, same as any
+# Nifty50 stock with none). Tolerant of portfolio_holdings not existing
+# yet (migration 0012).
+try:
+    portfolio_symbols = portfolio_repo.list_portfolio_symbols(client, user_id)
+except APIError:
+    portfolio_symbols = []
+fo_symbols = sorted(set(fo_symbols) | set(portfolio_symbols))
+
 if not fo_symbols:
     st.info("No F&O data loaded yet. Run `python scripts/fetch_fo_data.py` (or seed mock data).")
     st.stop()

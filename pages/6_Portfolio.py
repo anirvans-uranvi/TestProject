@@ -37,17 +37,6 @@ def _load_all_companies(_client, _cache_bust: int):
     return companies_repo.list_all_companies(_client)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def _load_constituent_symbols(_client, _cache_bust: int) -> set[str]:
-    """Current Nifty50 constituents only -- pages/2_Stock_Detail.py's own
-    symbol picker is scoped to this same set, so a "view detail" link for
-    any other portfolio symbol (an ETF, or a non-Nifty50 stock like
-    Hindustan Zinc) would silently land on whatever stock happens to be
-    first alphabetically instead of the one clicked. Gating the search
-    icon on membership here avoids that footgun."""
-    return {c.symbol for c in companies_repo.list_current_constituents(_client)}
-
-
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_latest_prices(_client, symbols: tuple[str, ...], _cache_bust: int):
     return snapshot_repo.get_latest_prices(_client, list(symbols))
@@ -201,7 +190,7 @@ def _load_covered_calls(symbols: tuple[str, ...], expiry_iso: str | None) -> dic
 
 
 def _render_portfolio_tab(
-    portfolio_name: str, holdings_for_portfolio: list, cc_expiry_iso: str | None, constituent_symbols: set[str]
+    portfolio_name: str, holdings_for_portfolio: list, cc_expiry_iso: str | None
 ) -> None:
     """Holdings table (merged across brokers within this one portfolio)
     plus this portfolio's own upload section -- everything a tab shows."""
@@ -270,9 +259,12 @@ def _render_portfolio_tab(
     # A slim native-widget column of "open detail" buttons sits beside the
     # table, same pattern (and same reasoning -- render_screener_table is
     # hand-rendered HTML with no way to trigger a same-session page
-    # switch) as pages/1_Dashboard.py. Gated to current Nifty50
-    # constituents since that's Stock Detail's own symbol universe --
-    # see _load_constituent_symbols's docstring.
+    # switch) as pages/1_Dashboard.py. Every resolved symbol here is, by
+    # definition, one of this signed-in user's own portfolio symbols --
+    # and Stock Detail's own symbol picker now unions in exactly that set
+    # (pages/2_Stock_Detail.py), so any resolved row is always viewable
+    # there; only an unresolved row (no symbol at all) has no page to
+    # link to.
     table_col, link_col = st.columns([30, 1])
     with table_col:
         st.markdown(render_screener_table(table_rows, user_settings.theme), unsafe_allow_html=True)
@@ -295,7 +287,7 @@ def _render_portfolio_tab(
             st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
             for i, r in enumerate(rows):
                 symbol = r["symbol"]
-                if symbol and symbol in constituent_symbols:
+                if symbol:
                     if st.button(
                         "\U0001f50d",
                         key=f"portfolio_open_detail_{portfolio_name}_{i}_{symbol}",
@@ -398,7 +390,6 @@ else:
     # symbol held anywhere in this account (not just the active tab) so
     # switching tabs never resets the choice.
     all_portfolio_symbols = tuple(sorted({h.symbol for h in saved_holdings if h.symbol}))
-    constituent_symbols = _load_constituent_symbols(client, st.session_state["portfolio_cache_bust"])
     try:
         all_expiries_by_symbol = _load_option_expiries(
             client, all_portfolio_symbols, st.session_state["portfolio_cache_bust"]
@@ -428,9 +419,7 @@ else:
     tabs = st.tabs(portfolio_names + ["+ New portfolio"], key="portfolio_active_tab", on_change="rerun")
     for name, tab in zip(portfolio_names, tabs[:-1]):
         with tab:
-            _render_portfolio_tab(
-                name, [h for h in saved_holdings if h.portfolio_name == name], cc_expiry_iso, constituent_symbols
-            )
+            _render_portfolio_tab(name, [h for h in saved_holdings if h.portfolio_name == name], cc_expiry_iso)
     with tabs[-1]:
         st.caption("Start a brand-new portfolio, separate from your existing one(s) -- nothing existing is affected.")
         new_name = st.text_input(
