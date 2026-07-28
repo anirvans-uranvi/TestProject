@@ -128,6 +128,23 @@ export interface FundamentalsRaw {
   week52Low: number | null;
 }
 
+// Yahoo can't put a real Infinity/NaN in JSON, so for a stock with a
+// near-zero denominator (e.g. trailingPE = price / trailingEps for a
+// newly listed company with trailingEps == 0, as seen for VAML -- Vedanta
+// Aluminium Metal Limited) it sends the *string* "Infinity" instead of a
+// number for `.raw`. That string sails past a `!== null` check and lands
+// in a `numeric(10,4)` column, which Postgres rejects outright ("numeric
+// field overflow ... cannot hold an infinite value") -- an error that
+// isn't specific to this one symbol, so every refresh keeps failing on it
+// forever. Route every fundamentals field through this to drop
+// non-finite values (Infinity/-Infinity/NaN, whether sent as a number or
+// as that string form) back to null, mirroring `_finite()` in
+// yfinance_provider.py on the Python cron-refresh side.
+export function finiteOrNull(raw: unknown): number | null {
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
 async function requestFundamentals(symbol: string, session: CrumbSession): Promise<FundamentalsRaw | null> {
   const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${yahooSymbol(symbol)}` +
     `?modules=defaultKeyStatistics,summaryDetail&crumb=${encodeURIComponent(session.crumb)}`;
@@ -140,12 +157,12 @@ async function requestFundamentals(symbol: string, session: CrumbSession): Promi
   const summaryDetail = result.summaryDetail ?? {};
   const keyStats = result.defaultKeyStatistics ?? {};
   return {
-    peRatio: summaryDetail.trailingPE?.raw ?? null,
-    pegRatio: keyStats.pegRatio?.raw ?? null,
-    eps: keyStats.trailingEps?.raw ?? null,
-    marketCap: summaryDetail.marketCap?.raw ?? null,
-    week52High: summaryDetail.fiftyTwoWeekHigh?.raw ?? null,
-    week52Low: summaryDetail.fiftyTwoWeekLow?.raw ?? null,
+    peRatio: finiteOrNull(summaryDetail.trailingPE?.raw),
+    pegRatio: finiteOrNull(keyStats.pegRatio?.raw),
+    eps: finiteOrNull(keyStats.trailingEps?.raw),
+    marketCap: finiteOrNull(summaryDetail.marketCap?.raw),
+    week52High: finiteOrNull(summaryDetail.fiftyTwoWeekHigh?.raw),
+    week52Low: finiteOrNull(summaryDetail.fiftyTwoWeekLow?.raw),
   };
 }
 
