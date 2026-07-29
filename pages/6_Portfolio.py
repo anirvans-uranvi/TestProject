@@ -26,6 +26,27 @@ render_disclaimer()
 
 BROKERS = ["Zerodha", "Dhan"]
 
+# Sorting -- same "Sort By" dropdown + "Descending" checkbox pattern as the
+# Dashboard (pages/1_Dashboard.py): render_screener_table is hand-rendered
+# HTML with no JS bridge back to Python, so its column headers can only show
+# a ▲/▼ arrow, not act as real clickable sort links (a real <a href> would
+# force a browser navigation, and this app keeps the Supabase session only
+# in st.session_state -- see session.py's docstring -- so that would log the
+# user out). These native widgets stay on the same WebSocket session and
+# PORTFOLIO_SORT_TO_KEY doubles as `sortable_columns` for the arrow.
+PORTFOLIO_SORT_OPTIONS: list[tuple[str, str]] = [
+    ("Stock", "symbol"),
+    ("Qty", "qty"),
+    ("Avg Price", "avg_price"),
+    ("LTP", "ltp"),
+    ("Investment", "investment"),
+    ("Cur Val", "cur_val"),
+    ("P&L", "pnl"),
+    ("P&L %", "pnl_pct"),
+]
+PORTFOLIO_SORT_LABELS = [label for label, _ in PORTFOLIO_SORT_OPTIONS]
+PORTFOLIO_SORT_TO_KEY = dict(PORTFOLIO_SORT_OPTIONS)
+
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_holdings(_client, _user_id: str, _cache_bust: int):
@@ -75,6 +96,18 @@ def _fmt_qty(value: float) -> str:
     if value == int(value):
         return f"{int(value):,}"
     return f"{value:,.2f}"
+
+
+def _sort_rows_none_last(rows: list[dict], key: str, desc: bool) -> list[dict]:
+    """Sorts by `key`, always pushing rows with a None value (unresolved
+    symbol, or no LTP yet) to the end regardless of direction -- mirrors
+    pandas' `na_position="last"` used by the Dashboard's own sort, which a
+    plain `reverse=desc` can't do since flipping direction would also flip
+    where the Nones land."""
+    have = [r for r in rows if r[key] is not None]
+    missing = [r for r in rows if r[key] is None]
+    have.sort(key=lambda r: r[key], reverse=desc)
+    return have + missing
 
 
 def _slug(text: str) -> str:
@@ -208,7 +241,20 @@ def _render_portfolio_tab(
     symbols = tuple(sorted({r["symbol"] for r in merged if r["symbol"]}))
     ltp_by_symbol = _load_latest_prices(client, symbols, st.session_state["portfolio_cache_bust"])
     rows, totals = portfolio_service.compute_portfolio_view(merged, ltp_by_symbol)
-    rows.sort(key=lambda r: r["investment"], reverse=True)
+
+    sort_label_key = f"portfolio_sort_label_{portfolio_name}"
+    sort_desc_key = f"portfolio_sort_desc_{portfolio_name}"
+    if sort_label_key not in st.session_state:
+        st.session_state[sort_label_key] = "Investment"
+    if sort_desc_key not in st.session_state:
+        st.session_state[sort_desc_key] = True
+
+    sort_by_col, sort_desc_col = st.columns([2, 1])
+    with sort_by_col:
+        sort_label = st.selectbox("Sort By", PORTFOLIO_SORT_LABELS, key=sort_label_key)
+    with sort_desc_col:
+        sort_desc = st.checkbox("Descending", key=sort_desc_key)
+    rows = _sort_rows_none_last(rows, PORTFOLIO_SORT_TO_KEY[sort_label], sort_desc)
 
     cc_chains = _load_covered_calls(symbols, cc_expiry_iso)
     cc_by_symbol: dict[str, dict | None] = {}
@@ -267,7 +313,16 @@ def _render_portfolio_tab(
     # link to.
     table_col, link_col = st.columns([30, 1])
     with table_col:
-        st.markdown(render_screener_table(table_rows, user_settings.theme), unsafe_allow_html=True)
+        st.markdown(
+            render_screener_table(
+                table_rows,
+                user_settings.theme,
+                sortable_columns=PORTFOLIO_SORT_TO_KEY,
+                active_sort_key=PORTFOLIO_SORT_TO_KEY[sort_label],
+                sort_desc=sort_desc,
+            ),
+            unsafe_allow_html=True,
+        )
     with link_col:
         container_key = f"portfolio-stock-links-{_slug(portfolio_name)}"
         st.markdown(
