@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from datetime import date
 
+import pandas as pd
 import streamlit as st
 from postgrest.exceptions import APIError
 from pydantic import ValidationError
@@ -11,7 +12,7 @@ from src.repositories import companies_repo, fo_repo, portfolio_repo, settings_r
 from src.services import fo_service, portfolio_service
 from src.utils.formatting import format_inr, format_pct
 from src.utils.session import current_user_id, get_user_client_cached, require_login
-from src.utils.ui import inject_global_styles, render_disclaimer, render_pill, render_screener_table, render_stat_grid
+from src.utils.ui import inject_global_styles, render_disclaimer, render_stat_grid
 
 st.set_page_config(page_title="Portfolio | Nifty 50 Screener", page_icon="\U0001f4bc", layout="wide")
 require_login()  # already injects Tailwind + the light-theme CSS design system
@@ -25,27 +26,6 @@ st.title("\U0001f4bc Portfolio")
 render_disclaimer()
 
 BROKERS = ["Zerodha", "Dhan"]
-
-# Sorting -- same "Sort By" dropdown + "Descending" checkbox pattern as the
-# Dashboard (pages/1_Dashboard.py): render_screener_table is hand-rendered
-# HTML with no JS bridge back to Python, so its column headers can only show
-# a ▲/▼ arrow, not act as real clickable sort links (a real <a href> would
-# force a browser navigation, and this app keeps the Supabase session only
-# in st.session_state -- see session.py's docstring -- so that would log the
-# user out). These native widgets stay on the same WebSocket session and
-# PORTFOLIO_SORT_TO_KEY doubles as `sortable_columns` for the arrow.
-PORTFOLIO_SORT_OPTIONS: list[tuple[str, str]] = [
-    ("Stock", "symbol"),
-    ("Qty", "qty"),
-    ("Avg Price", "avg_price"),
-    ("LTP", "ltp"),
-    ("Investment", "investment"),
-    ("Cur Val", "cur_val"),
-    ("P&L", "pnl"),
-    ("P&L %", "pnl_pct"),
-]
-PORTFOLIO_SORT_LABELS = [label for label, _ in PORTFOLIO_SORT_OPTIONS]
-PORTFOLIO_SORT_TO_KEY = dict(PORTFOLIO_SORT_OPTIONS)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -96,18 +76,6 @@ def _fmt_qty(value: float) -> str:
     if value == int(value):
         return f"{int(value):,}"
     return f"{value:,.2f}"
-
-
-def _sort_rows_none_last(rows: list[dict], key: str, desc: bool) -> list[dict]:
-    """Sorts by `key`, always pushing rows with a None value (unresolved
-    symbol, or no LTP yet) to the end regardless of direction -- mirrors
-    pandas' `na_position="last"` used by the Dashboard's own sort, which a
-    plain `reverse=desc` can't do since flipping direction would also flip
-    where the Nones land."""
-    have = [r for r in rows if r[key] is not None]
-    missing = [r for r in rows if r[key] is None]
-    have.sort(key=lambda r: r[key], reverse=desc)
-    return have + missing
 
 
 def _slug(text: str) -> str:
@@ -241,20 +209,7 @@ def _render_portfolio_tab(
     symbols = tuple(sorted({r["symbol"] for r in merged if r["symbol"]}))
     ltp_by_symbol = _load_latest_prices(client, symbols, st.session_state["portfolio_cache_bust"])
     rows, totals = portfolio_service.compute_portfolio_view(merged, ltp_by_symbol)
-
-    sort_label_key = f"portfolio_sort_label_{portfolio_name}"
-    sort_desc_key = f"portfolio_sort_desc_{portfolio_name}"
-    if sort_label_key not in st.session_state:
-        st.session_state[sort_label_key] = "Investment"
-    if sort_desc_key not in st.session_state:
-        st.session_state[sort_desc_key] = True
-
-    sort_by_col, sort_desc_col = st.columns([2, 1])
-    with sort_by_col:
-        sort_label = st.selectbox("Sort By", PORTFOLIO_SORT_LABELS, key=sort_label_key)
-    with sort_desc_col:
-        sort_desc = st.checkbox("Descending", key=sort_desc_key)
-    rows = _sort_rows_none_last(rows, PORTFOLIO_SORT_TO_KEY[sort_label], sort_desc)
+    rows.sort(key=lambda r: r["investment"], reverse=True)
 
     cc_chains = _load_covered_calls(symbols, cc_expiry_iso)
     cc_by_symbol: dict[str, dict | None] = {}
@@ -284,7 +239,7 @@ def _render_portfolio_tab(
 
     table_rows = []
     for i, r in enumerate(rows, start=1):
-        stock = r["symbol"] or f'{r["raw_name"]} {render_pill("unmatched", "neutral", user_settings.theme)}'
+        stock = r["symbol"] or f'{r["raw_name"]} (unmatched)'
         cc = cc_by_symbol.get(r["symbol"]) if r["symbol"] else None
         table_rows.append(
             {
@@ -302,56 +257,44 @@ def _render_portfolio_tab(
             }
         )
 
-    # A slim native-widget column of "open detail" buttons sits beside the
-    # table, same pattern (and same reasoning -- render_screener_table is
-    # hand-rendered HTML with no way to trigger a same-session page
-    # switch) as pages/1_Dashboard.py. Every resolved symbol here is, by
-    # definition, one of this signed-in user's own portfolio symbols --
-    # and Stock Detail's own symbol picker now unions in exactly that set
-    # (pages/2_Stock_Detail.py), so any resolved row is always viewable
-    # there; only an unresolved row (no symbol at all) has no page to
-    # link to.
-    table_col, link_col = st.columns([30, 1])
-    with table_col:
-        st.markdown(
-            render_screener_table(
-                table_rows,
-                user_settings.theme,
-                sortable_columns=PORTFOLIO_SORT_TO_KEY,
-                active_sort_key=PORTFOLIO_SORT_TO_KEY[sort_label],
-                sort_desc=sort_desc,
-            ),
-            unsafe_allow_html=True,
-        )
-    with link_col:
-        container_key = f"portfolio-stock-links-{_slug(portfolio_name)}"
-        st.markdown(
-            f"""
-            <style>
-            .st-key-{container_key}.stVerticalBlock {{ gap: 0rem !important; }}
-            .st-key-{container_key} div[data-testid="stElementContainer"] {{ margin: 0; }}
-            .st-key-{container_key} button {{
-                height: 2.04rem; min-height: 2.04rem; width: 100%;
-                padding: 0; display: flex; align-items: center; justify-content: center;
-            }}
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-        with st.container(key=container_key):
-            st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
-            for i, r in enumerate(rows):
-                symbol = r["symbol"]
-                if symbol:
-                    if st.button(
-                        "\U0001f50d",
-                        key=f"portfolio_open_detail_{portfolio_name}_{i}_{symbol}",
-                        help=f"Open {symbol} in Stock Detail",
-                    ):
-                        st.session_state["selected_symbol"] = symbol
-                        st.switch_page("pages/2_Stock_Detail.py")
-                else:
-                    st.markdown("<div style='height:2.04rem'></div>", unsafe_allow_html=True)
+    # A plain st.dataframe (same as the Futures table on the Options page)
+    # instead of the hand-rendered render_screener_table -- its column
+    # headers are natively clickable/sortable in the browser, which the
+    # HTML table can't do without a JS bridge back to Python (a real
+    # <a href> sort link would force a browser navigation, and this app
+    # keeps the Supabase session only in st.session_state -- see
+    # session.py's docstring -- so that would log the user out).
+    #
+    # That native client-side sort is exactly why the old per-row "open
+    # detail" button column (one st.button beside each table row) had to
+    # go: those buttons are positioned by their *pre-sort* Python index, so
+    # clicking a header to reorder the table in the browser would leave
+    # them pointing at the wrong row. Row selection (on_select="rerun")
+    # sidesteps this -- Streamlit maps a click back to the correct row in
+    # the original data regardless of how the table is currently sorted --
+    # so a single button below the table replaces the whole column.
+    event = st.dataframe(
+        pd.DataFrame(table_rows),
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"portfolio_table_{_slug(portfolio_name)}",
+    )
+    selected_rows = event.selection.rows if event and event.selection else []
+    if selected_rows:
+        selected_symbol = rows[selected_rows[0]]["symbol"]
+        if selected_symbol:
+            # Every resolved symbol here is, by definition, one of this
+            # signed-in user's own portfolio symbols -- and Stock Detail's
+            # own symbol picker now unions in exactly that set
+            # (pages/2_Stock_Detail.py), so any resolved row is always
+            # viewable there.
+            if st.button(f"Open {selected_symbol} in Stock Detail", key=f"portfolio_open_detail_{portfolio_name}"):
+                st.session_state["selected_symbol"] = selected_symbol
+                st.switch_page("pages/2_Stock_Detail.py")
+        else:
+            st.caption("This holding has no resolved symbol yet, so there's no Stock Detail page for it.")
 
     st.divider()
     st.subheader("Upload holdings")
