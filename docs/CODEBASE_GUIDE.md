@@ -664,7 +664,7 @@ page's own `st.set_page_config(page_title=..., page_icon=...)` call
 
   **A real bug found here, right after this section first shipped**: the CSP/CC breakdown's spot value (CC was still "ITM PMCC" at the time, but the bug and fix applied identically) was initially taken from `option_chain_summary(near_chain_rows)["spot"]` — the F&O bhavcopy's own `underlying_price` column — while the Dashboard's two columns (now the `dashboard_fo_metrics` cache, see above) use the cash-market `latest_price` from `latest_screener_view`. These two prices aren't the same value, so this page's numbers didn't match the Dashboard's for the same stock (confirmed live: ADANIENT showed 5% CSP = 0.54% on the Dashboard but 0.45% here, since a different spot picked a different nearest-5%-below strike, 3040 vs 3020). Fixed by fetching `snapshot_repo.get_latest_screener_row(client, symbol).latest_price` and using that as the spot for both calculations here too, instead of the chain's `underlying_price` — the top-of-page "Spot"/"ATM strike" summary tiles are unaffected and deliberately still use the chain's own `underlying_price` (correct for highlighting the ATM row in the actual option-chain data being displayed there). If you add another F&O-derived calculation to either screen, source spot the same way this one now does — from the screener, not the chain — to keep the two screens' numbers in agreement.
 
-- **`6_Portfolio.py`** — see the dedicated Portfolio section below for the full upload → match → save → refresh-registration pipeline, and for the multiple-coexisting-portfolios design (`portfolio_name`, migration `0014`). On the page itself: `_load_holdings` reads every one of the signed-in user's saved rows across every portfolio and broker; one `st.tabs` entry is rendered per distinct `portfolio_name`, each scoping `portfolio_service.merge_holdings`/`compute_portfolio_view` (LTP via `snapshot_repo.get_latest_prices`, a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why) to just that portfolio's own rows. The holdings table reuses `render_screener_table()` exactly like the Dashboard's, since it already treats arbitrary dict keys as columns.
+- **`6_Portfolio.py`** — see the dedicated Portfolio section below for the full upload → match → save → refresh-registration pipeline, and for the multiple-coexisting-portfolios design (`portfolio_name`, migration `0014`). On the page itself: `_load_holdings` reads every one of the signed-in user's saved rows across every portfolio and broker; one `st.tabs` entry is rendered per distinct `portfolio_name`, each scoping `portfolio_service.merge_holdings`/`compute_portfolio_view` (LTP via `snapshot_repo.get_latest_prices`, a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why) to just that portfolio's own rows. The holdings table is a plain `st.dataframe`, not `render_screener_table()` — see below for why, and for how row selection replaced the per-row 🔍 button.
 
 ## Portfolio
 
@@ -975,17 +975,51 @@ row. Both lookups are wrapped in `_load_covered_calls`, cached via
 degrades the whole feature to "N/A" rather than crashing the page) the
 same way every other Portfolio-page query already is.
 
-Each row also gets a 🔍 button that sets `st.session_state["selected_symbol"]`
-and switches to Stock Detail, mirroring the identical pattern already
-used on the Dashboard. Gated only on `symbol` being resolved (`if symbol:`)
--- no separate constituent check needed, since every resolved row here
-is by construction one of *this* signed-in user's own portfolio symbols,
-and Stock Detail's own picker now unions in exactly that set (see its
-bullet under "Pages" below), so it's always selectable there. Before that
-widening existed, this button had to be gated on Nifty50-constituent
-membership instead, since linking to a symbol Stock Detail's picker
-didn't know about would silently open whatever stock happened to be
-first alphabetically rather than the one clicked.
+**The holdings table itself is a plain `st.dataframe`, not
+`render_screener_table()`** (unlike the Dashboard's table) -- deliberately
+switched to get genuinely clickable/sortable column headers for free.
+`render_screener_table()` is hand-rendered HTML with no JS bridge back to
+Python, so (per the Dashboard's own "Sorting and per-row navigation"
+note above) its headers can only ever show a ▲/▼ arrow next to a
+separate `st.selectbox`("Sort By")/`st.checkbox`("Descending") pair --
+a real `<a href="?sort=...">` sort link would force a browser navigation,
+which logs the user out (`st.session_state`-only auth, see
+[Auth](#auth-a-non-obvious-quirk)). A native `st.dataframe` sidesteps this
+entirely: Streamlit's own frontend handles header-click sorting
+client-side, no Python round-trip needed, exactly like the Options
+screen's Futures term-structure table (`pages/5_Options.py`) already
+does.
+
+That native client-side sort is why the per-row 🔍 "open in Stock
+Detail" button (a real `st.button()` beside the table, same pattern the
+Dashboard uses) had to go: those buttons are positioned by their
+*pre-sort* Python row index, so clicking a header to reorder the table
+in the browser would leave them pointing at the wrong row once the
+visual order no longer matches Python's. Row selection
+(`on_select="rerun"`, `selection_mode="single-row"`) replaces it instead
+-- Streamlit maps a click back to the correct index in the original
+(pre-sort) data regardless of how the table is currently sorted, so
+`rows[selected_rows[0]]` always resolves to the row the user actually
+clicked. Selecting a row reveals two buttons below the table -- "Open
+`<symbol>` in Stock Detail" and "Open `<symbol>` in Options" (the latter
+sets `st.session_state["fo_symbol"]`, the same key the Dashboard's own
+"Open in Options →" block uses) -- both gated on `symbol` being resolved,
+with a caption instead for an unresolved (unmatched-name) row. No
+separate constituent check needed for either: every resolved row here is
+by construction one of *this* signed-in user's own portfolio symbols, and
+both Stock Detail's and Options' own pickers union in exactly that set
+(see their bullets under "Pages" above), so it's always selectable on
+both pages.
+
+This was verified against real production data via Streamlit's
+`AppTest` harness rather than a live browser click: this sandbox's
+browser tab reports `document.visibilityState === "hidden"`, and
+`st.dataframe`'s grid (glide-data-grid, canvas-based) never mounts a
+canvas at all on a hidden tab, so no click can land on it. `AppTest` sets
+`st.session_state["portfolio_table_<slug>"] = {"selection": {"rows": [i],
+...}}` directly (the same schema a real click produces) and reruns the
+script -- confirming `rows[i]["symbol"]` resolves to the right stock and
+the right button renders, without needing the canvas to paint.
 
 ## Auth: a non-obvious quirk
 

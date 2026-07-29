@@ -596,12 +596,12 @@ Hindustan Zinc or IndusInd Bank) becomes selectable on all three pages
 the moment it's tracked, and "Total stocks" grows accordingly (never
 hardcoded to 50). Options gracefully shows "No open F&O contracts"
 instead of a blank/missing entry for a portfolio symbol with no listed
-derivatives (most ETFs). The Portfolio page's own 🔍 "open in Stock
-Detail" button follows directly from this: any resolved holding is, by
-construction, one of the viewing user's own portfolio symbols, so it's
-always selectable there -- no separate constituent check needed. In
-short: upload → save → click "Manual refresh" (or wait for the next cron
-run) → real LTP appears, and the symbol becomes viewable everywhere
+derivatives (most ETFs). Selecting a holding on the Portfolio page's own
+table (see below) and opening it in Stock Detail or Options follows
+directly from this: any resolved holding is, by construction, one of the
+viewing user's own portfolio symbols, so it's always selectable on both.
+In short: upload → save → click "Manual refresh" (or wait for the next
+cron run) → real LTP appears, and the symbol becomes viewable everywhere
 except Alerts.
 
 `0013` also fixed a related bug: the view previously always used
@@ -632,10 +632,12 @@ position's investment. **Assignment ROI** is the total return if the
 whole position were closed out at that strike (plus that lot's premium),
 relative to your original cost basis. Both show "N/A" for a holding with
 no listed options (ETFs/funds, or a non-Nifty50 stock with no
-derivatives) or no contract for the selected expiry date. Each row also
-has a 🔍 button that opens the stock in Stock Detail, shown only for
-current Nifty50 constituents (the only symbols that page's picker knows
-about).
+derivatives) or no contract for the selected expiry date.
+
+The holdings table's column headers are clickable/sortable, same as the
+Options screen's Futures table -- click a row to select it (the checkbox
+on the left) and two buttons appear below the table: "Open in Stock
+Detail" and "Open in Options" for that stock.
 
 ## Docker
 
