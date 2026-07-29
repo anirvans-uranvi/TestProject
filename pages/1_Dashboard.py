@@ -476,19 +476,6 @@ else:
                 st.switch_page("pages/5_Options.py")
 
 st.divider()
-open_symbols = filtered["symbol"] if not table_df.empty else []
-detail_col, options_col = st.columns(2)
-with detail_col:
-    selected_symbol = st.selectbox("Open in Stock Detail →", open_symbols)
-    if selected_symbol and st.button("View stock detail"):
-        st.session_state["selected_symbol"] = selected_symbol
-        st.switch_page("pages/2_Stock_Detail.py")
-with options_col:
-    fo_symbol = st.selectbox("Open in Options →", open_symbols, key="dashboard_fo_symbol")
-    if fo_symbol and st.button("📊 View F&O / options"):
-        st.session_state["fo_symbol"] = fo_symbol
-        st.switch_page("pages/5_Options.py")
-
 st.download_button(
     "⬇️ Download filtered results (CSV)",
     data=filtered.drop(columns=["data_quality"], errors="ignore").to_csv(index=False).encode("utf-8"),
