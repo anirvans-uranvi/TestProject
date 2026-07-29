@@ -238,12 +238,11 @@ def _render_portfolio_tab(
         )
 
     table_rows = []
-    for i, r in enumerate(rows, start=1):
+    for r in rows:
         stock = r["symbol"] or f'{r["raw_name"]} (unmatched)'
         cc = cc_by_symbol.get(r["symbol"]) if r["symbol"] else None
         table_rows.append(
             {
-                "#": i,
                 "Stock": stock,
                 "Qty": _fmt_qty(r["qty"]),
                 "Avg Price": format_inr(r["avg_price"]),
@@ -272,7 +271,7 @@ def _render_portfolio_tab(
     # them pointing at the wrong row. Row selection (on_select="rerun")
     # sidesteps this -- Streamlit maps a click back to the correct row in
     # the original data regardless of how the table is currently sorted --
-    # so a single button below the table replaces the whole column.
+    # so a pair of buttons below the table replaces the whole column.
     event = st.dataframe(
         pd.DataFrame(table_rows),
         use_container_width=True,
@@ -286,15 +285,25 @@ def _render_portfolio_tab(
         selected_symbol = rows[selected_rows[0]]["symbol"]
         if selected_symbol:
             # Every resolved symbol here is, by definition, one of this
-            # signed-in user's own portfolio symbols -- and Stock Detail's
-            # own symbol picker now unions in exactly that set
-            # (pages/2_Stock_Detail.py), so any resolved row is always
-            # viewable there.
-            if st.button(f"Open {selected_symbol} in Stock Detail", key=f"portfolio_open_detail_{portfolio_name}"):
-                st.session_state["selected_symbol"] = selected_symbol
-                st.switch_page("pages/2_Stock_Detail.py")
+            # signed-in user's own portfolio symbols -- and both Stock
+            # Detail's and Options' own symbol pickers now union in
+            # exactly that set (pages/2_Stock_Detail.py, pages/5_Options.py),
+            # so any resolved row is always viewable on either page.
+            detail_col, options_col = st.columns(2)
+            with detail_col:
+                if st.button(
+                    f"Open {selected_symbol} in Stock Detail", key=f"portfolio_open_detail_{portfolio_name}"
+                ):
+                    st.session_state["selected_symbol"] = selected_symbol
+                    st.switch_page("pages/2_Stock_Detail.py")
+            with options_col:
+                if st.button(
+                    f"Open {selected_symbol} in Options", key=f"portfolio_open_options_{portfolio_name}"
+                ):
+                    st.session_state["fo_symbol"] = selected_symbol
+                    st.switch_page("pages/5_Options.py")
         else:
-            st.caption("This holding has no resolved symbol yet, so there's no Stock Detail page for it.")
+            st.caption("This holding has no resolved symbol yet, so there's no Stock Detail or Options page for it.")
 
     st.divider()
     st.subheader("Upload holdings")
