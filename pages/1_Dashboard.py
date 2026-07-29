@@ -15,14 +15,7 @@ from src.services.threshold_override import apply_user_thresholds
 from src.utils.formatting import direction_arrow, format_inr, format_pct, pass_fail_icon
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.timezones import format_ist, now_ist
-from src.utils.ui import (
-    inject_global_styles,
-    market_state_label,
-    render_disclaimer,
-    render_muted_note,
-    render_pill,
-    render_screener_table,
-)
+from src.utils.ui import inject_global_styles, market_state_label, render_disclaimer, render_pill
 
 st.set_page_config(page_title="Dashboard | Nifty 50 Screener", page_icon="📊", layout="wide")
 require_login()  # already injects Tailwind + the light-theme CSS design system
@@ -196,30 +189,6 @@ try:
     dashboard_fo_metrics_rows = _load_dashboard_fo_metrics(client, st.session_state["dashboard_cache_bust"])
 except APIError:
     dashboard_fo_metrics_rows = []
-
-# ---------------------------------------------------------------------
-# Sorting -- a single "Sort By" dropdown (+ Descending checkbox) rendered
-# just above the table, deliberately limited to the columns worth sorting
-# by (not every column the table displays). `SORT_OPTION_TO_KEY` maps the
-# dropdown's own labels to the underlying dataframe column; these labels
-# are also exactly the table's own header text for each of these columns,
-# so the same dict doubles as `sortable_columns` for the ▲/▼ arrow.
-# ---------------------------------------------------------------------
-SORT_OPTIONS: list[tuple[str, str]] = [
-    ("Stock", "symbol"),
-    ("Momentum", "criterion_b"),
-    ("5% CSP", "csp_5pct"),
-    ("Dividend", "ttm_dividend_yield"),
-    ("PE", "pe_ratio"),
-    ("PEG", "peg_ratio"),
-]
-SORT_OPTION_LABELS = [label for label, _ in SORT_OPTIONS]
-SORT_OPTION_TO_KEY = dict(SORT_OPTIONS)
-
-if "dashboard_sort_label" not in st.session_state:
-    st.session_state["dashboard_sort_label"] = "Stock"
-if "dashboard_sort_desc" not in st.session_state:
-    st.session_state["dashboard_sort_desc"] = False
 
 # ---------------------------------------------------------------------
 # Metric cards (also usable as quick filters via session_state)
@@ -397,31 +366,24 @@ with clear_col:
         st.session_state["criterion_filter"] = None
         st.rerun()
 
-sort_by_col, sort_desc_col, month_col = st.columns([2, 1, 2])
-with sort_by_col:
-    sort_col = st.selectbox("Sort By", SORT_OPTION_LABELS, key="dashboard_sort_label")
-with sort_desc_col:
-    sort_desc = st.checkbox("Descending", key="dashboard_sort_desc")
-with month_col:
-    # Expiry dates come back from Supabase as plain "YYYY-MM-DD" strings
-    # (get_dashboard_fo_metrics returns raw dict rows, not a parsed
-    # model) -- sorting/equality-comparing them as strings works fine
-    # (ISO format sorts chronologically), and format_func below only
-    # parses one for display.
-    available_expiries = sorted({r["expiry_date"] for r in dashboard_fo_metrics_rows if r.get("expiry_date")})
-    if available_expiries:
-        if st.session_state.get("dashboard_options_month") not in available_expiries:
-            st.session_state["dashboard_options_month"] = available_expiries[0]
-        selected_month = st.selectbox(
-            "Options month",
-            available_expiries,
-            key="dashboard_options_month",
-            format_func=lambda d: date.fromisoformat(d).strftime("%b %Y"),
-            help="Which monthly options expiry feeds the 5% CSP / 5% CC columns below.",
-        )
-    else:
-        selected_month = None
-        st.selectbox("Options month", ["N/A"], disabled=True)
+# Expiry dates come back from Supabase as plain "YYYY-MM-DD" strings
+# (get_dashboard_fo_metrics returns raw dict rows, not a parsed model) --
+# sorting/equality-comparing them as strings works fine (ISO format sorts
+# chronologically), and format_func below only parses one for display.
+available_expiries = sorted({r["expiry_date"] for r in dashboard_fo_metrics_rows if r.get("expiry_date")})
+if available_expiries:
+    if st.session_state.get("dashboard_options_month") not in available_expiries:
+        st.session_state["dashboard_options_month"] = available_expiries[0]
+    selected_month = st.selectbox(
+        "Options month",
+        available_expiries,
+        key="dashboard_options_month",
+        format_func=lambda d: date.fromisoformat(d).strftime("%b %Y"),
+        help="Which monthly options expiry feeds the 5% CSP / 5% CC columns below.",
+    )
+else:
+    selected_month = None
+    st.selectbox("Options month", ["N/A"], disabled=True)
 
 metrics_by_symbol = (
     {r["symbol"]: r for r in dashboard_fo_metrics_rows if r["expiry_date"] == selected_month}
@@ -431,7 +393,7 @@ metrics_by_symbol = (
 filtered["csp_5pct"] = filtered["symbol"].map(lambda s: (metrics_by_symbol.get(s) or {}).get("csp_pct"))
 filtered["cc_5pct"] = filtered["symbol"].map(lambda s: (metrics_by_symbol.get(s) or {}).get("cc_pct"))
 
-filtered = filtered.sort_values(SORT_OPTION_TO_KEY[sort_col], ascending=not sort_desc, na_position="last")
+filtered = filtered.sort_values("symbol", ascending=True, na_position="last")
 
 # latest_screener_view (migration 0013) falls back to the most recent
 # snapshot that actually has a price when today's fetch failed for a
@@ -444,7 +406,7 @@ _known_snapshot_dates = df["snapshot_date"].dropna()
 _latest_snapshot_date = _known_snapshot_dates.max() if not _known_snapshot_dates.empty else None
 
 display_rows = []
-for i, (_, r) in enumerate(filtered.iterrows(), start=1):
+for _, r in filtered.iterrows():
     ltp_cell = format_inr(r["latest_price"])
     if (
         pd.notna(r["latest_price"])
@@ -453,10 +415,9 @@ for i, (_, r) in enumerate(filtered.iterrows(), start=1):
         and r["snapshot_date"] != _latest_snapshot_date
     ):
         as_of = pd.Timestamp(r["snapshot_date"]).strftime("%d %b %Y")
-        ltp_cell += f"<br>{render_muted_note(f'as of {as_of}', user_settings.theme)}"
+        ltp_cell += f" (as of {as_of})"
     display_rows.append(
         {
-            "#": i,
             "Stock": r["symbol"],
             "LTP": ltp_cell,
             "52W High": f"{format_inr(r['week_52_high'])} {pass_fail_icon(r['criterion_52w_high'])}" if pd.notna(r["week_52_high"]) else "N/A",
@@ -470,7 +431,6 @@ for i, (_, r) in enumerate(filtered.iterrows(), start=1):
             "Dividend": f"{format_pct(r['ttm_dividend_yield'], signed=False)} {pass_fail_icon(r['criterion_a'])}",
             "PE": f"{r['pe_ratio']:.1f}" if pd.notna(r["pe_ratio"]) else "N/A",
             "PEG": f"{r['peg_ratio']:.2f} {pass_fail_icon(r['criterion_c'])}" if pd.notna(r["peg_ratio"]) else "N/A",
-            "Symbol": r["symbol"],
         }
     )
 
@@ -478,59 +438,45 @@ table_df = pd.DataFrame(display_rows)
 if table_df.empty:
     st.info("No stocks match your current filters. Try loosening the sidebar filters (e.g. minimum dividend yield/PEG) or confirm screener data has been seeded/refreshed.")
 else:
-    # A slim native-widget column of "open detail" buttons sits beside the
-    # table rather than inside it: this table is hand-rendered HTML (see
-    # render_screener_table()'s docstring), which has no way to trigger a
-    # same-session page switch -- a real `<a href>` would force a full
-    # browser navigation, and this app keeps the Supabase auth session
-    # only in st.session_state, so any real navigation logs the user out
-    # (the same failure mode the sort-header links hit earlier). A native
-    # st.button() stays on the same WebSocket session, so it's used here
-    # instead, one per row, roughly aligned alongside its row.
-    table_col, link_col = st.columns([30, 1])
-    with table_col:
-        st.markdown(
-            render_screener_table(
-                display_rows,
-                user_settings.theme,
-                sortable_columns=SORT_OPTION_TO_KEY,
-                active_sort_key=SORT_OPTION_TO_KEY[sort_col],
-                sort_desc=sort_desc,
-            ),
-            unsafe_allow_html=True,
-        )
-    with link_col:
-        # render_screener_table()'s rows are a fixed, CSS-driven height
-        # (Tailwind `text-sm`/`py-2`) that native st.button()s don't
-        # naturally match -- Streamlit's default button height plus the
-        # vertical gap between stacked elements is taller than a table
-        # row, so without this override the buttons drift further below
-        # their row the further down the table they are. Scoped to this
-        # container's key so it doesn't affect buttons elsewhere on the
-        # page.
-        st.markdown(
-            """
-            <style>
-            .st-key-dashboard_stock_links.stVerticalBlock { gap: 0rem !important; }
-            .st-key-dashboard_stock_links div[data-testid="stElementContainer"] { margin: 0; }
-            .st-key-dashboard_stock_links button {
-                height: 2.04rem; min-height: 2.04rem; width: 100%;
-                padding: 0; display: flex; align-items: center; justify-content: center;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-        with st.container(key="dashboard_stock_links"):
-            st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
-            for i, row in enumerate(display_rows):
-                symbol = row["Symbol"]
-                if st.button("🔍", key=f"open_detail_{i}_{symbol}", help=f"Open {symbol} in Stock Detail"):
-                    st.session_state["selected_symbol"] = symbol
-                    st.switch_page("pages/2_Stock_Detail.py")
+    # A plain st.dataframe (same as the Futures table on the Options page
+    # and the Portfolio page's holdings table) instead of the hand-rendered
+    # render_screener_table -- its column headers are natively
+    # clickable/sortable in the browser, which the HTML table can't do
+    # without a JS bridge back to Python (a real <a href> sort link would
+    # force a browser navigation, and this app keeps the Supabase session
+    # only in st.session_state, so that would log the user out).
+    #
+    # That native client-side sort is exactly why the old per-row "open
+    # detail" button column (one st.button beside each table row) had to
+    # go: those buttons are positioned by their *pre-sort* Python index, so
+    # clicking a header to reorder the table in the browser would leave
+    # them pointing at the wrong row. Row selection (on_select="rerun")
+    # sidesteps this -- Streamlit maps a click back to the correct row in
+    # the original data regardless of how the table is currently sorted --
+    # so a pair of buttons below the table replaces the whole column.
+    event = st.dataframe(
+        table_df,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="dashboard_table",
+    )
+    selected_rows = event.selection.rows if event and event.selection else []
+    if selected_rows:
+        selected_symbol = display_rows[selected_rows[0]]["Stock"]
+        row_detail_col, row_options_col = st.columns(2)
+        with row_detail_col:
+            if st.button(f"Open {selected_symbol} in Stock Detail", key="dashboard_open_detail"):
+                st.session_state["selected_symbol"] = selected_symbol
+                st.switch_page("pages/2_Stock_Detail.py")
+        with row_options_col:
+            if st.button(f"Open {selected_symbol} in Options", key="dashboard_open_options"):
+                st.session_state["fo_symbol"] = selected_symbol
+                st.switch_page("pages/5_Options.py")
 
 st.divider()
-open_symbols = table_df["Symbol"] if not table_df.empty else []
+open_symbols = filtered["symbol"] if not table_df.empty else []
 detail_col, options_col = st.columns(2)
 with detail_col:
     selected_symbol = st.selectbox("Open in Stock Detail →", open_symbols)

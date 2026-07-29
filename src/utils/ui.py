@@ -84,7 +84,7 @@ _TAILWIND_CDN_URL = "https://unpkg.com/tailwindcss@2.2.19/dist/tailwind.min.css"
 
 def inject_tailwind() -> None:
     """Call once near the top of a page before rendering any Tailwind-
-    classed custom HTML (e.g. render_screener_table). Cheap/idempotent to
+    classed custom HTML (e.g. render_stat_grid). Cheap/idempotent to
     call on every page -- it's just a <link> tag, and Streamlit re-runs
     the whole script on every interaction anyway."""
     st.markdown(f'<link rel="stylesheet" href="{_TAILWIND_CDN_URL}">', unsafe_allow_html=True)
@@ -203,40 +203,12 @@ def inject_design_system(theme: Theme | str = Theme.LIGHT) -> None:
     inject_global_styles(theme)
 
 
-def _table_theme_classes(theme: Theme | str) -> dict[str, str]:
+def _surface_classes(theme: Theme | str) -> dict[str, str]:
     """Tailwind v2 has no dark: variant in this static build, and we can't
     reliably detect the viewer's actual browser theme from Python, so we
     reuse the same user_settings.theme preference that already drives
-    plotly_template() to pick a light or dark palette explicitly."""
-    if Theme(theme) == Theme.DARK:
-        return {
-            "wrapper_border": "border-gray-700",
-            "header": "bg-gray-800 text-gray-300",
-            "row_odd": "bg-gray-900",
-            "row_even": "bg-gray-800",
-            "row_hover": "hover:bg-gray-700",
-            "cell_text": "text-gray-100",
-            "cell_border": "border-gray-700",
-            "card": "bg-gray-800 border-gray-700",
-            "muted": "text-gray-400",
-        }
-    return {
-        "wrapper_border": "border-gray-200",
-        "header": "bg-gray-50 text-gray-600",
-        "row_odd": "bg-white",
-        "row_even": "bg-gray-50",
-        "row_hover": "hover:bg-indigo-50",
-        "cell_text": "text-gray-800",
-        "cell_border": "border-gray-100",
-        "card": "bg-white border-gray-200",
-        "muted": "text-gray-500",
-    }
-
-
-def _surface_classes(theme: Theme | str) -> dict[str, str]:
-    """Same explicit-branch-on-Theme pattern as _table_theme_classes(),
-    for the generic card/pill/stat-tile components below rather than the
-    screener table specifically."""
+    plotly_template() to pick a light or dark palette explicitly -- for
+    the generic card/pill/stat-tile components below."""
     if Theme(theme) == Theme.DARK:
         return {
             "card_bg": "bg-gray-800", "card_border": "border-gray-700", "card_text": "text-gray-100",
@@ -262,16 +234,6 @@ def render_card(inner_html: str, theme: Theme | str = Theme.SYSTEM, *, extra_cla
     return f'<div class="rounded-lg border {c["card_border"]} {c["card_bg"]} {c["card_text"]} p-4 shadow-sm {extra_classes}">{inner_html}</div>'
 
 
-def render_muted_note(text: str, theme: Theme | str = Theme.SYSTEM) -> str:
-    """Small muted inline note -- e.g. an "as of <date>" caption tucked
-    under a stale table cell's value. Deliberately a bare <span>, not a
-    block element, so callers can drop it inline after a <br> inside a
-    single table cell's string (see render_screener_table's docstring:
-    cell values are raw HTML, not escaped)."""
-    c = _surface_classes(theme)
-    return f'<span class="{c["muted"]} text-xs">{text}</span>'
-
-
 def render_pill(text: str, tone: str = "accent", theme: Theme | str = Theme.SYSTEM) -> str:
     """Small badge/pill -- alert-type labels, "coming soon" tags, active
     filter indicators. tone="accent" uses the indigo palette, "neutral"
@@ -292,8 +254,7 @@ def render_stat_tile(label: str, value: str, caption: str | None = None, theme: 
 
 def render_stat_grid(stats: list[tuple[str, str, str | None]], theme: Theme | str = Theme.SYSTEM, cols: int = 2) -> str:
     """`stats` is a list of (label, value, caption) tuples. Responsive:
-    one column below the 768px breakpoint, `cols` columns at/above it --
-    same md: breakpoint render_screener_table() already established."""
+    one column below the 768px breakpoint, `cols` columns at/above it."""
     tiles = "".join(render_stat_tile(label, value, caption, theme) for label, value, caption in stats)
     return f'<div class="grid grid-cols-1 md:grid-cols-{cols} gap-3">{tiles}</div>'
 
@@ -307,103 +268,3 @@ def render_alert_row(alert_type_label: str, config_summary: str, cooldown_minute
     return f'<div class="flex flex-wrap items-center gap-2">{pill}<span class="{c["card_text"]} text-sm">{config_summary}</span><span class="{c["muted"]} text-xs">· cooldown {cooldown_minutes}min</span>{inactive}</div>'
 
 
-def render_screener_table(
-    rows: list[dict],
-    theme: Theme | str = Theme.SYSTEM,
-    sortable_columns: dict[str, str] | None = None,
-    active_sort_key: str | None = None,
-    sort_desc: bool = False,
-) -> str:
-    """Tailwind-classed HTML for the Dashboard screener table: a normal
-    table on tablet/desktop (md: and up, >=768px), and a stacked list of
-    cards on phones (below md:) -- CSS-only responsive switch (`hidden
-    md:block` / `md:hidden`), no JS. Column values in `rows` are already
-    pre-formatted strings, some containing raw HTML (status icons,
-    pass/fail marks); `Symbol` is carried for the caller's own use (e.g. a
-    selectbox below the table) and is not rendered here.
-
-    Fixes the real mobile problem this Dashboard had: the previous plain
-    `df.to_html()` table had no responsive handling at all -- on a narrow
-    viewport it either overflowed the page or squeezed unreadably. The
-    desktop table below is also wrapped in `overflow-x-auto` as a safety
-    net even at wider sizes.
-
-    `sortable_columns` maps a column label to the underlying sort key the
-    caller understands, purely to decide which header gets the ▲/▼ arrow
-    for `active_sort_key`/`sort_desc` -- headers are NOT clickable links.
-    An `<a href="?sort=...">` was tried and reverted: this table is
-    hand-rendered HTML with no JS bridge back to Python, so a click would
-    have to be a real browser navigation -- but this app deliberately
-    keeps the Supabase auth session only in `st.session_state` (never a
-    cookie/localStorage, see session.py's docstring), so any real
-    navigation starts a brand-new, logged-out session. The actual sort
-    interaction is a native `st.selectbox`("Sort By")/`st.checkbox`
-    ("Descending") pair rendered above this table (Dashboard), which stay
-    on the same WebSocket session; this function just mirrors their state
-    visually via the arrow.
-    """
-    c = _table_theme_classes(theme)
-    if not rows:
-        return ""
-
-    columns = [k for k in rows[0] if k != "Symbol"]
-    sortable_columns = sortable_columns or {}
-
-    def _header_cell(col: str) -> str:
-        key = sortable_columns.get(col)
-        is_active = key is not None and key == active_sort_key
-        arrow = (" ▼" if sort_desc else " ▲") if is_active else ""
-        return (
-            f'<th class="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide '
-            f'whitespace-nowrap border-b {c["wrapper_border"]}">{col}{arrow}</th>'
-        )
-
-    header_cells = "".join(_header_cell(col) for col in columns)
-    body_rows = []
-    for i, row in enumerate(rows):
-        stripe = c["row_odd"] if i % 2 == 0 else c["row_even"]
-        cells = "".join(
-            f'<td class="px-3 py-2 text-sm whitespace-nowrap border-b {c["cell_border"]}">{row[col]}</td>'
-            for col in columns
-        )
-        body_rows.append(f'<tr class="{stripe} {c["row_hover"]} {c["cell_text"]}">{cells}</tr>')
-
-    table_html = f"""
-    <div class="hidden md:block w-full overflow-x-auto rounded-lg border {c['wrapper_border']}">
-      <table class="min-w-full">
-        <thead class="{c['header']}"><tr>{header_cells}</tr></thead>
-        <tbody>{''.join(body_rows)}</tbody>
-      </table>
-    </div>
-    """
-
-    card_fields = [col for col in columns if col not in ("#", "Stock", "Status")]
-    cards = []
-    for row in rows:
-        stat_pairs = "".join(
-            f'<div class="{c["muted"]} text-xs">{col}</div><div class="{c["cell_text"]} text-sm mb-1">{row[col]}</div>'
-            for col in card_fields
-        )
-        # Built as one continuous line, not a multi-line/indented f-string
-        # -- joining indented multi-line card blocks left a whitespace-only
-        # line between each pair of cards, which Streamlit's markdown
-        # renderer treats as a blank line, ending the HTML block early.
-        # Everything after the first card then got parsed as an indented
-        # code block and shown as literal `<div>` text instead of being
-        # rendered (only reproduced on narrow/mobile viewports, since the
-        # desktop table's <tr> rows are built the same single-line way and
-        # never had this problem).
-        status_span = f'<span class="shrink-0">{row["Status"]}</span>' if "Status" in row else ""
-        cards.append(
-            f'<div class="rounded-lg border {c["card"]} p-3 shadow-sm">'
-            f'<div class="flex items-center justify-between gap-2 mb-2">'
-            f'<span class="{c["cell_text"]} font-semibold text-sm">#{row["#"]} {row["Stock"]}</span>'
-            f"{status_span}"
-            f"</div>"
-            f'<div class="grid grid-cols-2 gap-x-3">{stat_pairs}</div>'
-            f"</div>"
-        )
-
-    cards_html = f'<div class="md:hidden flex flex-col gap-3">{"".join(cards)}</div>'
-
-    return table_html + cards_html
