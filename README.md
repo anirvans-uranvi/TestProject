@@ -151,10 +151,14 @@ settings.
   matching `criterion_52w_high`/`criterion_52w_low` display flags -- see
   its comments for a real `42P16` error hit while writing it: `create or
   replace view` can only append new columns, never insert them mid-list),
-  and `0013_screener_fallback_and_portfolio_symbols.sql` (falls back to
+  `0013_screener_fallback_and_portfolio_symbols.sql` (falls back to
   the last snapshot row that actually has a price instead of always
   using today's, and folds in the viewing user's portfolio symbols --
-  see [Portfolio](#portfolio) for why).
+  see [Portfolio](#portfolio) for why), and
+  `0015_add_is_etf_to_companies.sql` (adds `companies.is_etf`, filtered
+  out of this same view -- ETFs/funds tracked via a portfolio still
+  showed up on this stock-focused screener otherwise; see
+  [Portfolio](#portfolio) for the classification story).
 - **Password reset uses a 6-digit code, not the email's magic link.**
   Supabase's recovery link puts the session token in the URL fragment
   (`#access_token=...`), which no server (including ours) ever receives,
@@ -603,6 +607,18 @@ viewing user's own portfolio symbols, so it's always selectable on both.
 In short: upload → save → click "Manual refresh" (or wait for the next
 cron run) → real LTP appears, and the symbol becomes viewable everywhere
 except Alerts.
+
+**Except the Dashboard's screener list itself doesn't show ETFs/funds**
+(migration `0015`, `companies.is_etf`) -- a momentum/dividend/PEG stock
+screener doesn't make much sense for a fund (those criteria are all
+meaningless for one), so real ETFs/funds (NIFTYBEES, GILT5YBEES,
+LIQUIDCASE, LTGILTCASE) are excluded from this one list specifically;
+Stock Detail, Options, and the Portfolio page still show them fine. This
+is classified automatically the first time a new symbol is tracked, via
+its real display name (yfinance's `longName`) -- not yfinance's own
+`quoteType` field, which is unreliable for Indian-listed ETFs (it
+returns `"EQUITY"` for every one of these). See
+`docs/CODEBASE_GUIDE.md`'s Futures & Options section for the full story.
 
 `0013` also fixed a related bug: the view previously always used
 *today's* snapshot row per symbol even when today's price fetch failed,

@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import get_settings  # noqa: E402
 from src.data_providers.factory import get_fundamentals_provider, get_price_provider  # noqa: E402
+from src.data_providers.yfinance_provider import fetch_display_name  # noqa: E402
 from src.repositories import companies_repo  # noqa: E402
 from src.repositories.supabase_client import get_service_client  # noqa: E402
 from src.services import fo_service, portfolio_service, refresh_service, screener_service  # noqa: E402
@@ -49,10 +50,13 @@ def run_once(mode: str) -> None:
     # Also track any symbols referenced by uploaded portfolios (ETFs,
     # gilt/liquid funds, non-Nifty50 stocks) so their LTP gets refreshed
     # too -- registers a minimal companies row for any not seen before.
-    # nifty50_constituents is never touched, so these stay excluded from
-    # the Dashboard's screener view (its latest_screener_view inner-joins
-    # on is_current). Tolerant of the portfolio_holdings migration not
-    # being applied yet, same as the F&O cache recompute below.
+    # nifty50_constituents is never touched, so these never become an
+    # official constituent -- but (since migration 0013)
+    # latest_screener_view's own portfolio_holdings widening still puts
+    # them on the Dashboard for the tracking user; is_etf (migration
+    # 0015) is what actually excludes real ETFs/funds from that list.
+    # Tolerant of the portfolio_holdings migration not being applied yet,
+    # same as the F&O cache recompute below.
     try:
         portfolio_rows = (
             client.table("portfolio_holdings").select("symbol, raw_name").not_.is_("symbol", "null").execute().data
@@ -66,6 +70,15 @@ def run_once(mode: str) -> None:
         portfolio_symbols = [r["symbol"] for r in portfolio_rows]
         new_companies = portfolio_service.resolve_tracked_symbols(portfolio_symbols, known_symbols, raw_name_by_symbol)
         if new_companies:
+            # Best-effort ETF/fund classification via each symbol's real
+            # display name (see looks_like_etf_name()'s docstring for why
+            # this, not yfinance's own quoteType, is the signal) -- a
+            # failed lookup just leaves is_etf at its False default
+            # rather than blocking registration.
+            for company in new_companies:
+                display_name = fetch_display_name(company.symbol)
+                if display_name and portfolio_service.looks_like_etf_name(display_name):
+                    company.is_etf = True
             companies_repo.upsert_companies(client, new_companies)
             logger.info("portfolio tracking: registered %d new symbol(s)", len(new_companies))
         symbols = sorted(set(symbols) | set(portfolio_symbols))

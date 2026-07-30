@@ -20,9 +20,9 @@ import {
   returnNTradingDaysAgo,
   ttmDividendYield,
 } from "./calculations.ts";
-import { fetchChartData, fetchFundamentals } from "./yahoo.ts";
+import { fetchChartData, fetchDisplayName, fetchFundamentals } from "./yahoo.ts";
 import { recomputeDashboardMetrics } from "../_shared/dashboardMetrics.ts";
-import { resolveTrackedSymbols } from "../_shared/portfolioSymbols.ts";
+import { looksLikeEtfName, resolveTrackedSymbols } from "../_shared/portfolioSymbols.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -290,10 +290,13 @@ Deno.serve(async (req: Request) => {
   // Also track any symbols referenced by uploaded portfolios (ETFs,
   // gilt/liquid funds, non-Nifty50 stocks) so their LTP gets refreshed
   // too -- registers a minimal companies row for any not seen before.
-  // nifty50_constituents is never touched, so these stay excluded from
-  // the Dashboard's screener view (latest_screener_view inner-joins on
-  // is_current). Tolerant of the portfolio_holdings migration not being
-  // applied yet, same as the dashboard_fo_metrics recompute below.
+  // nifty50_constituents is never touched, so these never become an
+  // official constituent -- but (since migration 0013)
+  // latest_screener_view's own portfolio_holdings widening still puts
+  // them on the Dashboard for the tracking user; isEtf (migration 0015)
+  // is what actually excludes real ETFs/funds from that list. Tolerant
+  // of the portfolio_holdings migration not being applied yet, same as
+  // the dashboard_fo_metrics recompute below.
   try {
     const { data: portfolioRows } = await serviceClient
       .from("portfolio_holdings")
@@ -310,7 +313,23 @@ Deno.serve(async (req: Request) => {
       }
       const newCompanies = resolveTrackedSymbols(portfolioSymbols, knownSymbols, rawNameBySymbol);
       if (newCompanies.length > 0) {
-        await serviceClient.from("companies").upsert(newCompanies, { onConflict: "symbol" });
+        // Best-effort ETF/fund classification via each symbol's real
+        // display name (see portfolioSymbols.ts's looksLikeEtfName() for
+        // why this, not yfinance's own quoteType, is the signal) -- a
+        // failed lookup just leaves isEtf at its false default rather
+        // than blocking registration.
+        for (const company of newCompanies) {
+          const displayName = await fetchDisplayName(company.symbol);
+          if (displayName && looksLikeEtfName(displayName)) {
+            company.isEtf = true;
+          }
+        }
+        await serviceClient
+          .from("companies")
+          .upsert(
+            newCompanies.map((c) => ({ symbol: c.symbol, name: c.name, is_etf: c.isEtf })),
+            { onConflict: "symbol" },
+          );
       }
       symbols = Array.from(new Set([...symbols, ...portfolioSymbols]));
     }

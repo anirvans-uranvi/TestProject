@@ -14,6 +14,7 @@ class Company(BaseModel):
     industry: str | None = None
     isin: str | None = None
     updated_at: datetime | None = None
+    is_etf: bool = False
 
 
 class Nifty50Constituent(BaseModel):

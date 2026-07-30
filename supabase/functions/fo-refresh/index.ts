@@ -165,7 +165,23 @@ Deno.serve(async (req: Request) => {
       }
       const newCompanies = resolveTrackedSymbols(portfolioSymbols, knownSymbols, rawNameBySymbol);
       if (newCompanies.length > 0) {
-        await serviceClient.from("companies").upsert(newCompanies, { onConflict: "symbol" });
+        // Unlike manual-refresh/index.ts, this function has no Yahoo
+        // Finance access (it only ever talks to NSE's F&O bhavcopy), so
+        // it can't classify a brand-new symbol as an ETF/fund here --
+        // every row registered by this path stays `is_etf = false`
+        // (the column's own default) until manual-refresh or
+        // scripts/run_refresh.py/fetch_fo_data.py next sees it. In
+        // practice this is a narrow gap: real ETFs/funds don't have
+        // listed derivatives, so this path registering one first (before
+        // either of those) would be unusual. See migration 0015 and
+        // src/services/portfolio_service.py's looksLikeEtfName()
+        // docstring for the full story.
+        await serviceClient
+          .from("companies")
+          .upsert(
+            newCompanies.map((c) => ({ symbol: c.symbol, name: c.name })),
+            { onConflict: "symbol" },
+          );
       }
       for (const symbol of portfolioSymbols) universe.add(symbol);
     }

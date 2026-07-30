@@ -172,6 +172,26 @@ class TestResolveTrackedSymbols:
         new = portfolio_service.resolve_tracked_symbols(["SBIN"], known_company_symbols={"SBIN"}, raw_name_by_symbol={})
         assert new == []
 
+    def test_new_companies_default_to_not_etf(self):
+        """is_etf classification is the caller's job (a live display-name
+        lookup, see looks_like_etf_name below) -- this stays a pure diff."""
+        new = portfolio_service.resolve_tracked_symbols(["NIFTYBEES"], known_company_symbols=set(), raw_name_by_symbol={})
+        assert new[0].is_etf is False
+
+
+class TestLooksLikeEtfName:
+    def test_matches_real_etf_and_fund_display_names(self):
+        assert portfolio_service.looks_like_etf_name("Nippon India ETF Nifty 50 BeES") is True
+        assert portfolio_service.looks_like_etf_name("Zerodha Nifty 1D Rate Liquid ETF") is True
+        assert (
+            portfolio_service.looks_like_etf_name("Zerodha Mutual Fund - Zerodha Nifty 8-13 Yr G-sec Etf") is True
+        )
+
+    def test_does_not_match_real_stock_names(self):
+        assert portfolio_service.looks_like_etf_name("Hindustan Zinc Limited") is False
+        assert portfolio_service.looks_like_etf_name("IndusInd Bank Limited") is False
+        assert portfolio_service.looks_like_etf_name("Vedanta Aluminium Metal Limited") is False
+
 
 class TestHoldingsToRecords:
     def test_builds_portfolio_holding_models(self):

@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.data_providers import nse_fo_provider  # noqa: E402
 from src.data_providers.mock_provider import MockFOProvider  # noqa: E402
 from src.data_providers.nse_fo_provider import FOBhavcopy  # noqa: E402
+from src.data_providers.yfinance_provider import fetch_display_name  # noqa: E402
 from src.repositories import companies_repo, fo_repo  # noqa: E402
 from src.repositories.supabase_client import get_service_client  # noqa: E402
 from src.services import portfolio_service  # noqa: E402
@@ -102,6 +103,15 @@ def main() -> None:
         portfolio_symbols = [r["symbol"] for r in portfolio_rows]
         new_companies = portfolio_service.resolve_tracked_symbols(portfolio_symbols, known_symbols, raw_name_by_symbol)
         if new_companies:
+            # Same best-effort ETF/fund classification as
+            # scripts/run_refresh.py -- see looks_like_etf_name()'s
+            # docstring. Registration can happen here first (this script
+            # and run_refresh.py run independently on cron), so both
+            # paths need to classify, not just one.
+            for company in new_companies:
+                display_name = fetch_display_name(company.symbol)
+                if display_name and portfolio_service.looks_like_etf_name(display_name):
+                    company.is_etf = True
             companies_repo.upsert_companies(client, new_companies)
             logger.info("portfolio tracking: registered %d new symbol(s)", len(new_companies))
         universe = universe | set(portfolio_symbols)

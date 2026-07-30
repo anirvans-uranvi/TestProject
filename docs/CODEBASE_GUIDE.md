@@ -310,7 +310,7 @@ without needing this treatment.
 - **`market_calendar.py`** — NSE trading-day/market-state logic. The holiday list (`NSE_HOLIDAYS`) is hardcoded **per calendar year** and needs a manual update every year; falls back to weekday-only for years not listed.
 - **`threshold_override.py`** — `daily_screener_snapshots` is computed server-side against *default* thresholds (the stable audit trail); a signed-in user can configure their own thresholds in Settings, so pages re-run `build_classification()` client-side against the row's stored raw inputs (which are threshold-independent) to reflect that choice, without a server-side recompute per user. Also recomputes `is_stale` from `data_quality.stale_minutes` against the user's own `stale_data_threshold_minutes` when available.
 - **`explanation.py`** — `explain_classification(row)` builds the plain-English sentence shown on Stock Detail, branching on which criteria passed/failed/are missing.
-- **`portfolio_service.py`** — CSV parsing for the two supported broker exports (`parse_zerodha_csv`, `parse_dhan_csv`), name-to-symbol matching (`match_symbol`, normalized-substring containment against `companies.name`), cross-broker merging (`merge_holdings`), and live valuation (`compute_portfolio_view`). `resolve_tracked_symbols` is the pure diff both refresh paths call to register newly-seen portfolio symbols. See the Portfolio section below.
+- **`portfolio_service.py`** — CSV parsing for the two supported broker exports (`parse_zerodha_csv`, `parse_dhan_csv`), name-to-symbol matching (`match_symbol`, normalized-substring containment against `companies.name`), cross-broker merging (`merge_holdings`), and live valuation (`compute_portfolio_view`). `resolve_tracked_symbols` is the pure diff both refresh paths call to register newly-seen portfolio symbols; `looks_like_etf_name` is the real-display-name-based ETF/fund classifier those same paths apply to it before upserting (migration `0015`). See the Portfolio section below and the Futures & Options section's "A follow-up problem 0013 itself introduced" paragraph for the full ETF story.
 
 ## Notifications (`src/notifications/`)
 
@@ -914,6 +914,62 @@ Nifty50 constituents everyone sees. One consequence: "Total stocks" /
 "Screener (X of Y stocks)" on the Dashboard is no longer necessarily 50
 — both already read `len(df)`/`len(filtered)` dynamically
 (`pages/1_Dashboard.py`), so no page code changed, only the view.
+
+**A follow-up problem `0013` itself introduced**: it puts *every*
+tracked portfolio symbol on the Dashboard, including ETFs and gilt/liquid
+funds (NIFTYBEES, GILT5YBEES, LIQUIDCASE, LTGILTCASE) -- a
+momentum/dividend/PEG stock screener doesn't make sense for these (PE,
+PEG, and dividend criteria are all meaningless for a fund), and a live
+user asked for them to stay off this specific list (Stock
+Detail/Options/Portfolio still show them fine; this is a
+Dashboard-screener-only exclusion). Fixed in
+`0015_add_is_etf_to_companies.sql`: a new `companies.is_etf boolean not
+null default false` column, filtered out of `latest_screener_view` with
+a plain `where not c.is_etf` (Nifty50 constituents are always real
+stocks, so this never affects them).
+
+The hard part was classification, not the column. yfinance's own
+`quoteType` field is **unreliable for Indian-listed ETFs**: checked live
+against every ETF/fund this app tracks and Yahoo returns `"EQUITY"` for
+all of them (confirmed for NIFTYBEES, GILT5YBEES, LIQUIDCASE,
+LTGILTCASE -- a real Yahoo data-quality quirk for this market, not
+something wrong on this app's side). The real display name is the
+reliable signal instead -- every one of those four literally contains
+"ETF" (e.g. yfinance's `longName` for NIFTYBEES is "Nippon India ETF
+Nifty 50 BeES") -- so `portfolio_service.looks_like_etf_name(name)` is
+just `"etf" in name.lower()`, checked against the real display name, not
+`companies.name` (which for a portfolio-only symbol is often just the
+raw ticker itself -- Zerodha's CSV export uses the exact NSE symbol as
+its own "Instrument" field, with no separate display name available).
+`src/data_providers/yfinance_provider.py::fetch_display_name(symbol)` is
+a one-off, best-effort `longName`/`shortName` lookup (returns `None` on
+any failure rather than raising) used only at company-registration time
+-- deliberately **not** added to the `FundamentalsDataProvider` ABC,
+since that interface is the per-refresh PE/PEG/EPS/market-cap contract
+every provider (Dhan, manual, mock, yfinance) implements, and this is a
+one-off lookup only the yfinance-backed registration path needs.
+
+Both Python registration paths (`scripts/run_refresh.py`,
+`scripts/fetch_fo_data.py` -- they run independently on cron, so either
+could register a given symbol first) call `fetch_display_name` +
+`looks_like_etf_name` for each brand-new symbol from
+`resolve_tracked_symbols` before upserting, same TS mirror
+(`fetchDisplayName` in `manual-refresh/yahoo.ts`, `looksLikeEtfName` in
+`_shared/portfolioSymbols.ts`) wired into `manual-refresh/index.ts`'s
+own portfolio-widening block. `resolve_tracked_symbols`/
+`resolveTrackedSymbols` themselves stay pure, network-free diffs, same
+as before -- classification is entirely the caller's job, applied to the
+`Company`/`NewCompany` objects just before the upsert. **One known gap**:
+`fo-refresh/index.ts` also registers new portfolio symbols (for F&O
+universe widening) but has no Yahoo Finance access at all, so it can't
+classify there -- a symbol this path registers first stays `is_etf =
+false` until one of the other three paths next sees it. Accepted as
+narrow in practice: real ETFs/funds don't have listed derivatives, so
+this path being the *first* to register one would be unusual. Migration
+`0015` also backfills the four ETFs already tracked at the time it was
+written, verified via a live yfinance `longName` check against every
+non-Nifty50 symbol tracked at the time (all four straightforwardly
+matched; HINDZINC/INDUSINDBK/INDHOTEL/VAML correctly did not).
 
 Once the fallback could silently show a stale price, the Dashboard
 needed a way to say so: `pages/1_Dashboard.py` computes

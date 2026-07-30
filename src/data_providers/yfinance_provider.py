@@ -146,6 +146,27 @@ class YFinancePriceProvider(PriceDataProvider):
         return result
 
 
+def fetch_display_name(symbol: str) -> str | None:
+    """Best-effort real display name lookup (yfinance's `longName`,
+    falling back to `shortName`) for a symbol with no proper name on file
+    yet. Used only once, at company-registration time, to classify a
+    brand-new portfolio-tracked symbol as an ETF/fund via
+    portfolio_service.looks_like_etf_name() -- not part of the
+    FundamentalsDataProvider interface (that's the per-refresh
+    PE/PEG/EPS/market-cap contract every provider implements; this is a
+    one-off lookup only the yfinance-backed registration path needs, and
+    Dhan/manual/mock providers have no equivalent). Deliberately swallows
+    every failure and returns None rather than raising -- this is a
+    best-effort classification, not a critical-path fetch worth
+    retrying; a symbol whose lookup fails just stays `is_etf=False`."""
+    try:
+        _throttle()
+        info = yf.Ticker(_yf_symbol(symbol)).get_info()
+    except Exception:  # noqa: BLE001
+        return None
+    return info.get("longName") or info.get("shortName")
+
+
 class YFinanceFundamentalsProvider(FundamentalsDataProvider):
     name = "yfinance"
 

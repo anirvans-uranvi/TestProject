@@ -181,3 +181,26 @@ export async function fetchFundamentals(symbol: string): Promise<FundamentalsRaw
 
   throw new Error(`quoteSummary fetch failed for ${symbol} even after a fresh crumb session`);
 }
+
+/** Best-effort real display name lookup (`price` module's `longName`,
+ * falling back to `shortName`) -- mirrors fetch_display_name() in
+ * yfinance_provider.py, used only at company-registration time to
+ * classify a brand-new portfolio-tracked symbol as an ETF/fund (see
+ * portfolioSymbols.ts's looksLikeEtfName()). Swallows every failure and
+ * returns null rather than throwing -- this is a one-off, best-effort
+ * classification, not a critical-path fetch worth this function's own
+ * fresh-crumb retry. */
+export async function fetchDisplayName(symbol: string): Promise<string | null> {
+  try {
+    const session = await getCrumbSession();
+    const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${yahooSymbol(symbol)}` +
+      `?modules=price&crumb=${encodeURIComponent(session.crumb)}`;
+    const resp = await fetch(url, { headers: { "User-Agent": USER_AGENT, Cookie: session.cookie } });
+    if (!resp.ok) return null;
+    const json = await resp.json();
+    const price = json?.quoteSummary?.result?.[0]?.price;
+    return price?.longName ?? price?.shortName ?? null;
+  } catch {
+    return null;
+  }
+}

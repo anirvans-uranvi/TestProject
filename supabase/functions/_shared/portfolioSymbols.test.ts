@@ -1,9 +1,11 @@
-// Tests for portfolioSymbols.ts's resolveTrackedSymbols. Run with:
+// Tests for portfolioSymbols.ts's resolveTrackedSymbols/looksLikeEtfName.
+// Run with:
 //   deno test supabase/functions/_shared/portfolioSymbols.test.ts
 //
-// Mirrors tests/test_portfolio_service.py's TestResolveTrackedSymbols.
+// Mirrors tests/test_portfolio_service.py's TestResolveTrackedSymbols /
+// TestLooksLikeEtfName.
 import { assertEquals } from "jsr:@std/assert@1";
-import { resolveTrackedSymbols } from "./portfolioSymbols.ts";
+import { looksLikeEtfName, resolveTrackedSymbols } from "./portfolioSymbols.ts";
 
 Deno.test("resolveTrackedSymbols: returns only symbols not already known", () => {
   const result = resolveTrackedSymbols(
@@ -19,7 +21,7 @@ Deno.test("resolveTrackedSymbols: returns only symbols not already known", () =>
 
 Deno.test("resolveTrackedSymbols: falls back to the symbol itself when no raw name is known", () => {
   const result = resolveTrackedSymbols(["NIFTYBEES"], new Set(), {});
-  assertEquals(result, [{ symbol: "NIFTYBEES", name: "NIFTYBEES" }]);
+  assertEquals(result, [{ symbol: "NIFTYBEES", name: "NIFTYBEES", isEtf: false }]);
 });
 
 Deno.test("resolveTrackedSymbols: no new companies when everything is already known", () => {
@@ -34,4 +36,16 @@ Deno.test("resolveTrackedSymbols: deduplicates repeated symbols across users", (
     { NIFTYBEES: "Nifty BeES" },
   );
   assertEquals(result.length, 1);
+});
+
+Deno.test("looksLikeEtfName: matches real ETF/fund display names, case-insensitively", () => {
+  assertEquals(looksLikeEtfName("Nippon India ETF Nifty 50 BeES"), true);
+  assertEquals(looksLikeEtfName("Zerodha Nifty 1D Rate Liquid ETF"), true);
+  assertEquals(looksLikeEtfName("zerodha mutual fund - zerodha nifty 8-13 yr g-sec etf"), true);
+});
+
+Deno.test("looksLikeEtfName: does not match real stock names", () => {
+  assertEquals(looksLikeEtfName("Hindustan Zinc Limited"), false);
+  assertEquals(looksLikeEtfName("IndusInd Bank Limited"), false);
+  assertEquals(looksLikeEtfName("Vedanta Aluminium Metal Limited"), false);
 });

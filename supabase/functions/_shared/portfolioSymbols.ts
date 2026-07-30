@@ -14,6 +14,7 @@
 export interface NewCompany {
   symbol: string;
   name: string;
+  isEtf: boolean;
 }
 
 export function resolveTrackedSymbols(
@@ -27,5 +28,20 @@ export function resolveTrackedSymbols(
   return newSymbols.map((symbol) => ({
     symbol,
     name: rawNameBySymbol[symbol] ?? symbol,
+    isEtf: false,
   }));
+}
+
+// Direct TypeScript port of looks_like_etf_name in
+// src/services/portfolio_service.py -- see that function's docstring for
+// why this is name-based (yfinance's real longName/shortName) rather
+// than yfinance's own `quoteType` field, which is unreliable for
+// Indian-listed ETFs (verified live: it returns "EQUITY" for every
+// ETF/fund this app tracks). The caller (index.ts) fetches each new
+// symbol's real display name via yahoo.ts's fetchDisplayName() and sets
+// `isEtf` on the NewCompany objects above before upserting -- this stays
+// a pure string check, mirroring resolveTrackedSymbols() staying a pure,
+// network-free diff.
+export function looksLikeEtfName(name: string): boolean {
+  return name.toLowerCase().includes("etf");
 }

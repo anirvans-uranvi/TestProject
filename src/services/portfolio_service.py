@@ -208,13 +208,39 @@ def resolve_tracked_symbols(
     known_company_symbols: set[str],
     raw_name_by_symbol: dict[str, str],
 ) -> list[Company]:
-    """Pure diff used by the refresh pipeline (scripts/run_refresh.py):
-    which portfolio-only symbols need a minimal companies row registered
-    before they can be fetched/priced. Never touches
-    nifty50_constituents -- these stay excluded from the Dashboard's
-    inner-joined view."""
+    """Pure diff used by the refresh pipeline (scripts/run_refresh.py,
+    scripts/fetch_fo_data.py): which portfolio-only symbols need a
+    minimal companies row registered before they can be fetched/priced.
+    Never touches nifty50_constituents -- these never become an official
+    constituent -- but (since migration 0013) they DO still show up on
+    the Dashboard's own screener for the tracking user, via
+    latest_screener_view's own portfolio_holdings widening. Returns
+    `is_etf=False` (the model default) for every row; the caller is
+    responsible for classifying real ETFs/funds via
+    looks_like_etf_name() before upserting -- this stays a pure,
+    network-free diff on purpose (see its own unit tests)."""
     new_symbols = sorted(set(portfolio_symbols) - known_company_symbols)
     return [Company(symbol=symbol, name=raw_name_by_symbol.get(symbol, symbol)) for symbol in new_symbols]
+
+
+def looks_like_etf_name(name: str) -> bool:
+    """Classifies a symbol as an ETF/fund from its *real* display name --
+    e.g. yfinance's `longName`/`shortName`, not `companies.name` for a
+    portfolio-only symbol, which is often just the raw ticker itself with
+    no real name attached (Zerodha's CSV export uses the exact NSE symbol
+    as its own "Instrument" field, so `raw_name == symbol` for every
+    Zerodha-sourced holding -- see parse_zerodha_csv() above).
+
+    Deliberately NOT based on yfinance's own `quoteType` field: checked
+    live against every ETF/fund this app currently tracks (NIFTYBEES,
+    GILT5YBEES, LIQUIDCASE, LTGILTCASE) and Yahoo returns `"EQUITY"` for
+    every single one of them -- a real data-quality quirk for
+    Indian-listed ETFs, not a bug on this app's side. The real display
+    name is a much more reliable signal: all four literally contain
+    "ETF" (e.g. "Nippon India ETF Nifty 50 BeES", "Zerodha Nifty 1D Rate
+    Liquid ETF"), and no real NSE stock this app tracks has "ETF"
+    anywhere in its name."""
+    return "etf" in name.lower()
 
 
 def holdings_to_records(user_id: str, portfolio_name: str, broker: str, holdings: list[dict]) -> list[PortfolioHolding]:
