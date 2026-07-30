@@ -457,9 +457,9 @@ options-derived screener columns — **5% CSP** and **5% CC** — showing the
 actual strikes, premiums, and trade dates used, not just the final
 percentage -- both **5% CSP** and **5% CC** are shown as a near/next/far
 month table (CC's table also carries "Net Investment" and "Assignment
-Profit" columns the Dashboard doesn't). Open it from the Dashboard's
-"Open in Options →" section or the "View F&O / options" button on Stock
-Detail.
+Profit" columns the Dashboard doesn't). Open it by selecting a row in the
+Dashboard's table and clicking "Open in Options", or via the "View F&O /
+options" button on Stock Detail.
 
 **5% CC** is a covered-call yield: sell 1 lot of the OTM call whose
 strike is the *lowest one still at or above* 5% above spot (not merely
@@ -494,10 +494,10 @@ instead of recalculating across every open option contract on every page
 load -- every refresh path (the cron script, `fetch_fo_data.py`, and both
 on-demand refresh buttons below) recomputes all 3 months as its last
 step, so it's never more than one refresh out of date. An **"Options
-month" dropdown** next to "Sort By" lets you pick which of the 3 cached
-months feeds those two columns -- purely a re-render over already-cached
-rows, no new fetch. See `docs/CODEBASE_GUIDE.md`'s Futures & Options
-section ("Dashboard cache") for the full pipeline.
+month" dropdown** lets you pick which of the 3 cached months feeds those
+two columns -- purely a re-render over already-cached rows, no new
+fetch. See `docs/CODEBASE_GUIDE.md`'s Futures & Options section
+("Dashboard cache") for the full pipeline.
 
 **Data source:** the NSE F&O UDiFF **bhavcopy** (one zip per trading day),
 the only reliable free source for NSE derivatives — yfinance has none, and
@@ -612,10 +612,9 @@ the same resilience `get_latest_prices` (used by the Portfolio page)
 already had. The Dashboard (`pages/1_Dashboard.py`) flags exactly which
 rows are showing a fallback price: it compares each row's
 `snapshot_date` to the newest `snapshot_date` seen anywhere in that
-load's batch, and any row falling short gets a small muted "as of
-<date>" caption under its LTP (`render_muted_note`,
-`src/utils/ui.py`) -- shown only when a fallback price is actually being
-displayed, never for a symbol with no price at all.
+load's batch, and any row falling short gets a " (as of <date>)" suffix
+appended to its LTP cell -- shown only when a fallback price is actually
+being displayed, never for a symbol with no price at all.
 
 **CC ROI / Assignment ROI** (per-holding covered-call suggestion): a
 "Covered call expiry" dropdown sits above the tabs and applies to every
