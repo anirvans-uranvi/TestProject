@@ -135,19 +135,21 @@ tests/                             Pytest suite -- almost entirely calculations/
 ## Database schema
 
 All migrations live in `supabase/migrations/`, applied in numeric order
-(`0001` → `0014`). Eighteen tables, in three groups (`0008` doesn't add a
+(`0001` → `0015`). Eighteen tables, in three groups (`0008` doesn't add a
 table -- it just extends `provider_fetch_log.fetch_type`'s CHECK
 constraint with `'fo'`, for the `fo-refresh` Edge Function's logging;
 `0010`/`0011` drop and recreate `dashboard_fo_metrics` with a different
 key/columns rather than adding a new table -- see "Dashboard cache"
 below; `0012` adds `portfolio_holdings`; `0013` only redefines
 `latest_screener_view`, no new table; `0014` only adds a column +
-widens `portfolio_holdings`' primary key, no new table):
+widens `portfolio_holdings`' primary key, no new table; `0015` only adds
+a column to `companies` (`is_etf`) + redefines `latest_screener_view`
+again, no new table):
 
 **Reference data** (written by `scripts/fetch_nifty50_constituents.py` /
 `seed.sql`, read-only to the app):
 - `nifty50_constituents` — which symbols are in the index and when (supports historical reconstitution tracking)
-- `companies` — name/sector/industry per symbol
+- `companies` — name/sector/industry per symbol, plus `is_etf` (migration `0015`) -- see the Futures & Options section's "A follow-up problem 0013 itself introduced" paragraph for what this excludes and why
 
 **Market data** (written by `refresh_service` / provider scripts, read-only to the app):
 - `price_history` — daily OHLCV, one row per symbol per trade_date
@@ -168,7 +170,7 @@ widens `portfolio_holdings`' primary key, no new table):
 
 Two generated helpers, defined in `0003_views_functions.sql` (and patched
 in `0004`):
-- `latest_screener_view` — one joined row per current constituent (companies + its latest daily_screener_snapshot), plus (as of `0013`) every symbol the *viewing* user holds in their own `portfolio_holdings`. This is what the Dashboard queries in a single call instead of joining client-side. `0004` added `coalesce(status, 'unavailable')` / `coalesce(data_quality, '{}')` here because a constituent with no snapshot yet would otherwise return `NULL` for those columns, which fails Pydantic validation on the `ScreenerRow` model. `0006` added `week_52_high`/`week_52_low`/`criterion_52w_high`/`criterion_52w_low` — **a real deploy-time error hit here**: `create or replace view` can only *append* new output columns; inserting them positionally in the middle of the existing `select` list (as the first draft of `0006` did) makes Postgres think you're renaming the columns that got pushed down a slot, and it fails with `42P16: cannot change name of view column ... HINT: Use ALTER VIEW ... RENAME COLUMN ... instead`. The fix is to always append new columns at the very end of the `select` list in any future `create or replace view` migration, never insert them mid-list — column *order* doesn't matter to the app since every read is by name (`ScreenerRow.model_validate(dict)`), so this costs nothing. `0013` made two further changes, both **real production bugs found after the Portfolio feature shipped** (see the Portfolio section's "Screener fallback" note below for the full story): the per-symbol lateral join now prefers the most recent snapshot row that actually has a price (falling back across days when today's fetch failed) instead of always taking literally the latest date regardless of whether it has data, and the join went from `nifty50_constituents` inner-join to `left join ... where nc.is_current or exists (select 1 from portfolio_holdings where symbol = c.symbol and user_id = auth.uid())` — `security_invoker = true` means `auth.uid()` here is the actual querying user, so this stays correctly scoped per user (reinforced by `portfolio_holdings`' own RLS policy on top).
+- `latest_screener_view` — one joined row per current constituent (companies + its latest daily_screener_snapshot), plus (as of `0013`) every symbol the *viewing* user holds in their own `portfolio_holdings`, minus (as of `0015`) any row with `is_etf = true`. This is what the Dashboard queries in a single call instead of joining client-side. `0004` added `coalesce(status, 'unavailable')` / `coalesce(data_quality, '{}')` here because a constituent with no snapshot yet would otherwise return `NULL` for those columns, which fails Pydantic validation on the `ScreenerRow` model. `0006` added `week_52_high`/`week_52_low`/`criterion_52w_high`/`criterion_52w_low` — **a real deploy-time error hit here**: `create or replace view` can only *append* new output columns; inserting them positionally in the middle of the existing `select` list (as the first draft of `0006` did) makes Postgres think you're renaming the columns that got pushed down a slot, and it fails with `42P16: cannot change name of view column ... HINT: Use ALTER VIEW ... RENAME COLUMN ... instead`. The fix is to always append new columns at the very end of the `select` list in any future `create or replace view` migration, never insert them mid-list — column *order* doesn't matter to the app since every read is by name (`ScreenerRow.model_validate(dict)`), so this costs nothing. `0013` made two further changes, both **real production bugs found after the Portfolio feature shipped** (see the Portfolio section's "Screener fallback" note below for the full story): the per-symbol lateral join now prefers the most recent snapshot row that actually has a price (falling back across days when today's fetch failed) instead of always taking literally the latest date regardless of whether it has data, and the join went from `nifty50_constituents` inner-join to `left join ... where nc.is_current or exists (select 1 from portfolio_holdings where symbol = c.symbol and user_id = auth.uid())` — `security_invoker = true` means `auth.uid()` here is the actual querying user, so this stays correctly scoped per user (reinforced by `portfolio_holdings`' own RLS policy on top).
 - `get_classification_history(symbol, days)` — a SQL function returning one symbol's snapshot history, used by the Stock Detail status-over-time chart.
 
 Migration `0007` adds two more views on the same `DISTINCT ON` pattern:
@@ -257,7 +259,13 @@ via fuzzy column-matching against Dhan's published instrument-master CSV
 (cached with `@lru_cache`), since Dhan requires that ID rather than the
 trading symbol directly. `yfinance_provider.py` just appends `.NS` to the
 symbol. Both wrap network calls in `tenacity` retry with exponential
-backoff and a client-side request-rate throttle.
+backoff and a client-side request-rate throttle. `yfinance_provider.py`
+also has one function outside either ABC, `fetch_display_name(symbol)` —
+a best-effort real-name lookup (`longName`/`shortName`) used only once,
+at portfolio-symbol registration time, to classify a new symbol as an
+ETF/fund (see the Futures & Options section's ETF-exclusion paragraph);
+not part of `FundamentalsDataProvider` since it's a one-off the other
+three providers have no equivalent for.
 
 ## Repositories (`src/repositories/`)
 
@@ -1205,7 +1213,15 @@ not Python.
   (`fiftyTwoWeekHigh.raw`/`fiftyTwoWeekLow.raw`) — no extra API call
   needed. Both endpoint shapes were confirmed with live `curl` requests
   before this was written, not assumed from documentation (there isn't
-  any — both are unofficial).
+  any — both are unofficial). `fetchDisplayName()` (migration `0015`)
+  requests the `price` module of the same `quoteSummary` endpoint for a
+  symbol's real `longName`/`shortName` — used only once, when
+  `index.ts`'s portfolio-widening block below registers a brand-new
+  symbol, to classify it as an ETF/fund (see the Futures & Options
+  section's ETF-exclusion paragraph). Deliberately swallows every
+  failure and returns `null` rather than throwing, unlike
+  `fetchFundamentals()`'s own fresh-crumb retry -- this is a one-off,
+  best-effort classification, not a critical-path fetch.
 - **`index.ts`** — the HTTP handler: verifies the caller's JWT (any
   logged-in user may trigger this — it refreshes shared data, not
   anything per-user), checks a 5-minute cooldown against
