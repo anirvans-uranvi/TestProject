@@ -244,15 +244,15 @@ def _render_portfolio_tab(
         table_rows.append(
             {
                 "Stock": stock,
-                "Qty": _fmt_qty(r["qty"]),
-                "Avg Price": format_inr(r["avg_price"]),
-                "LTP": format_inr(r["ltp"]),
-                "Investment": format_inr(r["investment"]),
-                "Cur Val": format_inr(r["cur_val"]),
-                "P&L": format_inr(r["pnl"]),
-                "P&L %": format_pct(r["pnl_pct"]),
-                "CC ROI": format_pct(cc["cc_roi_pct"], signed=False) if cc and cc["cc_roi_pct"] is not None else "N/A",
-                "Assignment ROI": format_pct(cc["assignment_roi_pct"]) if cc and cc["assignment_roi_pct"] is not None else "N/A",
+                "Qty": r["qty"],
+                "Avg Price": r["avg_price"],
+                "LTP": r["ltp"],
+                "Investment": r["investment"],
+                "Cur Val": r["cur_val"],
+                "P&L": r["pnl"],
+                "P&L %": r["pnl_pct"],
+                "CC ROI": cc["cc_roi_pct"] if cc and cc["cc_roi_pct"] is not None else None,
+                "Assignment ROI": cc["assignment_roi_pct"] if cc and cc["assignment_roi_pct"] is not None else None,
             }
         )
 
@@ -272,6 +272,15 @@ def _render_portfolio_tab(
     # sidesteps this -- Streamlit maps a click back to the correct row in
     # the original data regardless of how the table is currently sorted --
     # so a pair of buttons below the table replaces the whole column.
+    #
+    # Columns are kept as real numbers (not format_inr()/format_pct()
+    # strings) and formatted for display via column_config instead: a
+    # native header-click sort compares the *underlying* cell value, so a
+    # column of currency strings like "₹10,81,452.10"/"₹9,80,135.00" sorts
+    # alphabetically ("1" < "9") rather than by amount -- exactly the bug
+    # this replaced. NumberColumn's printf-style format has no Indian
+    # lakh/crore grouping, so amounts show Western 3-digit comma grouping
+    # here (e.g. "₹1,081,452.10") instead of format_inr's "₹10,81,452.10".
     event = st.dataframe(
         pd.DataFrame(table_rows),
         use_container_width=True,
@@ -279,6 +288,17 @@ def _render_portfolio_tab(
         on_select="rerun",
         selection_mode="single-row",
         key=f"portfolio_table_{_slug(portfolio_name)}",
+        column_config={
+            "Qty": st.column_config.NumberColumn(format="%,.0f"),
+            "Avg Price": st.column_config.NumberColumn(format="₹%,.2f"),
+            "LTP": st.column_config.NumberColumn(format="₹%,.2f"),
+            "Investment": st.column_config.NumberColumn(format="₹%,.2f"),
+            "Cur Val": st.column_config.NumberColumn(format="₹%,.2f"),
+            "P&L": st.column_config.NumberColumn(format="₹%,.2f"),
+            "P&L %": st.column_config.NumberColumn(format="%+.2f%%"),
+            "CC ROI": st.column_config.NumberColumn(format="%.2f%%"),
+            "Assignment ROI": st.column_config.NumberColumn(format="%+.2f%%"),
+        },
     )
     selected_rows = event.selection.rows if event and event.selection else []
     if selected_rows:
