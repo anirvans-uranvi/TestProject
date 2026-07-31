@@ -12,7 +12,6 @@ pages = [
     st.Page("pages/2_Stock_Detail.py", title="Equity"),
     st.Page("pages/5_Options.py", title="Options"),
     st.Page("pages/6_Portfolio.py", title="Portfolio"),
-    st.Page("pages/3_Alerts.py", title="Alerts"),
     st.Page("pages/4_Settings.py", title="Settings"),
 ]
 st.navigation(pages).run()

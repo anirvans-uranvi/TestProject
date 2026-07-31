@@ -36,9 +36,8 @@ app.py                  Pure st.navigation() router -- no visible content of its
 pages/                  Streamlit multipage app (each still its own script,
                         registered by app.py rather than auto-discovered)
   1_Dashboard.py         Screener table, metric cards, filters, CSV export -- sidebar label "Screener"
-  2_Stock_Detail.py       Price/volume/dividend charts, scorecard, alerts, position notes -- sidebar label "Equity"
-  3_Alerts.py             Alert CRUD + notification history
-  4_Settings.py            Per-user thresholds, theme, notification channels, sign out
+  2_Stock_Detail.py       Price/volume/dividend charts, scorecard, per-stock alerts -- sidebar label "Equity"
+  4_Settings.py            Per-user thresholds, alert CRUD + notification history, notification channels, sign out
   5_Options.py              F&O: futures term structure, 5% CSP / 5% CC breakdown
   6_Portfolio.py             Upload Zerodha/Dhan holdings, live-valued against app market data
 src/
@@ -82,7 +81,7 @@ auto-discovery convention (which derived both the sidebar label and the
 display order from each file's name/numeric prefix) so the sidebar label
 can differ from the filename (`1_Dashboard.py` shows as "Screener",
 `2_Stock_Detail.py` as "Equity") and the order can be set independently
-of the numeric prefixes (Alerts/Settings deliberately listed last). Each
+of the numeric prefixes (Settings deliberately listed last). Each
 page still keeps its own `st.set_page_config()` call for its browser-tab
 title/icon -- unaffected by which script registers it. The former
 sign-out control (previously only reachable from `app.py`'s own sidebar,
@@ -587,7 +586,7 @@ Hindustan Zinc or IndusInd Bank) gets both its equity LTP *and* its
 futures/options chain populated, purely from being uploaded and resolved
 -- no separate step needed. `nifty50_constituents` is never touched by
 this, so portfolio-only symbols never become an official constituent --
-Alerts still reads from `companies_repo.list_current_constituents`
+Settings' Alerts section still reads from `companies_repo.list_current_constituents`
 (a plain `nifty50_constituents` query), so its "Applies to" symbol list
 stays Nifty50-only. The Dashboard, Stock Detail, and Options all widen
 their own symbol universe with the *viewing* user's own portfolio
@@ -606,7 +605,7 @@ directly from this: any resolved holding is, by construction, one of the
 viewing user's own portfolio symbols, so it's always selectable on both.
 In short: upload → save → click "Manual refresh" (or wait for the next
 cron run) → real LTP appears, and the symbol becomes viewable everywhere
-except Alerts.
+except the Settings page's alert "Applies to" list.
 
 **Except the Dashboard's screener list itself doesn't show ETFs/funds**
 (migration `0015`, `companies.is_etf`) -- a momentum/dividend/PEG stock

@@ -11,7 +11,6 @@ from postgrest.exceptions import APIError
 from src.calculations.moving_averages import moving_average_series
 from src.models.alert import Alert
 from src.models.enums import AlertType
-from src.models.user import UserPosition
 from src.repositories import (
     alerts_repo,
     companies_repo,
@@ -257,33 +256,6 @@ st.caption(
     f"Source: prices from the configured price provider, fundamentals from the configured fundamentals "
     f"provider. Snapshot computed {row.snapshot_date}."
 )
-
-# ---------------------------------------------------------------------
-# Position (entry/target/stop-loss/notes) + risk/reward
-# ---------------------------------------------------------------------
-st.divider()
-st.subheader("Your position notes")
-with st.form("position_form"):
-    entry = st.number_input("Intended entry price (INR)", value=float(position.entry_price) if position and position.entry_price else 0.0)
-    target = st.number_input("Target sell price (INR)", value=float(position.target_price) if position and position.target_price else 0.0)
-    stop_loss = st.number_input("Stop-loss price (INR)", value=float(position.stop_loss) if position and position.stop_loss else 0.0)
-    holding_days = st.number_input("Expected holding period (days, optional)", min_value=0, value=int(position.holding_period_days) if position and position.holding_period_days else 0)
-    notes = st.text_area("Notes", value=position.notes if position and position.notes else "")
-    saved = st.form_submit_button("Save position")
-
-if saved:
-    new_position = UserPosition(
-        user_id=user_id, symbol=symbol,
-        entry_price=entry or None, target_price=target or None, stop_loss=stop_loss or None,
-        holding_period_days=holding_days or None, notes=notes or None,
-    )
-    settings_repo.upsert_user_position(client, new_position)
-    st.success("Position saved.")
-    position = new_position
-
-if position and position.entry_price and position.target_price and position.stop_loss:
-    rr = position.risk_reward_ratio
-    st.metric("Risk / reward ratio", f"{rr:.2f}" if rr is not None else "N/A")
 
 # ---------------------------------------------------------------------
 # Alerts for this stock
