@@ -9,8 +9,9 @@ from src.repositories import notification_repo
 
 
 class InAppAdapter(NotificationAdapter):
-    """Writes to notification_log; the Alerts page and st.toast surface it.
-    Dedupe is enforced by the table's unique(dedupe_key) constraint."""
+    """Writes to notification_log; Settings' Alerts section and st.toast
+    surface it. Dedupe is enforced by the table's unique(dedupe_key)
+    constraint."""
 
     channel = NotificationChannel.IN_APP.value
 

@@ -279,7 +279,8 @@ def render_stat_grid(stats: list[tuple[str, str, str | None]], theme: Theme | st
 
 def render_alert_row(alert_type_label: str, config_summary: str, cooldown_minutes: int, is_active: bool, theme: Theme | str = Theme.SYSTEM) -> str:
     """Formatted alert summary line -- replaces raw Python-dict-dump text
-    previously shown on both Stock Detail and the Alerts page."""
+    previously shown on both Stock Detail and the Alerts screen (now
+    folded into Settings)."""
     c = _surface_classes(theme)
     pill = render_pill(alert_type_label, tone="accent", theme=theme)
     inactive = "" if is_active else f' <span class="{c["muted"]} italic">(inactive)</span>'
