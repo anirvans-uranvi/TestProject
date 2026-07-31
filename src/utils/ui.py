@@ -6,10 +6,10 @@ import streamlit as st
 from src.models.enums import MarketState, ScreenerStatus, Theme
 
 STATUS_STYLE = {
-    ScreenerStatus.GREEN: ("#0f9d58", "🟢", "Green"),
-    ScreenerStatus.AMBER: ("#f4a623", "🟠", "Amber"),
-    ScreenerStatus.RED: ("#d93025", "🔴", "Red"),
-    ScreenerStatus.UNAVAILABLE: ("#8a8f98", "⚪", "Unavailable"),
+    ScreenerStatus.GREEN: ("#059669", "🟢", "Green"),  # emerald-600
+    ScreenerStatus.AMBER: ("#f59e0b", "🟠", "Amber"),  # amber-500
+    ScreenerStatus.RED: ("#dc2626", "🔴", "Red"),  # red-600
+    ScreenerStatus.UNAVAILABLE: ("#94a3b8", "⚪", "Unavailable"),  # slate-400
 }
 
 MARKET_STATE_LABEL = {
@@ -31,15 +31,19 @@ DISCLAIMER = (
     "Verify data and consider your risk tolerance before trading."
 )
 
-# Tailwind's stock indigo palette (present in the v2 default build used
-# below) -- kept as one source of truth so hand-rendered HTML classes
-# (bg-indigo-600) and the CSS override (var(--accent-600)) stay visually
+# "Classic Institutional" palette: Tailwind's stock slate scale (present
+# in the v2 default build used below) as the one dominant/primary color
+# -- kept as one source of truth so hand-rendered HTML classes
+# (bg-slate-900) and the CSS override (var(--accent-900)) stay visually
 # identical. Deliberately separate from STATUS_STYLE above: those colors
 # are domain-meaningful (Green/Amber/Red/Unavailable classification) and
-# are never touched by the accent/design-system work below.
+# are never touched by the accent/design-system work below. Slate is the
+# primary/branding color -- render_pill()'s "positive"/"negative" tones
+# (emerald/red, via _surface_classes) are the only gains/losses colors,
+# and are never used for branding or primary actions.
 ACCENT = {
-    50: "#eef2ff", 100: "#e0e7ff", 200: "#c7d2fe", 300: "#a5b4fc", 400: "#818cf8",
-    500: "#6366f1", 600: "#4f46e5", 700: "#4338ca", 800: "#3730a3", 900: "#312e81",
+    50: "#f8fafc", 100: "#f1f5f9", 200: "#e2e8f0", 300: "#cbd5e1", 400: "#94a3b8",
+    500: "#64748b", 600: "#475569", 700: "#334155", 800: "#1e293b", 900: "#0f172a",
 }
 
 
@@ -113,34 +117,34 @@ def inject_tailwind() -> None:
 _GLOBAL_CSS_LIGHT = f"""
 <style>
 :root {{
-  --accent-50:{ACCENT[50]}; --accent-100:{ACCENT[100]}; --accent-600:{ACCENT[600]};
-  --accent-700:{ACCENT[700]}; --accent-800:{ACCENT[800]};
+  --accent-50:{ACCENT[50]}; --accent-100:{ACCENT[100]}; --accent-200:{ACCENT[200]};
+  --accent-300:{ACCENT[300]}; --accent-800:{ACCENT[800]}; --accent-900:{ACCENT[900]};
 }}
 button[kind="secondary"], button[kind="secondaryFormSubmit"], [data-testid="stDownloadButton"] button {{
-  border-radius:8px !important; border:1px solid var(--accent-600) !important;
-  color:var(--accent-700) !important; background:#ffffff !important; font-weight:600 !important;
+  border-radius:8px !important; border:1px solid var(--accent-200) !important;
+  color:var(--accent-800) !important; background:var(--accent-100) !important; font-weight:600 !important;
 }}
 button[kind="secondary"]:hover, button[kind="secondaryFormSubmit"]:hover, [data-testid="stDownloadButton"] button:hover {{
-  background:var(--accent-50) !important; border-color:var(--accent-700) !important; color:var(--accent-800) !important;
+  background:var(--accent-200) !important; border-color:var(--accent-300) !important; color:var(--accent-900) !important;
 }}
-button[kind="primary"] {{ background:var(--accent-600) !important; border-color:var(--accent-600) !important; color:#ffffff !important; }}
-button[kind="primary"]:hover {{ background:var(--accent-700) !important; border-color:var(--accent-700) !important; }}
+button[kind="primary"] {{ background:var(--accent-900) !important; border-color:var(--accent-900) !important; color:#ffffff !important; }}
+button[kind="primary"]:hover {{ background:var(--accent-800) !important; border-color:var(--accent-800) !important; }}
 [data-testid="stTextInput"] input, [data-testid="stNumberInputContainer"],
 [data-testid="stTextArea"] textarea, [data-testid="stSelectbox"] [role="group"], [data-testid="stMultiSelect"] {{
-  border-radius:8px !important; border-color:#d1d5db !important;
+  border-radius:8px !important; border-color:var(--accent-300) !important;
 }}
 [data-testid="stTextInput"] input:focus, [data-testid="stTextArea"] textarea:focus {{
-  border-color:var(--accent-600) !important; box-shadow:0 0 0 1px var(--accent-600) !important;
+  border-color:var(--accent-900) !important; box-shadow:0 0 0 1px var(--accent-900) !important;
 }}
-[data-testid="stSidebar"] {{ background:#f5f5f8; border-right:1px solid #e5e7eb; }}
-[data-testid="stTabs"] {{ border-bottom:1px solid #e5e7eb; }}
-[data-testid="stTab"][aria-selected="true"] {{ color:var(--accent-700) !important; border-bottom:2px solid var(--accent-600) !important; }}
-[data-testid="stForm"] {{ border:1px solid #e5e7eb !important; border-radius:12px !important; padding:1.25rem !important; background:#ffffff; }}
-[data-testid="stExpander"] {{ border:1px solid #e5e7eb !important; border-radius:10px !important; }}
-[data-testid="stMetricValue"] {{ color:var(--accent-700) !important; }}
-[data-testid="stCheckbox"] input, [data-testid="stRadioOption"] input {{ accent-color:var(--accent-600); }}
-[data-testid="stDataFrame"] {{ border:1px solid #e5e7eb; border-radius:8px; overflow:hidden; }}
-[data-testid="stHeading"] h1, [data-testid="stHeading"] h2, [data-testid="stHeading"] h3 {{ color:#1f2937; }}
+[data-testid="stSidebar"] {{ background:var(--accent-50); border-right:1px solid var(--accent-200); }}
+[data-testid="stTabs"] {{ border-bottom:1px solid var(--accent-200); }}
+[data-testid="stTab"][aria-selected="true"] {{ color:var(--accent-900) !important; border-bottom:2px solid var(--accent-900) !important; }}
+[data-testid="stForm"] {{ border:1px solid var(--accent-200) !important; border-radius:12px !important; padding:1.25rem !important; background:#ffffff; }}
+[data-testid="stExpander"] {{ border:1px solid var(--accent-200) !important; border-radius:10px !important; }}
+[data-testid="stMetricValue"] {{ color:var(--accent-900) !important; }}
+[data-testid="stCheckbox"] input, [data-testid="stRadioOption"] input {{ accent-color:var(--accent-900); }}
+[data-testid="stDataFrame"] {{ border:1px solid var(--accent-200); border-radius:8px; overflow:hidden; }}
+[data-testid="stHeading"] h1, [data-testid="stHeading"] h2, [data-testid="stHeading"] h3 {{ color:var(--accent-900); }}
 </style>
 """
 
@@ -151,38 +155,38 @@ button[kind="primary"]:hover {{ background:var(--accent-700) !important; border-
 _GLOBAL_CSS_DARK = f"""
 <style>
 :root {{
-  --accent-50:{ACCENT[900]}; --accent-100:{ACCENT[800]}; --accent-600:{ACCENT[600]};
-  --accent-700:{ACCENT[500]}; --accent-800:{ACCENT[400]};
+  --accent-50:{ACCENT[900]}; --accent-100:{ACCENT[800]}; --accent-200:{ACCENT[700]};
+  --accent-300:{ACCENT[600]}; --accent-800:{ACCENT[100]}; --accent-900:{ACCENT[50]};
 }}
 [data-testid="stAppViewContainer"], [data-testid="stMain"], [data-testid="stHeader"] {{
-  background:#111827 !important; color:#f3f4f6 !important;
+  background:{ACCENT[900]} !important; color:{ACCENT[100]} !important;
 }}
-[data-testid="stSidebar"] {{ background:#1f2937 !important; border-right:1px solid #374151; }}
-[data-testid="stSidebarContent"] {{ color:#f3f4f6 !important; }}
-[data-testid="stHeading"] h1, [data-testid="stHeading"] h2, [data-testid="stHeading"] h3 {{ color:#f3f4f6 !important; }}
+[data-testid="stSidebar"] {{ background:{ACCENT[800]} !important; border-right:1px solid var(--accent-200); }}
+[data-testid="stSidebarContent"] {{ color:{ACCENT[100]} !important; }}
+[data-testid="stHeading"] h1, [data-testid="stHeading"] h2, [data-testid="stHeading"] h3 {{ color:{ACCENT[100]} !important; }}
 button[kind="secondary"], button[kind="secondaryFormSubmit"], [data-testid="stDownloadButton"] button {{
-  border-radius:8px !important; border:1px solid var(--accent-600) !important;
-  color:#e0e7ff !important; background:#1f2937 !important; font-weight:600 !important;
+  border-radius:8px !important; border:1px solid var(--accent-200) !important;
+  color:{ACCENT[100]} !important; background:var(--accent-100) !important; font-weight:600 !important;
 }}
 button[kind="secondary"]:hover, button[kind="secondaryFormSubmit"]:hover, [data-testid="stDownloadButton"] button:hover {{
-  background:var(--accent-50) !important; border-color:var(--accent-700) !important; color:#ffffff !important;
+  background:var(--accent-200) !important; border-color:var(--accent-300) !important; color:#ffffff !important;
 }}
-button[kind="primary"] {{ background:var(--accent-600) !important; border-color:var(--accent-600) !important; color:#ffffff !important; }}
-button[kind="primary"]:hover {{ background:var(--accent-700) !important; border-color:var(--accent-700) !important; }}
+button[kind="primary"] {{ background:var(--accent-900) !important; border-color:var(--accent-900) !important; color:{ACCENT[900]} !important; }}
+button[kind="primary"]:hover {{ background:var(--accent-800) !important; border-color:var(--accent-800) !important; }}
 [data-testid="stTextInput"] input, [data-testid="stNumberInputContainer"],
 [data-testid="stTextArea"] textarea, [data-testid="stSelectbox"] [role="group"], [data-testid="stMultiSelect"] {{
-  border-radius:8px !important; border-color:#4b5563 !important; background:#1f2937 !important; color:#f3f4f6 !important;
+  border-radius:8px !important; border-color:var(--accent-300) !important; background:var(--accent-100) !important; color:{ACCENT[100]} !important;
 }}
 [data-testid="stTextInput"] input:focus, [data-testid="stTextArea"] textarea:focus {{
-  border-color:var(--accent-600) !important; box-shadow:0 0 0 1px var(--accent-600) !important;
+  border-color:var(--accent-900) !important; box-shadow:0 0 0 1px var(--accent-900) !important;
 }}
-[data-testid="stTabs"] {{ border-bottom:1px solid #374151; }}
-[data-testid="stTab"][aria-selected="true"] {{ color:#e0e7ff !important; border-bottom:2px solid var(--accent-600) !important; }}
-[data-testid="stForm"] {{ border:1px solid #374151 !important; border-radius:12px !important; padding:1.25rem !important; background:#1f2937 !important; }}
-[data-testid="stExpander"] {{ border:1px solid #374151 !important; border-radius:10px !important; background:#1f2937 !important; }}
-[data-testid="stMetricValue"] {{ color:#e0e7ff !important; }}
-[data-testid="stCheckbox"] input, [data-testid="stRadioOption"] input {{ accent-color:var(--accent-600); }}
-[data-testid="stDataFrame"] {{ border:1px solid #374151; border-radius:8px; overflow:hidden; }}
+[data-testid="stTabs"] {{ border-bottom:1px solid var(--accent-200); }}
+[data-testid="stTab"][aria-selected="true"] {{ color:#ffffff !important; border-bottom:2px solid var(--accent-900) !important; }}
+[data-testid="stForm"] {{ border:1px solid var(--accent-200) !important; border-radius:12px !important; padding:1.25rem !important; background:var(--accent-100) !important; }}
+[data-testid="stExpander"] {{ border:1px solid var(--accent-200) !important; border-radius:10px !important; background:var(--accent-100) !important; }}
+[data-testid="stMetricValue"] {{ color:#ffffff !important; }}
+[data-testid="stCheckbox"] input, [data-testid="stRadioOption"] input {{ accent-color:var(--accent-900); }}
+[data-testid="stDataFrame"] {{ border:1px solid var(--accent-200); border-radius:8px; overflow:hidden; }}
 </style>
 """
 
@@ -211,16 +215,24 @@ def _surface_classes(theme: Theme | str) -> dict[str, str]:
     the generic card/pill/stat-tile components below."""
     if Theme(theme) == Theme.DARK:
         return {
-            "card_bg": "bg-gray-800", "card_border": "border-gray-700", "card_text": "text-gray-100",
-            "muted": "text-gray-400", "pill_neutral_bg": "bg-gray-700", "pill_neutral_text": "text-gray-300",
-            "pill_accent_bg": "bg-indigo-900", "pill_accent_text": "text-indigo-200",
-            "pill_accent_border": "border-indigo-700",
+            "card_bg": "bg-slate-800", "card_border": "border-slate-700", "card_text": "text-slate-100",
+            "muted": "text-slate-400", "pill_neutral_bg": "bg-slate-700", "pill_neutral_text": "text-slate-300",
+            "pill_accent_bg": "bg-slate-700", "pill_accent_text": "text-slate-100",
+            "pill_accent_border": "border-slate-600",
+            "pill_positive_bg": "bg-emerald-900", "pill_positive_text": "text-emerald-300",
+            "pill_positive_border": "border-emerald-700",
+            "pill_negative_bg": "bg-red-900", "pill_negative_text": "text-red-300",
+            "pill_negative_border": "border-red-700",
         }
     return {
-        "card_bg": "bg-white", "card_border": "border-gray-200", "card_text": "text-gray-800",
-        "muted": "text-gray-500", "pill_neutral_bg": "bg-gray-100", "pill_neutral_text": "text-gray-600",
-        "pill_accent_bg": "bg-indigo-50", "pill_accent_text": "text-indigo-700",
-        "pill_accent_border": "border-indigo-200",
+        "card_bg": "bg-white", "card_border": "border-slate-200", "card_text": "text-slate-800",
+        "muted": "text-slate-500", "pill_neutral_bg": "bg-slate-100", "pill_neutral_text": "text-slate-600",
+        "pill_accent_bg": "bg-slate-100", "pill_accent_text": "text-slate-700",
+        "pill_accent_border": "border-slate-300",
+        "pill_positive_bg": "bg-emerald-50", "pill_positive_text": "text-emerald-700",
+        "pill_positive_border": "border-emerald-200",
+        "pill_negative_bg": "bg-red-50", "pill_negative_text": "text-red-700",
+        "pill_negative_border": "border-red-200",
     }
 
 
@@ -236,10 +248,16 @@ def render_card(inner_html: str, theme: Theme | str = Theme.SYSTEM, *, extra_cla
 
 def render_pill(text: str, tone: str = "accent", theme: Theme | str = Theme.SYSTEM) -> str:
     """Small badge/pill -- alert-type labels, "coming soon" tags, active
-    filter indicators. tone="accent" uses the indigo palette, "neutral"
-    uses gray."""
+    filter indicators, or (tone="positive"/"negative") gains/losses
+    callouts. tone="accent" uses the primary slate palette, "neutral"
+    uses gray, "positive"/"negative" use emerald/red -- reserved
+    exclusively for financial gain/loss indicators, never branding."""
     c = _surface_classes(theme)
-    if tone == "accent":
+    if tone == "positive":
+        bg, txt, border = c["pill_positive_bg"], c["pill_positive_text"], c["pill_positive_border"]
+    elif tone == "negative":
+        bg, txt, border = c["pill_negative_bg"], c["pill_negative_text"], c["pill_negative_border"]
+    elif tone == "accent":
         bg, txt, border = c["pill_accent_bg"], c["pill_accent_text"], c["pill_accent_border"]
     else:
         bg, txt, border = c["pill_neutral_bg"], c["pill_neutral_text"], "border-transparent"
