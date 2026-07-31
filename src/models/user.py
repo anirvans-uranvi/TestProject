@@ -29,8 +29,10 @@ class SavedFilter(BaseModel):
 
 
 class UserPosition(BaseModel):
-    """Entry/target/stop-loss/notes a user saves for a symbol, used for
-    risk-reward display and to seed Buy/Sell Watch alerts."""
+    """Entry/target/stop-loss/notes a user saves for a symbol -- Stock
+    Detail's price chart overlays entry/target/stop-loss as reference
+    lines for whichever position (if any) is already saved for the
+    selected symbol."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -43,13 +45,3 @@ class UserPosition(BaseModel):
     notes: str | None = None
     holding_period_days: int | None = None
     updated_at: datetime | None = None
-
-    @property
-    def risk_reward_ratio(self) -> float | None:
-        if self.entry_price is None or self.target_price is None or self.stop_loss is None:
-            return None
-        risk = self.entry_price - self.stop_loss
-        reward = self.target_price - self.entry_price
-        if risk <= 0:
-            return None
-        return reward / risk

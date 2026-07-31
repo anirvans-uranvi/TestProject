@@ -201,7 +201,7 @@ Pydantic v2 models, one file per concern (`company.py`, `market_data.py`,
 Worth knowing:
 - `PricePoint.effective_close` prefers `adjusted_close` over `close` — every return calculation goes through this property, not the raw fields directly.
 - `DataQuality` (in `screener.py`) is a structured record of *which* inputs were missing/stale when a row was classified — it's not inferred after the fact, it's built alongside the classification so the UI can always explain an Unavailable row.
-- `UserPosition.risk_reward_ratio` is a computed property, not stored — `(target - entry) / (entry - stop_loss)`, `None` if any leg is missing or risk is non-positive.
+- `UserPosition` no longer has a `risk_reward_ratio` property — it was a computed `(target - entry) / (entry - stop_loss)` used only by Stock Detail's now-removed "Your position notes" form (see that page's bullet below); deleted as dead code once its one caller went away, rather than left unused.
 
 ## Calculation engine (`src/calculations/`)
 
