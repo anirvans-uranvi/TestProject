@@ -1,6 +1,7 @@
 """Plain-English classification explanation for the Stock Detail page."""
 from __future__ import annotations
 
+from src.calculations.classification import criterion_fundamentals
 from src.models.enums import ScreenerStatus
 from src.models.screener import ScreenerRow
 
@@ -47,10 +48,20 @@ def explain_classification(row: ScreenerRow) -> str:
         peg_str = f"{row.peg_ratio:.2f}" if row.peg_ratio is not None else "above the threshold"
         peg_phrase = f"its PEG ratio ({peg_str}) is above the threshold"
 
+    fundamentals = criterion_fundamentals(row.criterion_a, row.criterion_c)
+    fundamentals_phrase = (
+        "its Fundamentals check passes because dividend yield or PEG (or both) clears its threshold"
+        if fundamentals
+        else "its Fundamentals check fails because neither dividend yield nor PEG clears its threshold"
+    )
+
     lead = {
-        ScreenerStatus.GREEN: f"{row.name} is Green: all three criteria pass.",
-        ScreenerStatus.AMBER: f"{row.name} is Amber: only some criteria pass.",
-        ScreenerStatus.RED: f"{row.name} is Red: none of the three criteria pass.",
+        ScreenerStatus.GREEN: f"{row.name} is Green: Momentum and Fundamentals both pass.",
+        ScreenerStatus.AMBER: f"{row.name} is Amber: only one of Momentum and Fundamentals passes.",
+        ScreenerStatus.RED: f"{row.name} is Red: neither Momentum nor Fundamentals passes.",
     }[row.status]
 
-    return f"{lead} Dividend: {dividend_phrase}. Momentum: {momentum_phrase}. PEG: {peg_phrase}."
+    return (
+        f"{lead} Momentum: {momentum_phrase}. Fundamentals: {fundamentals_phrase} "
+        f"(dividend: {dividend_phrase}; PEG: {peg_phrase})."
+    )

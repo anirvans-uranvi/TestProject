@@ -189,4 +189,6 @@ class TestComputeScreenerRow:
         )
         assert row.criterion_a is False
         assert row.criterion_c is True
-        assert row.status == ScreenerStatus.AMBER  # B and C pass, A fails
+        # Fundamentals = A or C = True even though A fails, and momentum
+        # (B) also passes here -> Green.
+        assert row.status == ScreenerStatus.GREEN

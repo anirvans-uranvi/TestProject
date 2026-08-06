@@ -7,16 +7,22 @@ Criteria (spec-exact):
         side (conventionally, PEG <= 1 suggests a stock priced reasonably
         relative to its earnings growth), so this criterion passes AT OR
         BELOW the threshold, unlike A and B which pass ABOVE theirs.
+    Fundamentals = A or C (dividend yield clears its threshold, OR PEG
+        clears its threshold, or both) -- shown on the Dashboard as its own
+        pass/fail column, and is what feeds the overall status below
+        instead of A and C individually.
 
-Rules:
-    Unavailable — any of A/B/C cannot be computed (missing inputs), or the
-                  data is stale beyond the configured threshold.
-    Green       — A, B, and C all pass.
-    Red         — none of A, B, C pass.
-    Amber       — one or two of A, B, C pass.
+Rules (overall status is Momentum (B) + Fundamentals, not the raw A/B/C
+triple):
+    Unavailable — B or Fundamentals cannot be computed (missing inputs), or
+                  the data is stale beyond the configured threshold.
+    Green       — B and Fundamentals both pass.
+    Red         — neither B nor Fundamentals pass.
+    Amber       — exactly one of B, Fundamentals passes.
 
-A criterion evaluating to None (missing data) NEVER counts as a fail — the
-row short-circuits to Unavailable before Green/Amber/Red logic runs.
+A criterion evaluating to None (missing data) NEVER counts as a fail —
+Fundamentals itself is None unless both A and C are known, and the row
+short-circuits to Unavailable before Green/Amber/Red logic runs.
 """
 from __future__ import annotations
 
@@ -46,6 +52,15 @@ def criterion_c(peg_ratio: float | None, threshold: float = 1.0) -> bool | None:
     return peg_ratio <= threshold
 
 
+def criterion_fundamentals(a: bool | None, c: bool | None) -> bool | None:
+    """Fundamentals = A or C. None (unavailable) unless both A and C are
+    known -- otherwise a missing PEG/dividend could silently turn into a
+    "fail" via the OR, contradicting the "missing is never a fail" rule."""
+    if a is None or c is None:
+        return None
+    return a or c
+
+
 def criterion_52w_high(latest_price: float | None, week_52_high: float | None, threshold: float = 0.9) -> bool | None:
     """Display-only proximity check (not part of the Green/Amber/Red
     engine above): passes when price is comfortably below its 52-week
@@ -65,15 +80,14 @@ def criterion_52w_low(latest_price: float | None, week_52_low: float | None, thr
 
 
 def classify(
-    a: bool | None,
-    b: bool | None,
-    c: bool | None,
+    momentum: bool | None,
+    fundamentals: bool | None,
     is_stale: bool = False,
 ) -> ScreenerStatus:
-    if is_stale or a is None or b is None or c is None:
+    if is_stale or momentum is None or fundamentals is None:
         return ScreenerStatus.UNAVAILABLE
-    passed = sum((a, b, c))
-    if passed == 3:
+    passed = sum((momentum, fundamentals))
+    if passed == 2:
         return ScreenerStatus.GREEN
     if passed == 0:
         return ScreenerStatus.RED
@@ -97,7 +111,8 @@ def build_classification(
     a = criterion_a(ttm_dividend_yield, dividend_yield_threshold)
     b = criterion_b(return_1d, return_5d, return_20d)
     c = criterion_c(peg_ratio, peg_threshold)
-    status = classify(a, b, c, is_stale)
+    fundamentals = criterion_fundamentals(a, c)
+    status = classify(b, fundamentals, is_stale)
 
     dq = DataQuality(
         missing_price=latest_price is None,

@@ -6,6 +6,7 @@ from src.calculations.classification import (
     criterion_a,
     criterion_b,
     criterion_c,
+    criterion_fundamentals,
     criterion_52w_high,
     criterion_52w_low,
 )
@@ -68,6 +69,24 @@ class TestCriterionC:
         assert criterion_c(-0.5, 1.0) is True
 
 
+class TestCriterionFundamentals:
+    def test_either_pass_passes(self):
+        assert criterion_fundamentals(True, False) is True
+        assert criterion_fundamentals(False, True) is True
+
+    def test_both_pass_passes(self):
+        assert criterion_fundamentals(True, True) is True
+
+    def test_neither_pass_fails(self):
+        assert criterion_fundamentals(False, False) is False
+
+    def test_either_missing_returns_none(self):
+        assert criterion_fundamentals(None, True) is None
+        assert criterion_fundamentals(True, None) is None
+        assert criterion_fundamentals(None, False) is None
+        assert criterion_fundamentals(None, None) is None
+
+
 class TestCriterion52wHigh:
     def test_below_90pct_of_high_passes(self):
         assert criterion_52w_high(890.0, 1000.0) is True
@@ -103,39 +122,37 @@ class TestCriterion52wLow:
 
 
 class TestClassify:
-    def test_all_pass_is_green(self):
-        assert classify(True, True, True) == ScreenerStatus.GREEN
+    """classify(momentum, fundamentals, is_stale) -- fundamentals is itself
+    A or C (see TestCriterionFundamentals); this only tests the 2-factor
+    combination."""
 
-    def test_none_pass_is_red(self):
-        assert classify(False, False, False) == ScreenerStatus.RED
+    def test_both_pass_is_green(self):
+        assert classify(True, True) == ScreenerStatus.GREEN
+
+    def test_neither_pass_is_red(self):
+        assert classify(False, False) == ScreenerStatus.RED
 
     def test_one_pass_is_amber(self):
-        assert classify(True, False, False) == ScreenerStatus.AMBER
-        assert classify(False, True, False) == ScreenerStatus.AMBER
-        assert classify(False, False, True) == ScreenerStatus.AMBER
-
-    def test_two_pass_is_amber(self):
-        assert classify(True, True, False) == ScreenerStatus.AMBER
-        assert classify(True, False, True) == ScreenerStatus.AMBER
-        assert classify(False, True, True) == ScreenerStatus.AMBER
+        assert classify(True, False) == ScreenerStatus.AMBER
+        assert classify(False, True) == ScreenerStatus.AMBER
 
     def test_any_missing_is_unavailable_not_red(self):
-        assert classify(None, True, True) == ScreenerStatus.UNAVAILABLE
-        assert classify(True, None, True) == ScreenerStatus.UNAVAILABLE
-        assert classify(True, True, None) == ScreenerStatus.UNAVAILABLE
-        assert classify(None, None, None) == ScreenerStatus.UNAVAILABLE
+        assert classify(None, True) == ScreenerStatus.UNAVAILABLE
+        assert classify(True, None) == ScreenerStatus.UNAVAILABLE
+        assert classify(None, None) == ScreenerStatus.UNAVAILABLE
 
-    def test_missing_does_not_count_as_fail_even_with_other_fails(self):
-        # Two explicit fails plus one missing must still be Unavailable,
-        # not Red -- missing is never conflated with failed.
-        assert classify(False, False, None) == ScreenerStatus.UNAVAILABLE
+    def test_missing_does_not_count_as_fail_even_with_other_fail(self):
+        # An explicit fail plus a missing must still be Unavailable, not
+        # Red -- missing is never conflated with failed.
+        assert classify(False, None) == ScreenerStatus.UNAVAILABLE
+        assert classify(None, False) == ScreenerStatus.UNAVAILABLE
 
-    def test_stale_forces_unavailable_even_if_all_pass(self):
-        assert classify(True, True, True, is_stale=True) == ScreenerStatus.UNAVAILABLE
+    def test_stale_forces_unavailable_even_if_both_pass(self):
+        assert classify(True, True, is_stale=True) == ScreenerStatus.UNAVAILABLE
 
-    def test_all_pass_all_fail_boundary_still_correct_when_not_stale(self):
-        assert classify(True, True, True, is_stale=False) == ScreenerStatus.GREEN
-        assert classify(False, False, False, is_stale=False) == ScreenerStatus.RED
+    def test_both_pass_both_fail_boundary_still_correct_when_not_stale(self):
+        assert classify(True, True, is_stale=False) == ScreenerStatus.GREEN
+        assert classify(False, False, is_stale=False) == ScreenerStatus.RED
 
 
 class TestBuildClassification:
@@ -208,4 +225,19 @@ class TestBuildClassification:
         )
         assert result.criterion_a is False
         assert result.criterion_c is True
-        assert result.status == ScreenerStatus.AMBER  # B and C pass, A fails
+        # Fundamentals = A or C = False or True = True, and B (momentum)
+        # passes too, so status is Green even though A alone fails --
+        # Fundamentals only needs one of A/C to pass.
+        assert result.status == ScreenerStatus.GREEN
+
+    def test_amber_when_momentum_and_fundamentals_disagree(self):
+        result = build_classification(
+            ttm_dividend_yield=1.0,  # fails threshold (3.0) -> A False
+            return_1d=0.1,
+            return_5d=0.1,
+            return_20d=0.1,  # all positive -> B True
+            peg_ratio=1.5,  # fails threshold (1.0) -> C False
+            latest_price=1000.0,
+        )
+        # A and C both fail -> Fundamentals False; Momentum True -> Amber.
+        assert result.status == ScreenerStatus.AMBER

@@ -28,11 +28,23 @@ class TestRecomputeWithUserThresholds:
         result = recompute_with_user_thresholds(row, settings)
         assert result.status == ScreenerStatus.GREEN
 
-    def test_stricter_dividend_threshold_downgrades_to_amber(self):
+    def test_stricter_dividend_threshold_alone_stays_green_via_fundamentals_or(self):
+        # Fundamentals = A or C, so failing A alone doesn't downgrade
+        # status as long as C (PEG, still 0.8 <= 1.0 here) still passes.
         row = make_row()  # yield 4.0
         settings = UserSettings(user_id="u1", dividend_yield_threshold=5.0, peg_threshold=1.0)
         result = recompute_with_user_thresholds(row, settings)
         assert result.criterion_a is False
+        assert result.status == ScreenerStatus.GREEN
+
+    def test_stricter_dividend_and_peg_thresholds_downgrades_to_amber(self):
+        # Now both A and C fail -> Fundamentals fails; Momentum still
+        # passes -> Amber.
+        row = make_row()  # yield 4.0, peg 0.8
+        settings = UserSettings(user_id="u1", dividend_yield_threshold=5.0, peg_threshold=0.5)
+        result = recompute_with_user_thresholds(row, settings)
+        assert result.criterion_a is False
+        assert result.criterion_c is False
         assert result.status == ScreenerStatus.AMBER
 
     def test_looser_peg_threshold_can_upgrade_to_green(self):

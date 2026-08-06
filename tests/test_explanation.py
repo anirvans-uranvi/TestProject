@@ -14,7 +14,7 @@ def make_row(**overrides):
     return ScreenerRow(**defaults)
 
 
-def test_green_explanation_mentions_all_pass():
+def test_green_explanation_mentions_both_factors_pass():
     row = make_row()
     text = explain_classification(row)
     assert "Green" in text
@@ -31,8 +31,8 @@ def test_unavailable_explanation_cites_missing_peg():
     assert "PEG" in text
 
 
-def test_red_explanation_mentions_no_criteria_pass():
+def test_red_explanation_mentions_neither_factor_passes():
     row = make_row(status=ScreenerStatus.RED, criterion_a=False, criterion_b=False, criterion_c=False)
     text = explain_classification(row)
     assert "Red" in text
-    assert "none" in text.lower()
+    assert "neither" in text.lower()

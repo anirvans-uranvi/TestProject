@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 from postgrest.exceptions import APIError
 
+from src.calculations.classification import criterion_fundamentals
 from src.config import get_settings
 from src.models.user import SavedFilter
 from src.repositories import fetch_log_repo, fo_repo, settings_repo, snapshot_repo
@@ -71,8 +72,8 @@ app_settings = get_settings()
 
 st.title("📈 Nifty 50 Momentum & Dividend Screener")
 st.caption(
-    "Screens all current Nifty 50 constituents on momentum, dividend yield, and PEG, "
-    "and classifies each as Green, Amber, Red, or Unavailable."
+    "Screens all current Nifty 50 constituents on Momentum and Fundamentals (dividend yield "
+    "or PEG clearing their thresholds), and classifies each as Green, Amber, Red, or Unavailable."
 )
 st.caption(
     f"Data sources — Stock prices: `{app_settings.market_data_provider}` · "
@@ -429,8 +430,8 @@ for _, r in filtered.iterrows():
             "5% CSP": format_pct(r["csp_5pct"], signed=False) if pd.notna(r["csp_5pct"]) else "N/A",
             "5% CC": format_pct(r["cc_5pct"], signed=False) if pd.notna(r["cc_5pct"]) else "N/A",
             "Dividend": f"{format_pct(r['ttm_dividend_yield'], signed=False)} {pass_fail_icon(r['criterion_a'])}",
-            "PE": f"{r['pe_ratio']:.1f}" if pd.notna(r["pe_ratio"]) else "N/A",
             "PEG": f"{r['peg_ratio']:.2f} {pass_fail_icon(r['criterion_c'])}" if pd.notna(r["peg_ratio"]) else "N/A",
+            "Fundamentals": pass_fail_icon(criterion_fundamentals(r["criterion_a"], r["criterion_c"])),
         }
     )
 

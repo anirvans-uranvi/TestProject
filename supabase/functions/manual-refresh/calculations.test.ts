@@ -12,6 +12,7 @@ import {
   criterionA,
   criterionB,
   criterionC,
+  criterionFundamentals,
   pctReturn,
   return1d,
   return20d,
@@ -159,25 +160,37 @@ Deno.test("criterion52wLow - above/at/below 110pct of low, missing", () => {
   assertEquals(criterion52wLow(520.0, null), null);
 });
 
-// --- classify ------------------------------------------------------------
+// --- criterionFundamentals ---------------------------------------------
 
-Deno.test("classify - all pass is green, none pass is red", () => {
-  assertEquals(classify(true, true, true), "green");
-  assertEquals(classify(false, false, false), "red");
+Deno.test("criterionFundamentals - either/both pass passes, neither fails, missing is null", () => {
+  assertEquals(criterionFundamentals(true, false), true);
+  assertEquals(criterionFundamentals(false, true), true);
+  assertEquals(criterionFundamentals(true, true), true);
+  assertEquals(criterionFundamentals(false, false), false);
+  assertEquals(criterionFundamentals(null, true), null);
+  assertEquals(criterionFundamentals(true, null), null);
+  assertEquals(criterionFundamentals(null, null), null);
 });
 
-Deno.test("classify - one or two pass is amber", () => {
-  assertEquals(classify(true, false, false), "amber");
-  assertEquals(classify(true, true, false), "amber");
+// --- classify (momentum, fundamentals) ------------------------------------
+
+Deno.test("classify - both pass is green, neither pass is red", () => {
+  assertEquals(classify(true, true), "green");
+  assertEquals(classify(false, false), "red");
+});
+
+Deno.test("classify - one pass is amber", () => {
+  assertEquals(classify(true, false), "amber");
+  assertEquals(classify(false, true), "amber");
 });
 
 Deno.test("classify - any missing is unavailable, never counted as fail", () => {
-  assertEquals(classify(null, true, true), "unavailable");
-  assertEquals(classify(false, false, null), "unavailable"); // NOT red
+  assertEquals(classify(null, true), "unavailable");
+  assertEquals(classify(false, null), "unavailable"); // NOT red
 });
 
-Deno.test("classify - stale forces unavailable even if all pass", () => {
-  assertEquals(classify(true, true, true, true), "unavailable");
+Deno.test("classify - stale forces unavailable even if both pass", () => {
+  assertEquals(classify(true, true, true), "unavailable");
 });
 
 // --- buildClassification ---------------------------------------------
@@ -224,6 +237,21 @@ Deno.test("buildClassification - custom thresholds applied", () => {
   });
   assertEquals(result.criterionA, false);
   assertEquals(result.criterionC, true);
+  // Fundamentals = A or C = true even though A fails, and momentum (B)
+  // passes too, so status is green -- Fundamentals only needs one of A/C.
+  assertEquals(result.status, "green");
+});
+
+Deno.test("buildClassification - amber when momentum and fundamentals disagree", () => {
+  const result = buildClassification({
+    ttmDividendYield: 1.0, // fails threshold (3.0) -> A false
+    return1d: 0.1,
+    return5d: 0.1,
+    return20d: 0.1, // all positive -> B true
+    pegRatio: 1.5, // fails threshold (1.0) -> C false
+    latestPrice: 1000.0,
+  });
+  // A and C both fail -> fundamentals false; momentum true -> amber.
   assertEquals(result.status, "amber");
 });
 

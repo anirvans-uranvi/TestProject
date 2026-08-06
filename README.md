@@ -1,8 +1,8 @@
 # Nifty 50 Momentum & Dividend Screener
 
 A Streamlit + Supabase decision-support dashboard that screens all current
-Nifty 50 constituents on momentum, dividend yield, and PEG, and classifies
-each as **Green / Amber / Red / Unavailable**.
+Nifty 50 constituents on Momentum and Fundamentals (dividend yield or PEG),
+and classifies each as **Green / Amber / Red / Unavailable**.
 
 > This dashboard is an analytical tool, not investment advice. Verify data
 > and consider your risk tolerance before trading.
@@ -258,25 +258,37 @@ Adjusted close is preferred over raw close when available
 (`PricePoint.effective_close`).
 
 Criteria: **A** = TTM yield > threshold (default 3%) · **B** = 1D, 5D, and
-20D returns all strictly > 0% · **C** = PEG <= threshold (default 1.0).
-Note the direction flips for C: A and B pass *above* their threshold
-(higher yield/returns are the desirable side), while C passes *at or
-below* its threshold (a lower PEG is conventionally the desirable side --
-priced reasonably relative to earnings growth). Exactly 0% return is
-neutral and fails B; exactly-at-threshold PEG (e.g. 1.00 at the default
-threshold) *passes* C, unlike A which fails at exactly-at-threshold. A
-criterion whose inputs are missing evaluates to `None`, never `False` --
-rows with any `None` criterion are **Unavailable**, not Red. See
+20D returns all strictly > 0% · **C** = PEG <= threshold (default 1.0) ·
+**Fundamentals** = A or C (dividend yield clears its threshold, or PEG
+clears its threshold, or both). Note the direction flips for C: A and B
+pass *above* their threshold (higher yield/returns are the desirable
+side), while C passes *at or below* its threshold (a lower PEG is
+conventionally the desirable side -- priced reasonably relative to
+earnings growth). Exactly 0% return is neutral and fails B;
+exactly-at-threshold PEG (e.g. 1.00 at the default threshold) *passes* C,
+unlike A which fails at exactly-at-threshold. A criterion whose inputs are
+missing evaluates to `None`, never `False`; Fundamentals is itself `None`
+unless *both* A and C are known (so a missing PEG or dividend never
+silently turns into a Fundamentals fail via the `or`). The overall status
+is driven by **B (Momentum) and Fundamentals**, not the raw A/B/C triple
+-- rows with either `None` are **Unavailable**, not Red. See
 `src/calculations/classification.py` for the exact rules and
 `tests/test_calculations_classification.py` for boundary coverage (exactly
 0%, exactly-at-threshold, missing-vs-confirmed-zero, staleness).
 
 | Status | Rule |
 |---|---|
-| Green | A, B, and C all pass |
-| Amber | one or two of A, B, C pass |
-| Red | none of A, B, C pass |
-| Unavailable | any criterion has missing inputs, or data is stale beyond the configured threshold |
+| Green | Momentum and Fundamentals both pass |
+| Amber | exactly one of Momentum, Fundamentals passes |
+| Red | neither Momentum nor Fundamentals passes |
+| Unavailable | Momentum or Fundamentals has missing inputs, or data is stale beyond the configured threshold |
+
+The Dashboard shows A and C individually as the **Dividend** and **PEG**
+columns (each with its own pass/fail tick) plus a combined **Fundamentals**
+column (✅/❌) for the OR of the two -- PE ratio is fetched and classified
+the same as before but is no longer shown on the Dashboard table itself
+(it's a fundamentals input, not one of A/B/C); it's still shown on the
+Stock Detail page's pass/fail scorecard and fundamentals panel.
 
 PE/PEG/EPS/market cap feed A and C from whichever `fundamental_snapshots`
 row is *most recent for that specific field*, not necessarily the row

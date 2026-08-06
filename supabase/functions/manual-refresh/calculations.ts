@@ -140,6 +140,14 @@ export function criterionC(pegRatio: number | null, threshold = 1.0): boolean | 
   return pegRatio <= threshold;
 }
 
+/** Fundamentals = A or C. null (unavailable) unless both A and C are
+ * known -- otherwise a missing PEG/dividend could silently turn into a
+ * "fail" via the OR. Mirrors classification.py::criterion_fundamentals. */
+export function criterionFundamentals(a: boolean | null, c: boolean | null): boolean | null {
+  if (a === null || c === null) return null;
+  return a || c;
+}
+
 /** Display-only proximity check (not part of the Green/Amber/Red engine
  * above): passes when price is comfortably below its 52-week high, i.e.
  * latestPrice < threshold * week52High. Mirrors
@@ -159,17 +167,17 @@ export function criterion52wLow(latestPrice: number | null, week52Low: number | 
 }
 
 /** Missing (null) criteria always short-circuit to "unavailable" before
- * pass/fail counting -- never conflated with a failed criterion. Mirrors
- * classification.py::classify. */
+ * pass/fail counting -- never conflated with a failed criterion. Overall
+ * status is Momentum (B) + Fundamentals (A or C), not the raw A/B/C
+ * triple. Mirrors classification.py::classify. */
 export function classify(
-  a: boolean | null,
-  b: boolean | null,
-  c: boolean | null,
+  momentum: boolean | null,
+  fundamentals: boolean | null,
   isStale = false,
 ): ScreenerStatus {
-  if (isStale || a === null || b === null || c === null) return "unavailable";
-  const passed = [a, b, c].filter((v) => v).length;
-  if (passed === 3) return "green";
+  if (isStale || momentum === null || fundamentals === null) return "unavailable";
+  const passed = [momentum, fundamentals].filter((v) => v).length;
+  if (passed === 2) return "green";
   if (passed === 0) return "red";
   return "amber";
 }
@@ -203,7 +211,8 @@ export function buildClassification(params: {
   const a = criterionA(ttmYield, dividendYieldThreshold);
   const b = criterionB(r1, r5, r20);
   const c = criterionC(pegRatio, pegThreshold);
-  const status = classify(a, b, c, isStale);
+  const fundamentals = criterionFundamentals(a, c);
+  const status = classify(b, fundamentals, isStale);
 
   return {
     status,
