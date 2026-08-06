@@ -288,7 +288,7 @@ columns (each with its own pass/fail tick) plus a combined **Fundamentals**
 column (✅/❌) for the OR of the two -- PE ratio is fetched and classified
 the same as before but is no longer shown on the Dashboard table itself
 (it's a fundamentals input, not one of A/B/C); it's still shown on the
-Stock Detail page's pass/fail scorecard and fundamentals panel.
+Stock Detail page's fundamentals panel.
 
 PE/PEG/EPS/market cap feed A and C from whichever `fundamental_snapshots`
 row is *most recent for that specific field*, not necessarily the row
