@@ -495,12 +495,12 @@ table.
 If you hold this stock in one of your own saved portfolios, a third
 **"Portfolio CC"** table appears below 5% CC (silently absent otherwise)
 -- the same per-holding covered-call figure as the Portfolio page's own
-"CC ROI"/"Assignment ROI" columns (avg-buy-price-vs-LTP-dependent target,
-nearest strike, not 5% CC's fixed-5%-OTM floor), so the numbers always
-match that page for this exact stock. One table per named portfolio that
-holds it, each showing its own qty/avg price plus Strike/Premium/Trade
-Date/Invested Amount/CC ROI/Assignment ROI for the near, next, and far
-monthly expiries.
+"CC ROI"/"CC Assignment ROI" columns (avg-buy-price-vs-LTP-dependent
+target, nearest strike, not 5% CC's fixed-5%-OTM floor), so the numbers
+always match that page for this exact stock. One table per named
+portfolio that holds it, each showing its own qty/avg price plus
+Strike/Premium/Trade Date/Invested Amount/CC ROI/CC Assignment ROI for
+the near, next, and far monthly expiries.
 
 The Dashboard's own **5% CSP** / **5% CC** columns read from a small
 precomputed cache table (`dashboard_fo_metrics`, migration `0011`, keyed
@@ -643,7 +643,7 @@ load's batch, and any row falling short gets a " (as of <date>)" suffix
 appended to its LTP cell -- shown only when a fallback price is actually
 being displayed, never for a symbol with no price at all.
 
-**CC ROI / Assignment ROI** (per-holding covered-call suggestion): a
+**CC ROI / CC Assignment ROI** (per-holding covered-call suggestion): a
 "Covered call expiry" dropdown sits above the tabs and applies to every
 portfolio. Its choices are the actual nearest 3 monthly expiry dates
 (e.g. "Jul 2026", "Aug 2026", "Sep 2026"), taken live from the system
@@ -653,12 +653,16 @@ targeted depends on whether the position is under water: if your average
 buy price is above the current LTP, it targets ~3% above your average
 buy price; otherwise (at or above breakeven) it targets ~5% above LTP --
 picking whichever listed strike is nearest that target. **CC ROI** is the
-premium from writing 1 lot of that call, as a percentage of your full
-position's investment. **Assignment ROI** is the total return if the
-whole position were closed out at that strike (plus that lot's premium),
-relative to your original cost basis. Both show "N/A" for a holding with
-no listed options (ETFs/funds, or a non-Nifty50 stock with no
-derivatives) or no contract for the selected expiry date.
+ROI when the call expires OTM -- the premium from writing 1 lot of that
+call, as a percentage of your full position's investment. **CC
+Assignment ROI** is the ROI if the stock gets called away: the total
+return if the whole position were closed out at that strike (plus that
+lot's premium), relative to your original cost basis. Both are measured
+against the stock's total invested amount, not just the margin, on the
+assumption that the stock is pledged and the pledge is used as margin.
+Both show "N/A" for a holding with no listed options (ETFs/funds, or a
+non-Nifty50 stock with no derivatives) or no contract for the selected
+expiry date.
 
 The holdings table's column headers are clickable/sortable, same as the
 Options screen's Futures table -- click a row to select it (the checkbox

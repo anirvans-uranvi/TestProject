@@ -1000,7 +1000,7 @@ caller left at that point, so it was deleted along with
 (genuinely never fetched) still just shows "—", never a dangling "as
 of" with nothing to date.
 
-**Per-holding covered-call suggestion ("CC ROI" / "Assignment ROI"
+**Per-holding covered-call suggestion ("CC ROI" / "CC Assignment ROI"
 columns)**: distinct from the Dashboard/Options "5% CC" figure
 (`cc_5pct_for_rows`, always spot-based, fixed 5% OTM, floor-filtered
 strike) -- this one is `fo_service.covered_call_for_holding(ce_rows,

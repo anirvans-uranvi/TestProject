@@ -252,9 +252,16 @@ def _render_portfolio_tab(
                 "P&L": r["pnl"],
                 "P&L %": r["pnl_pct"],
                 "CC ROI": cc["cc_roi_pct"] if cc and cc["cc_roi_pct"] is not None else None,
-                "Assignment ROI": cc["assignment_roi_pct"] if cc and cc["assignment_roi_pct"] is not None else None,
+                "CC Assignment ROI": cc["assignment_roi_pct"] if cc and cc["assignment_roi_pct"] is not None else None,
             }
         )
+
+    st.caption(
+        "CC ROI is the ROI when the call expires OTM. CC Assignment ROI is the ROI if the stock gets "
+        "called away. In both cases the ROI is considered against the total invested amount of the "
+        "stock, not just the margin. It is assumed that the stock is pledged and the pledge is used "
+        "as margin."
+    )
 
     # A plain st.dataframe (same as the Futures table on the Options page)
     # instead of the hand-rendered render_screener_table -- its column
@@ -297,7 +304,7 @@ def _render_portfolio_tab(
             "P&L": st.column_config.NumberColumn(format="₹%,.2f"),
             "P&L %": st.column_config.NumberColumn(format="%+.2f%%"),
             "CC ROI": st.column_config.NumberColumn(format="%.2f%%"),
-            "Assignment ROI": st.column_config.NumberColumn(format="%+.2f%%"),
+            "CC Assignment ROI": st.column_config.NumberColumn(format="%+.2f%%"),
         },
     )
     selected_rows = event.selection.rows if event and event.selection else []
@@ -434,7 +441,7 @@ else:
             key="portfolio_cc_expiry",
             format_func=lambda d: date.fromisoformat(d).strftime("%b %Y"),
             help=(
-                "Which monthly expiry the CC ROI / Assignment ROI columns below use. "
+                "Which monthly expiry the CC ROI / CC Assignment ROI columns below use. "
                 "If avg buy price is above LTP, the strike targeted is ~3% above avg buy price; "
                 "otherwise it's ~5% above LTP."
             ),

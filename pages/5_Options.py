@@ -258,7 +258,7 @@ else:
 # stock in at least one of their own saved portfolios (silently absent
 # otherwise, unlike 5% CSP/CC above which always render). Mirrors
 # fo_service.covered_call_for_holding -- the same per-holding formula
-# behind the Portfolio page's own "CC ROI"/"Assignment ROI" columns
+# behind the Portfolio page's own "CC ROI"/"CC Assignment ROI" columns
 # (avg-buy-price-vs-LTP-dependent target, nearest-strike, not the fixed
 # 5%-OTM floor-filtered target 5% CC above uses) -- so the numbers here
 # always agree with that page for this exact stock. Tolerant of
@@ -275,7 +275,7 @@ if holdings_for_symbol:
     st.subheader("Portfolio CC")
     st.caption(
         "The covered-call suggestion from your own Portfolio page's \"CC ROI\" / "
-        "\"Assignment ROI\" columns for this stock, broken out by monthly expiry. "
+        "\"CC Assignment ROI\" columns for this stock, broken out by monthly expiry. "
         "Uses each holding's own avg buy price and quantity, not a fixed 5% OTM "
         "target off spot: if avg buy price is above the last traded price, the "
         "strike targeted is ~3% above avg buy price; otherwise it's ~5% above the "
@@ -318,7 +318,7 @@ if holdings_for_symbol:
                         "CC ROI": format_pct(exp_cc["cc_roi_pct"], signed=False)
                         if exp_cc and exp_cc["cc_roi_pct"] is not None
                         else "N/A",
-                        "Assignment ROI": format_pct(exp_cc["assignment_roi_pct"])
+                        "CC Assignment ROI": format_pct(exp_cc["assignment_roi_pct"])
                         if exp_cc and exp_cc["assignment_roi_pct"] is not None
                         else "N/A",
                     }
