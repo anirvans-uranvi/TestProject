@@ -14,7 +14,7 @@ from src.utils.formatting import format_inr, format_pct
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.ui import inject_global_styles, render_disclaimer, render_stat_grid
 
-st.set_page_config(page_title="Portfolio | Nifty 50 Screener", page_icon="\U0001f4bc", layout="wide")
+st.set_page_config(page_title="My Portfolio | Nifty 50 Screener", page_icon="\U0001f4bc", layout="wide")
 require_login()  # already injects Tailwind + the light-theme CSS design system
 
 client = get_user_client_cached()
@@ -22,15 +22,21 @@ user_id = current_user_id()
 user_settings = settings_repo.get_user_settings(client, user_id)
 inject_global_styles(user_settings.theme)  # re-inject with the user's actual theme
 
-st.title("\U0001f4bc Portfolio")
+st.title("\U0001f4bc My Portfolio")
 render_disclaimer()
 
 BROKERS = ["Zerodha", "Dhan"]
+UPLOAD_TYPES = ["Holdings", "Positions"]
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_holdings(_client, _user_id: str, _cache_bust: int):
     return portfolio_repo.list_holdings(_client, _user_id)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_positions(_client, _user_id: str, _cache_bust: int):
+    return portfolio_repo.list_positions(_client, _user_id)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -71,6 +77,16 @@ except (APIError, ValidationError):
     )
     st.stop()
 
+try:
+    saved_positions = _load_positions(client, user_id, st.session_state["portfolio_cache_bust"])
+    positions_available = True
+except APIError:
+    # portfolio_positions doesn't exist yet (migration 0016) -- degrade
+    # gracefully rather than st.stop(), since Holdings should keep working
+    # even if Positions isn't migrated yet.
+    saved_positions = []
+    positions_available = False
+
 
 def _fmt_qty(value: float) -> str:
     if value == int(value):
@@ -84,7 +100,7 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "x"
 
 
-def _render_upload_section(
+def _render_holdings_upload_section(
     *, portfolio_name: str, broker: str, key_prefix: str, save_label: str, on_saved=None
 ) -> None:
     """Parse -> preview -> (manual symbol override for unresolved rows) ->
@@ -161,6 +177,87 @@ def _render_upload_section(
         st.rerun()
 
 
+def _render_positions_upload_section(
+    *, portfolio_name: str, broker: str, key_prefix: str, save_label: str, on_saved=None
+) -> None:
+    """Same replace-on-upload flow as _render_holdings_upload_section, for
+    F&O positions instead. No manual-symbol override here: unlike a
+    holding's free-text name, a position's instrument string already
+    encodes its own contract identity -- a row that fails to decode
+    (unsupported format) is just saved and shown with no contract detail,
+    there's nothing for the user to correct."""
+    uploaded_file = st.file_uploader(f"{broker} positions CSV", type="csv", key=f"portfolio_position_upload_{key_prefix}")
+    if uploaded_file is None:
+        return
+
+    parse_failed = False
+    try:
+        if broker == "Zerodha":
+            parsed = portfolio_service.parse_zerodha_positions_csv(uploaded_file)
+        else:
+            parsed = portfolio_service.parse_dhan_positions_csv(uploaded_file)
+    except Exception as exc:  # noqa: BLE001 -- arbitrary malformed user-uploaded file
+        st.error(f"Could not read this file as a {broker} positions export: {exc}")
+        parsed = []
+        parse_failed = True
+
+    if not parsed:
+        if not parse_failed:
+            st.warning("No position rows found in this file.")
+        return
+
+    preview_rows = [
+        {
+            "Instrument": p["raw_name"],
+            "Symbol": p["symbol"] or "(undecoded)",
+            "Expiry": p["expiry_date"].strftime("%d %b %Y") if p["expiry_date"] else "—",
+            "Strike": p["strike_price"] if p["strike_price"] is not None else "—",
+            "Type": p["option_type"].value if p["option_type"] else "—",
+            "Qty": _fmt_qty(p["qty"]),
+            "Avg Price": format_inr(p["avg_price"]),
+            "LTP": format_inr(p["ltp"]) if p["ltp"] is not None else "N/A",
+        }
+        for p in parsed
+    ]
+    st.dataframe(preview_rows, use_container_width=True, hide_index=True)
+
+    undecoded = sum(1 for p in parsed if p["symbol"] is None)
+    if undecoded:
+        st.info(
+            f"{undecoded} row(s) are in a contract format this app doesn't decode yet -- "
+            "they'll still be saved and shown, just with no expiry/strike/type."
+        )
+
+    if st.button(save_label, key=f"portfolio_position_save_{key_prefix}"):
+        records = portfolio_service.positions_to_records(user_id, portfolio_name, broker, parsed)
+        portfolio_repo.replace_broker_positions(client, user_id, portfolio_name, broker, records)
+        st.session_state["portfolio_cache_bust"] += 1
+        st.cache_data.clear()
+        st.success(f"Saved {len(records)} position(s) from {broker} to \"{portfolio_name}\".")
+        if on_saved:
+            on_saved()
+        st.rerun()
+
+
+def _render_upload_section(
+    *, portfolio_name: str, broker: str, key_prefix: str, save_label: str, on_saved=None
+) -> None:
+    """What-are-you-uploading dispatcher shared by every "Upload" spot on
+    the page (an existing portfolio's tab, the first-portfolio flow, and
+    the "+ New portfolio" tab) -- routes to the holdings or positions
+    upload flow based on the selection, both of which share the same
+    (portfolio_name, broker, key_prefix, save_label, on_saved) contract."""
+    upload_type = st.selectbox("What are you uploading?", UPLOAD_TYPES, key=f"portfolio_upload_type_{key_prefix}")
+    if upload_type == "Holdings":
+        _render_holdings_upload_section(
+            portfolio_name=portfolio_name, broker=broker, key_prefix=key_prefix, save_label=save_label, on_saved=on_saved
+        )
+    else:
+        _render_positions_upload_section(
+            portfolio_name=portfolio_name, broker=broker, key_prefix=key_prefix, save_label=save_label, on_saved=on_saved
+        )
+
+
 def _load_covered_calls(symbols: tuple[str, ...], expiry_iso: str | None) -> dict[str, dict | None]:
     """Best-effort per-symbol covered-call chain lookup for the selected
     expiry -- returns {} entirely if the F&O tables aren't migrated yet
@@ -191,10 +288,12 @@ def _load_covered_calls(symbols: tuple[str, ...], expiry_iso: str | None) -> dic
 
 
 def _render_portfolio_tab(
-    portfolio_name: str, holdings_for_portfolio: list, cc_expiry_iso: str | None
+    portfolio_name: str, holdings_for_portfolio: list, positions_for_portfolio: list, cc_expiry_iso: str | None
 ) -> None:
-    """Holdings table (merged across brokers within this one portfolio)
-    plus this portfolio's own upload section -- everything a tab shows."""
+    """My Holdings table, My Positions table (both merged across brokers
+    within this one portfolio), plus this portfolio's own upload section
+    -- everything a tab shows."""
+    st.subheader("My Holdings")
     raw_rows = [
         {
             "raw_name": h.raw_name,
@@ -333,8 +432,82 @@ def _render_portfolio_tab(
             st.caption("This holding has no resolved symbol yet, so there's no Stock Detail or Options page for it.")
 
     st.divider()
-    st.subheader("Upload holdings")
-    st.caption("Uploading a broker's file replaces that broker's previously saved holdings in this portfolio.")
+    st.subheader("My Positions")
+    if not positions_available:
+        st.info(
+            "Positions isn't set up yet. Apply migration "
+            "`supabase/migrations/0016_portfolio_positions.sql` in the Supabase SQL editor, "
+            "then reload this page."
+        )
+    elif not positions_for_portfolio:
+        st.caption("No positions saved yet -- upload one below.")
+    else:
+        position_rows = [
+            {
+                "raw_name": p.raw_name,
+                "symbol": p.symbol,
+                "expiry_date": p.expiry_date,
+                "strike_price": p.strike_price,
+                "option_type": p.option_type,
+                "qty": p.qty,
+                "avg_price": p.avg_price,
+                "ltp": p.ltp,
+            }
+            for p in positions_for_portfolio
+        ]
+        computed_positions = portfolio_service.compute_positions_view(position_rows)
+        computed_positions.sort(key=lambda p: (p["symbol"] or p["raw_name"], p["expiry_date"] or date.max))
+
+        priced = [p for p in computed_positions if p["pnl"] is not None]
+        st.markdown(
+            render_stat_grid(
+                [("Total P&L", format_inr(sum(p["pnl"] for p in priced)) if priced else "N/A", None)],
+                user_settings.theme,
+                cols=1,
+            ),
+            unsafe_allow_html=True,
+        )
+        if len(priced) < len(computed_positions):
+            st.caption(
+                f"Total excludes {len(computed_positions) - len(priced)} position(s) with no LTP in the "
+                "uploaded file (shown as N/A below)."
+            )
+        st.caption(
+            "P&L is (LTP - Avg Price) x Qty (qty is signed -- negative is short) against each file's own "
+            "LTP, not live -- index F&O (NIFTY/BANKNIFTY/SENSEX) isn't tracked by this app's own market data."
+        )
+
+        position_table_rows = [
+            {
+                "Symbol": p["symbol"] or f'{p["raw_name"]} (undecoded)',
+                "Expiry": p["expiry_date"].strftime("%d %b %Y") if p["expiry_date"] else None,
+                "Strike": p["strike_price"],
+                "Type": p["option_type"].value if p["option_type"] else None,
+                "Qty": p["qty"],
+                "Avg Price": p["avg_price"],
+                "LTP": p["ltp"],
+                "P&L": p["pnl"],
+                "P&L %": p["pnl_pct"],
+            }
+            for p in computed_positions
+        ]
+        st.dataframe(
+            pd.DataFrame(position_table_rows),
+            use_container_width=True,
+            hide_index=True,
+            key=f"portfolio_positions_table_{_slug(portfolio_name)}",
+            column_config={
+                "Qty": st.column_config.NumberColumn(format="%+,.0f"),
+                "Avg Price": st.column_config.NumberColumn(format="₹%,.2f"),
+                "LTP": st.column_config.NumberColumn(format="₹%,.2f"),
+                "P&L": st.column_config.NumberColumn(format="₹%,.2f"),
+                "P&L %": st.column_config.NumberColumn(format="%+.2f%%"),
+            },
+        )
+
+    st.divider()
+    st.subheader("Upload")
+    st.caption("Uploading a broker's file replaces that broker's previously saved holdings or positions in this portfolio.")
     broker = st.selectbox("Broker", BROKERS, key=f"portfolio_broker_{portfolio_name}")
     _render_upload_section(
         portfolio_name=portfolio_name,
@@ -346,7 +519,7 @@ def _render_portfolio_tab(
     st.divider()
     with st.expander(f'🗑️ Delete "{portfolio_name}"'):
         st.warning(
-            f'This permanently deletes every holding in "{portfolio_name}" (every broker within it). '
+            f'This permanently deletes every holding and position in "{portfolio_name}" (every broker within it). '
             "This cannot be undone."
         )
         confirm = st.checkbox(
@@ -378,10 +551,10 @@ def _render_portfolio_tab(
 # coexist). A "+ New portfolio" tab is always available to start another
 # one from scratch.
 # ---------------------------------------------------------------------
-portfolio_names = sorted({h.portfolio_name for h in saved_holdings})
+portfolio_names = sorted({h.portfolio_name for h in saved_holdings} | {p.portfolio_name for p in saved_positions})
 
 if not portfolio_names:
-    st.info("No holdings saved yet -- create your first portfolio below.")
+    st.info("No holdings or positions saved yet -- create your first portfolio below.")
     st.divider()
     st.subheader("Create a portfolio")
     first_name = st.text_input("Portfolio name", value="Portfolio 1", key="portfolio_first_name")
@@ -453,7 +626,12 @@ else:
     tabs = st.tabs(portfolio_names + ["+ New portfolio"], key="portfolio_active_tab", on_change="rerun")
     for name, tab in zip(portfolio_names, tabs[:-1]):
         with tab:
-            _render_portfolio_tab(name, [h for h in saved_holdings if h.portfolio_name == name], cc_expiry_iso)
+            _render_portfolio_tab(
+                name,
+                [h for h in saved_holdings if h.portfolio_name == name],
+                [p for p in saved_positions if p.portfolio_name == name],
+                cc_expiry_iso,
+            )
     with tabs[-1]:
         st.caption("Start a brand-new portfolio, separate from your existing one(s) -- nothing existing is affected.")
         new_name = st.text_input(

@@ -107,7 +107,7 @@ pages/
   2_Stock_Detail.py               Price/volume/dividend charts, scorecard, per-stock alerts -- sidebar label "Equity"
   4_Settings.py                    Per-user thresholds, alert CRUD + notification history, theme, change password, sign out
   5_Options.py                     F&O: futures term structure + 5% CSP/CC breakdown per stock
-  6_Portfolio.py                    Upload Zerodha/Dhan holdings, live-valued against app market data
+  6_Portfolio.py                    Upload Zerodha/Dhan holdings + F&O positions -- sidebar label "My Portfolio"
 src/
   config.py                       Pydantic Settings, reads .env
   models/                          Pydantic domain models + enums
@@ -135,7 +135,7 @@ tests/                             Pytest suite -- almost entirely calculations/
 ## Database schema
 
 All migrations live in `supabase/migrations/`, applied in numeric order
-(`0001` → `0015`). Eighteen tables, in three groups (`0008` doesn't add a
+(`0001` → `0016`). Nineteen tables, in three groups (`0008` doesn't add a
 table -- it just extends `provider_fetch_log.fetch_type`'s CHECK
 constraint with `'fo'`, for the `fo-refresh` Edge Function's logging;
 `0010`/`0011` drop and recreate `dashboard_fo_metrics` with a different
@@ -144,7 +144,7 @@ below; `0012` adds `portfolio_holdings`; `0013` only redefines
 `latest_screener_view`, no new table; `0014` only adds a column +
 widens `portfolio_holdings`' primary key, no new table; `0015` only adds
 a column to `companies` (`is_etf`) + redefines `latest_screener_view`
-again, no new table):
+again, no new table; `0016` adds `portfolio_positions`):
 
 **Reference data** (written by `scripts/fetch_nifty50_constituents.py` /
 `seed.sql`, read-only to the app):
@@ -166,11 +166,12 @@ again, no new table):
 - `user_positions` — entry/target/stop-loss/notes per symbol
 - `alerts` — alert configs
 - `notification_log` — alert-fired history, deduped via a unique `dedupe_key`
-- `portfolio_holdings` — broker-CSV-uploaded holdings (migration `0012`, `portfolio_name` added in `0014`), keyed `(user_id, portfolio_name, broker, raw_name)` -- a user can maintain multiple independently-named portfolios that all coexist. `symbol` is nullable and deliberately **not** FK'd to `companies` -- a resolved symbol may not exist there yet (an ETF/fund or non-Nifty50 stock the screener doesn't otherwise track); see the Portfolio section below for how it gets registered.
+- `portfolio_holdings` — broker-CSV-uploaded holdings (migration `0012`, `portfolio_name` added in `0014`), keyed `(user_id, portfolio_name, broker, raw_name)` -- a user can maintain multiple independently-named portfolios that all coexist. `symbol` is nullable and deliberately **not** FK'd to `companies` -- a resolved symbol may not exist there yet (an ETF/fund or non-Nifty50 stock the screener doesn't otherwise track); see the My Portfolio section below for how it gets registered.
+- `portfolio_positions` — broker-CSV-uploaded F&O positions (migration `0016`), same keying/RLS shape as `portfolio_holdings`. `symbol`/`expiry_date`/`strike_price`/`option_type` are nullable together (an undecoded instrument format), and `qty` keeps its broker-reported sign (negative = short). See the My Portfolio section's Positions subsection.
 
 Two generated helpers, defined in `0003_views_functions.sql` (and patched
 in `0004`):
-- `latest_screener_view` — one joined row per current constituent (companies + its latest daily_screener_snapshot), plus (as of `0013`) every symbol the *viewing* user holds in their own `portfolio_holdings`, minus (as of `0015`) any row with `is_etf = true`. This is what the Dashboard queries in a single call instead of joining client-side. `0004` added `coalesce(status, 'unavailable')` / `coalesce(data_quality, '{}')` here because a constituent with no snapshot yet would otherwise return `NULL` for those columns, which fails Pydantic validation on the `ScreenerRow` model. `0006` added `week_52_high`/`week_52_low`/`criterion_52w_high`/`criterion_52w_low` — **a real deploy-time error hit here**: `create or replace view` can only *append* new output columns; inserting them positionally in the middle of the existing `select` list (as the first draft of `0006` did) makes Postgres think you're renaming the columns that got pushed down a slot, and it fails with `42P16: cannot change name of view column ... HINT: Use ALTER VIEW ... RENAME COLUMN ... instead`. The fix is to always append new columns at the very end of the `select` list in any future `create or replace view` migration, never insert them mid-list — column *order* doesn't matter to the app since every read is by name (`ScreenerRow.model_validate(dict)`), so this costs nothing. `0013` made two further changes, both **real production bugs found after the Portfolio feature shipped** (see the Portfolio section's "Screener fallback" note below for the full story): the per-symbol lateral join now prefers the most recent snapshot row that actually has a price (falling back across days when today's fetch failed) instead of always taking literally the latest date regardless of whether it has data, and the join went from `nifty50_constituents` inner-join to `left join ... where nc.is_current or exists (select 1 from portfolio_holdings where symbol = c.symbol and user_id = auth.uid())` — `security_invoker = true` means `auth.uid()` here is the actual querying user, so this stays correctly scoped per user (reinforced by `portfolio_holdings`' own RLS policy on top).
+- `latest_screener_view` — one joined row per current constituent (companies + its latest daily_screener_snapshot), plus (as of `0013`) every symbol the *viewing* user holds in their own `portfolio_holdings`, minus (as of `0015`) any row with `is_etf = true`. This is what the Dashboard queries in a single call instead of joining client-side. `0004` added `coalesce(status, 'unavailable')` / `coalesce(data_quality, '{}')` here because a constituent with no snapshot yet would otherwise return `NULL` for those columns, which fails Pydantic validation on the `ScreenerRow` model. `0006` added `week_52_high`/`week_52_low`/`criterion_52w_high`/`criterion_52w_low` — **a real deploy-time error hit here**: `create or replace view` can only *append* new output columns; inserting them positionally in the middle of the existing `select` list (as the first draft of `0006` did) makes Postgres think you're renaming the columns that got pushed down a slot, and it fails with `42P16: cannot change name of view column ... HINT: Use ALTER VIEW ... RENAME COLUMN ... instead`. The fix is to always append new columns at the very end of the `select` list in any future `create or replace view` migration, never insert them mid-list — column *order* doesn't matter to the app since every read is by name (`ScreenerRow.model_validate(dict)`), so this costs nothing. `0013` made two further changes, both **real production bugs found after the Portfolio feature shipped** (see the My Portfolio section's "Screener fallback" note below for the full story): the per-symbol lateral join now prefers the most recent snapshot row that actually has a price (falling back across days when today's fetch failed) instead of always taking literally the latest date regardless of whether it has data, and the join went from `nifty50_constituents` inner-join to `left join ... where nc.is_current or exists (select 1 from portfolio_holdings where symbol = c.symbol and user_id = auth.uid())` — `security_invoker = true` means `auth.uid()` here is the actual querying user, so this stays correctly scoped per user (reinforced by `portfolio_holdings`' own RLS policy on top).
 - `get_classification_history(symbol, days)` — a SQL function returning one symbol's snapshot history, used by the Stock Detail status-over-time chart.
 
 Migration `0007` adds two more views on the same `DISTINCT ON` pattern:
@@ -318,7 +319,7 @@ without needing this treatment.
 - **`market_calendar.py`** — NSE trading-day/market-state logic. The holiday list (`NSE_HOLIDAYS`) is hardcoded **per calendar year** and needs a manual update every year; falls back to weekday-only for years not listed.
 - **`threshold_override.py`** — `daily_screener_snapshots` is computed server-side against *default* thresholds (the stable audit trail); a signed-in user can configure their own thresholds in Settings, so pages re-run `build_classification()` client-side against the row's stored raw inputs (which are threshold-independent) to reflect that choice, without a server-side recompute per user. Also recomputes `is_stale` from `data_quality.stale_minutes` against the user's own `stale_data_threshold_minutes` when available.
 - **`explanation.py`** — `explain_classification(row)` builds the plain-English sentence shown on Stock Detail, branching on which criteria passed/failed/are missing.
-- **`portfolio_service.py`** — CSV parsing for the two supported broker exports (`parse_zerodha_csv`, `parse_dhan_csv`), name-to-symbol matching (`match_symbol`, normalized-substring containment against `companies.name`), cross-broker merging (`merge_holdings`), and live valuation (`compute_portfolio_view`). `resolve_tracked_symbols` is the pure diff both refresh paths call to register newly-seen portfolio symbols; `looks_like_etf_name` is the real-display-name-based ETF/fund classifier those same paths apply to it before upserting (migration `0015`). See the Portfolio section below and the Futures & Options section's "A follow-up problem 0013 itself introduced" paragraph for the full ETF story.
+- **`portfolio_service.py`** — CSV parsing for the two supported broker holdings exports (`parse_zerodha_csv`, `parse_dhan_csv`), name-to-symbol matching (`match_symbol`, normalized-substring containment against `companies.name`), cross-broker merging (`merge_holdings`), and live valuation (`compute_portfolio_view`); plus the two broker *positions* exports (`parse_zerodha_positions_csv`/`parse_zerodha_option_instrument`, `parse_dhan_positions_csv`/`parse_dhan_position_name`) and their own valuation (`compute_positions_view`, migration `0016`). `resolve_tracked_symbols` is the pure diff both refresh paths call to register newly-seen portfolio symbols; `looks_like_etf_name` is the real-display-name-based ETF/fund classifier those same paths apply to it before upserting (migration `0015`). See the My Portfolio section below and the Futures & Options section's "A follow-up problem 0013 itself introduced" paragraph for the full ETF story.
 
 ## Notifications (`src/notifications/`)
 
@@ -601,7 +602,7 @@ pages = [
     st.Page("pages/1_Dashboard.py", title="Screener", default=True),
     st.Page("pages/2_Stock_Detail.py", title="Equity"),
     st.Page("pages/5_Options.py", title="Options"),
-    st.Page("pages/6_Portfolio.py", title="Portfolio"),
+    st.Page("pages/6_Portfolio.py", title="My Portfolio"),
     st.Page("pages/4_Settings.py", title="Settings"),
 ]
 st.navigation(pages).run()
@@ -673,20 +674,23 @@ page's own `st.set_page_config(page_title=..., page_icon=...)` call
   - **5% CSP** is a **near/next/far month table** (`fo_service.csp_5pct_for_rows`, one call per expiry — the same term-structure shape the Futures section above already uses), columns Term / Expiry / Spot / Strike / Put Premium / **Trade Date** / 5% CSP. The near row reuses the already-fetched `chain_rows` when the expiry selector above happens to be on the near expiry; next/far are fetched separately via `fo_repo.get_option_chain`. The Trade Date column is what actually surfaces a stale quote to the user — see `_freshest_rows`'s docstring above for why a strike's "latest" row can silently be weeks old.
   - **5% CC** is also a **near/next/far month table** (`fo_service.cc_5pct_for_rows`, one call per expiry, mirroring 5% CSP's own loop exactly), columns Term / Expiry / Strike (lowest ≥5% above spot) / Premium / Trade Date / **Net Investment** / 5% CC / **Assignment Profit** (`(strike / net_investment - 1) * 100`, `None`/"N/A" if `net_investment` is zero or negative -- premium ≥ spot). This originally only showed the nearest expiry as a stat-grid breakdown (via `fo_service.cc_5pct_map`, which itself just restricts to the nearest expiry and delegates to `cc_5pct_for_rows`) -- changed on request to match 5% CSP's table shape once a live user actually wanted to see next/far month CC yields too, not just the near month `dashboard_fo_metrics` already caches for the Dashboard. "Net Investment" and "Assignment Profit" only appear here, not on the Dashboard, which only ever caches/displays `cc_pct`.
   Both loops share one `_chain_rows_for(exp)` helper (reuses the already-fetched `chain_rows` when `exp` happens to be the expiry selected above, otherwise fetches that expiry's chain separately) and both use the cash-market spot for every expiry, not just the near one -- so **every** row of both tables, not just the near-month one, matches what the Dashboard would compute for that same expiry. Shaping is done by `fo_service.option_chain_summary`/`futures_term_structure`/`csp_5pct_for_rows`/`cc_5pct_for_rows`, not in the page.
-  - **Portfolio CC** -- a third near/next/far table, shown *only* when the signed-in user actually holds this stock in at least one of their own saved portfolios (`portfolio_repo.list_holdings(client, user_id)`, filtered to this symbol; silently absent otherwise, unlike 5% CSP/CC above which always render). Reuses the exact same per-holding formula behind the Portfolio page's own "CC ROI"/"Assignment ROI" columns (`fo_service.covered_call_for_holding` -- avg-buy-price-vs-LTP-dependent target, nearest-strike, not 5% CC's fixed-5%-OTM floor filter), so the numbers here always agree with that page for this exact stock. If the same portfolio name holds this symbol across multiple brokers, `portfolio_service.merge_holdings` combines them into one row first (same as the Portfolio page); if the stock is held in more than one *named* portfolio, one table renders per portfolio (each with its own qty/avg price subheading), since different portfolios can have different cost bases and thus different target strikes. Columns: Term / Expiry / Strike / Premium / Trade Date / Invested Amount / CC ROI / Assignment ROI.
+  - **Portfolio CC** -- a third near/next/far table, shown *only* when the signed-in user actually holds this stock in at least one of their own saved portfolios (`portfolio_repo.list_holdings(client, user_id)`, filtered to this symbol; silently absent otherwise, unlike 5% CSP/CC above which always render). Reuses the exact same per-holding formula behind the My Portfolio page's own "CC ROI"/"CC Assignment ROI" columns (`fo_service.covered_call_for_holding` -- avg-buy-price-vs-LTP-dependent target, nearest-strike, not 5% CC's fixed-5%-OTM floor filter), so the numbers here always agree with that page for this exact stock. If the same portfolio name holds this symbol across multiple brokers, `portfolio_service.merge_holdings` combines them into one row first (same as the My Portfolio page); if the stock is held in more than one *named* portfolio, one table renders per portfolio (each with its own qty/avg price subheading), since different portfolios can have different cost bases and thus different target strikes. Columns: Term / Expiry / Strike / Premium / Trade Date / Invested Amount / CC ROI / CC Assignment ROI.
 
   **A real bug found here, right after this section first shipped**: the CSP/CC breakdown's spot value (CC was still "ITM PMCC" at the time, but the bug and fix applied identically) was initially taken from `option_chain_summary(near_chain_rows)["spot"]` — the F&O bhavcopy's own `underlying_price` column — while the Dashboard's two columns (now the `dashboard_fo_metrics` cache, see above) use the cash-market `latest_price` from `latest_screener_view`. These two prices aren't the same value, so this page's numbers didn't match the Dashboard's for the same stock (confirmed live: ADANIENT showed 5% CSP = 0.54% on the Dashboard but 0.45% here, since a different spot picked a different nearest-5%-below strike, 3040 vs 3020). Fixed by fetching `snapshot_repo.get_latest_screener_row(client, symbol).latest_price` and using that as the spot for both calculations here too, instead of the chain's `underlying_price` — the top-of-page "Spot"/"ATM strike" summary tiles are unaffected and deliberately still use the chain's own `underlying_price` (correct for highlighting the ATM row in the actual option-chain data being displayed there). If you add another F&O-derived calculation to either screen, source spot the same way this one now does — from the screener, not the chain — to keep the two screens' numbers in agreement.
 
-- **`6_Portfolio.py`** — see the dedicated Portfolio section below for the full upload → match → save → refresh-registration pipeline, and for the multiple-coexisting-portfolios design (`portfolio_name`, migration `0014`). On the page itself: `_load_holdings` reads every one of the signed-in user's saved rows across every portfolio and broker; one `st.tabs` entry is rendered per distinct `portfolio_name`, each scoping `portfolio_service.merge_holdings`/`compute_portfolio_view` (LTP via `snapshot_repo.get_latest_prices`, a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why) to just that portfolio's own rows. The holdings table is a plain `st.dataframe` — see below for why, and for how row selection replaced the per-row 🔍 button.
+- **`6_Portfolio.py`** — sidebar label "My Portfolio". See the dedicated section below for the full upload → match → save → refresh-registration pipeline, and for the multiple-coexisting-portfolios design (`portfolio_name`, migration `0014`). On the page itself: `_load_holdings`/`_load_positions` read every one of the signed-in user's saved rows across every portfolio and broker; one `st.tabs` entry is rendered per distinct `portfolio_name` (union of holdings' and positions' names — a portfolio can exist on positions alone), each showing a **My Holdings** table and a **My Positions** table, scoping `portfolio_service.merge_holdings`/`compute_portfolio_view` (LTP via `snapshot_repo.get_latest_prices`, a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why) and `compute_positions_view` to just that portfolio's own rows. Both tables are a plain `st.dataframe` — see below for why, and for how row selection (My Holdings only) replaced the per-row 🔍 button.
 
-## Portfolio
+## My Portfolio
 
-`pages/6_Portfolio.py` shows the signed-in user's own broker holdings
-(not the Nifty50 screener universe), valued live against the app's own
-market data. This is a separate, self-contained subsystem from the
-screener, similar in spirit to the F&O section above: its own table, its
-own service module, its own refresh-pipeline hook — nothing here changes
-`nifty50_constituents`, `latest_screener_view`, or any existing page.
+`pages/6_Portfolio.py` shows the signed-in user's own broker holdings and
+F&O positions (not the Nifty50 screener universe) under "My Holdings" and
+"My Positions" respectively -- holdings valued live against the app's own
+market data, positions valued against each file's own LTP (see the
+Positions subsection near the end of this section for why). This is a
+separate, self-contained subsystem from the screener, similar in spirit
+to the F&O section above: its own tables, its own service module, its
+own refresh-pipeline hook — nothing here changes `nifty50_constituents`,
+`latest_screener_view`, or any existing page.
 
 **Schema (migrations `0012_portfolio_holdings.sql` and
 `0014_portfolio_holdings_multi_portfolio.sql`)**: one table,
@@ -1092,6 +1096,94 @@ canvas at all on a hidden tab, so no click can land on it. `AppTest` sets
 ...}}` directly (the same schema a real click produces) and reruns the
 script -- confirming `rows[i]["symbol"]` resolves to the right stock and
 the right button renders, without needing the canvas to paint.
+
+**F&O positions (`portfolio_positions`, migration `0016`)** — a sibling
+table to `portfolio_holdings`, same per-user RLS shape
+(`auth.uid() = user_id`), same delete-then-insert replace semantics
+(`portfolio_repo.replace_broker_positions`), same primary key shape
+(`user_id, portfolio_name, broker, raw_name`). `symbol`/`expiry_date`/
+`strike_price`/`option_type` are nullable together: a row whose
+instrument string didn't decode is still saved (`raw_name` always is)
+but shown with no contract detail — same "save it anyway, degrade the
+display" precedent as an unresolved holding, except there's no manual-
+symbol-override form here, since a position's contract identity (unlike
+a holding's free-text company name) is either decodable from the string
+or it isn't; there's nothing for the user to correct. `qty` keeps its
+broker-reported sign (negative = short). Deliberately no FK to
+`option_contracts` — index derivatives (NIFTY, BANKNIFTY, SENSEX, ...)
+are explicitly out of scope for this app's own F&O ingestion
+(`src/data_providers/nse_fo_provider.py`'s `_FUTURES_TYPES`/`_OPTION_TYPES`
+keep only `STF`/`STO`, i.e. stock derivatives — `IDF`/`IDO` index rows
+are skipped), so a decoded position's contract may never exist in that
+table at all. `pages/6_Portfolio.py` degrades gracefully (an `st.info`
+pointing at the migration, no `st.stop()`) if `portfolio_positions`
+doesn't exist yet — Holdings keeps working either way, unlike the
+holdings-table load itself, which does `st.stop()` if `0012`/`0014`
+aren't applied.
+
+**Two broker position-export formats, decoded to a common shape**
+(`src/services/portfolio_service.py`) — unlike holdings, *both* brokers'
+positions exports already embed the exact NSE underlying symbol (no
+company-name fuzzy matching needed for either):
+
+- **Zerodha** (`parse_zerodha_positions_csv` /
+  `parse_zerodha_option_instrument`) — the `Instrument` column is
+  Zerodha's own F&O tradingsymbol, e.g. `NIFTY2681123000PE`: underlying
+  (`[A-Z]+`, greedy — safe since NSE symbols are pure alphabetic, so the
+  first digit unambiguously ends it), 2-digit year, a single month
+  character (`1`-`9` for Jan-Sep, `O`/`N`/`D` for Oct/Nov/Dec), 2-digit
+  day, strike, `CE`/`PE`. This only covers *weekly* option contracts —
+  today, only indices (NIFTY, BANKNIFTY, SENSEX, ...) have weekly
+  expiries. Zerodha's *monthly* stock-option format (e.g.
+  `SBIN25AUG970PE`, no day component — monthly contracts expire on the
+  last Thursday of the month) is deliberately **not** decoded: inferring
+  that day from the symbol alone isn't safe without a real sample to
+  verify against, since exchange holidays can shift the actual expiry a
+  day earlier. A row in that format just comes back with `symbol=None`
+  and is saved undecoded rather than guessed.
+- **Dhan** (`parse_dhan_positions_csv` / `parse_dhan_position_name`) —
+  the `Name` column is Dhan's own space-separated format, e.g.
+  `"ONGC 25 AUG 230 PUT"`, used identically for monthly stock options and
+  weekly index options (no format difference between the two, unlike
+  Zerodha). It carries no year at all, so the year is inferred as the
+  nearest occurrence of that day/month on or after `as_of` (defaults to
+  `date.today()`, explicit for testability, same `as_of` convention as
+  `screener_service`/`refresh_service`) — a currently-open position's
+  expiry can't be in the past, so if that day/month has already passed
+  this year, it rolls to next year. Numbers are quoted with Indian-style
+  grouping, same tolerant `_to_float` reuse as `parse_dhan_csv`.
+
+**P&L is recomputed, not trusted from either file, and doesn't use
+`ltp`+`avg_price` alone from Zerodha's own P&L column** —
+`compute_positions_view`: `pnl = (ltp - avg_price) * qty`, which is
+direction-correct for both a long (positive qty) and a short (negative
+qty) position without an `if` — cross-checked against every row of both
+sample export files this feature was built against (e.g. Dhan's
+"HINDALCO 25 AUG 860 PUT", qty -700, avg 2.55, ltp 1.05: `(1.05 - 2.55) *
+-700 = 1050`, matching the file's own reported "1,050.00" exactly).
+`pnl_pct = pnl / (avg_price * abs(qty)) * 100` — against the *premium*
+notional, since there's no equivalent of a holding's "investment" for a
+written option. Both are `None` (→ "N/A") when `ltp` is missing. The two
+sample brokers' own percentage columns were checked and rejected as a
+data source: Dhan's "% Change" is direction-aware (matches this
+`pnl_pct` formula exactly), but Zerodha's "Chg." is a raw, non-direction-
+aware price change (`(ltp - avg_price) / avg_price * 100`) — the same
+short HINDALCO-style position would show oppositely-signed numbers
+depending on which broker's own column you trusted, so neither is
+treated as authoritative; both are always recomputed the same way
+instead.
+
+**LTP itself, unlike holdings, is trusted from the uploaded file** rather
+than fetched live. Holdings can always be revalued live because every
+tracked equity symbol has a `daily_screener_snapshots` row from this
+app's own refresh pipeline; there's no equivalent live source for
+options, and — as noted above — index F&O (a large share of any real
+options book: NIFTY/BANKNIFTY/SENSEX) is architecturally out of scope
+for `nse_fo_provider.py` regardless of whether the underlying is
+otherwise tracked, so "wait for the next refresh" (the holdings playbook
+for an unpriced symbol) would never resolve for these. The file's own
+LTP is the only live-like number available, so it's used as-is; only the
+*derived* P&L/P&L% are recomputed, per the point above.
 
 ## Auth: a non-obvious quirk
 

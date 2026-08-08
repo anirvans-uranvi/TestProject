@@ -24,7 +24,7 @@ operations; that doc covers the code itself.
 - [Scheduled refresh](#scheduled-refresh)
 - [On-demand refresh (Dashboard refresh buttons)](#on-demand-refresh-dashboard-refresh-buttons)
 - [Futures & Options (F&O) data](#futures--options-fo-data)
-- [Portfolio](#portfolio)
+- [My Portfolio](#my-portfolio)
 - [Docker](#docker)
 - [Limitations](#limitations)
 
@@ -39,7 +39,7 @@ pages/                  Streamlit multipage app (each still its own script,
   2_Stock_Detail.py       Price/volume/dividend charts, scorecard, per-stock alerts -- sidebar label "Equity"
   4_Settings.py            Per-user thresholds, alert CRUD + notification history, notification channels, sign out
   5_Options.py              F&O: futures term structure, 5% CSP / 5% CC breakdown
-  6_Portfolio.py             Upload Zerodha/Dhan holdings, live-valued against app market data
+  6_Portfolio.py             Upload Zerodha/Dhan holdings + F&O positions -- sidebar label "My Portfolio"
 src/
   config.py               Pydantic Settings (env-driven)
   data_providers/         PriceDataProvider / FundamentalsDataProvider + Dhan/mock/manual impls
@@ -153,11 +153,11 @@ settings.
   `0013_screener_fallback_and_portfolio_symbols.sql` (falls back to
   the last snapshot row that actually has a price instead of always
   using today's, and folds in the viewing user's portfolio symbols --
-  see [Portfolio](#portfolio) for why), and
+  see [My Portfolio](#my-portfolio) for why), and
   `0015_add_is_etf_to_companies.sql` (adds `companies.is_etf`, filtered
   out of this same view -- ETFs/funds tracked via a portfolio still
   showed up on this stock-focused screener otherwise; see
-  [Portfolio](#portfolio) for the classification story).
+  [My Portfolio](#my-portfolio) for the classification story).
 - **Password reset uses a 6-digit code, not the email's magic link.**
   Supabase's recovery link puts the session token in the URL fragment
   (`#access_token=...`), which no server (including ours) ever receives,
@@ -547,39 +547,80 @@ above) is the easier way to pick up each new trading day's bhavcopy --
 no terminal/service-role key needed, and it's a no-op if nothing new is
 published yet.
 
-## Portfolio
+## My Portfolio
 
-The **Portfolio** page (`pages/6_Portfolio.py`) shows your own holdings --
-uploaded from a broker CSV export, not the Nifty50 screener universe --
-valued live against the app's own market data: Stock, Qty, Avg Price,
-LTP, Investment, Cur Val, P&L, P&L%, plus two covered-call columns (see
-below). Two broker formats are supported:
+The **My Portfolio** page (`pages/6_Portfolio.py`) shows your own
+holdings and F&O positions -- uploaded from broker CSV exports, not the
+Nifty50 screener universe. Each portfolio tab has two sections:
 
-- **Zerodha**: the `Instrument` column is already the exact NSE trading
-  symbol, so it's trusted directly.
-- **Dhan**: the `Name` column is a free-text company name, matched
-  against `companies.name` by normalized-substring containment (case/
-  suffix-insensitive). Ambiguous or unmatched names are left unresolved
-  -- you can type the correct NSE symbol in before saving, or leave it
-  blank to keep that row as N/A.
+- **My Holdings** -- equity holdings valued live against the app's own
+  market data: Stock, Qty, Avg Price, LTP, Investment, Cur Val, P&L,
+  P&L%, plus two covered-call columns (see below).
+- **My Positions** -- open F&O (options) positions decoded from the same
+  broker exports: Symbol, Expiry, Strike, Type, Qty (signed -- negative
+  is short), Avg Price, LTP, P&L, P&L%. Unlike holdings, LTP here is
+  trusted from the uploaded file rather than fetched live -- index F&O
+  (NIFTY, BANKNIFTY, SENSEX) is out of scope for this app's own F&O
+  ingestion (see `src/data_providers/nse_fo_provider.py`'s STF/STO-only
+  filter), so there's no live per-contract price source to fall back on.
+  P&L/P&L% are still recomputed from qty/avg price/LTP rather than
+  trusted from the file, since Zerodha's and Dhan's own P&L% columns
+  turned out to mean different things (Dhan's is direction-aware,
+  Zerodha's is a raw price change) -- see `portfolio_service.compute_positions_view`.
 
-Holdings are saved per-user (`portfolio_holdings`, migrations `0012` and
-`0014`), and **you can maintain multiple, independently-named portfolios
-that all coexist** -- each one shown as its own tab (e.g. "Personal",
-"Family", "Retirement"), right below the disclaimer. Within a portfolio's
-tab: the holdings table (same stock held across multiple brokers within
-that one portfolio is combined into one row for display), then an upload
-section scoped to just that portfolio -- uploading a broker's file there
-replaces that broker's previously saved rows *in this portfolio only*;
-every other portfolio, and every other broker within this one, is
-untouched. A "+ New portfolio" tab is always available at the end to
-start an entirely separate portfolio from scratch (pick a name -- it
-defaults to "Portfolio N" if left blank -- and a broker); creating one
-never deletes or modifies any existing portfolio. Each tab also has a
-collapsed "🗑️ Delete" section at the bottom to remove that portfolio
-entirely (every broker within it) -- it requires ticking a confirmation
-checkbox before the delete button becomes clickable, since this can't be
-undone; every other portfolio is unaffected.
+Both sections upload the same way: pick "Holdings" or "Positions" from a
+"What are you uploading?" selector, then the broker and file. Two broker
+formats are supported for each:
+
+- **Holdings -- Zerodha**: the `Instrument` column is already the exact
+  NSE trading symbol, so it's trusted directly.
+- **Holdings -- Dhan**: the `Name` column is a free-text company name,
+  matched against `companies.name` by normalized-substring containment
+  (case/suffix-insensitive). Ambiguous or unmatched names are left
+  unresolved -- you can type the correct NSE symbol in before saving, or
+  leave it blank to keep that row as N/A.
+- **Positions -- Zerodha**: the `Instrument` column is Zerodha's own F&O
+  tradingsymbol (e.g. `NIFTY2681123000PE` -- underlying + 2-digit year +
+  a single month character + 2-digit day + strike + CE/PE), decoded by
+  `portfolio_service.parse_zerodha_option_instrument`. Only the *weekly*
+  format (currently index-only: NIFTY, BANKNIFTY, SENSEX, ...) is
+  decoded; Zerodha's monthly stock-option format isn't, since inferring
+  its expiry day (the exchange's last-Thursday convention, shiftable by
+  holidays) from the symbol alone isn't safe without a real sample to
+  verify against.
+- **Positions -- Dhan**: the `Name` column is Dhan's own space-separated
+  format (e.g. `ONGC 25 AUG 230 PUT`), used uniformly for both monthly
+  and weekly contracts, decoded by `portfolio_service.parse_dhan_position_name`.
+  It carries no year, so the year is inferred as the nearest occurrence
+  of that day/month on or after today (an open position's expiry can't
+  be in the past).
+
+A position whose instrument string doesn't decode is still saved and
+shown -- just with no expiry/strike/type -- there's no manual-symbol
+override for positions the way there is for unresolved holdings, since a
+position's contract identity (unlike a holding's free-text company name)
+is either decodable from the string or it isn't.
+
+Both holdings and positions are saved per-user (`portfolio_holdings`,
+migrations `0012`/`0014`; `portfolio_positions`, migration `0016`), and
+**you can maintain multiple, independently-named portfolios that all
+coexist** -- each one shown as its own tab (e.g. "Personal", "Family",
+"Retirement"), right below the disclaimer; a portfolio's tab exists as
+soon as it has holdings *or* positions saved (not holdings alone). Within
+a portfolio's tab: My Holdings and My Positions (same stock/contract held
+across multiple brokers within that one portfolio is combined into one
+row for display), then one upload section scoped to just that portfolio
+-- uploading a broker's file there replaces that broker's previously
+saved rows of the selected type *in this portfolio only*; every other
+portfolio, broker, and the other upload type are untouched. A "+ New
+portfolio" tab is always available at the end to start an entirely
+separate portfolio from scratch (pick a name -- it defaults to
+"Portfolio N" if left blank -- and a broker); creating one never deletes
+or modifies any existing portfolio. Each tab also has a collapsed "🗑️
+Delete" section at the bottom to remove that portfolio entirely (every
+holding and position, every broker within it) -- it requires ticking a
+confirmation checkbox before the delete button becomes clickable, since
+this can't be undone; every other portfolio is unaffected.
 
 **LTP only comes from data already loaded in Supabase** -- never a fresh
 live fetch triggered by this page. The app's `companies`/
@@ -664,10 +705,12 @@ Both show "N/A" for a holding with no listed options (ETFs/funds, or a
 non-Nifty50 stock with no derivatives) or no contract for the selected
 expiry date.
 
-The holdings table's column headers are clickable/sortable, same as the
-Options screen's Futures table -- click a row to select it (the checkbox
-on the left) and two buttons appear below the table: "Open in Stock
-Detail" and "Open in Options" for that stock.
+The My Holdings table's column headers are clickable/sortable, same as
+the Options screen's Futures table -- click a row to select it (the
+checkbox on the left) and two buttons appear below the table: "Open in
+Stock Detail" and "Open in Options" for that stock. My Positions is a
+plain (non-selectable) sortable table -- there's no per-position "open in"
+action.
 
 ## Docker
 

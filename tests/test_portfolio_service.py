@@ -3,10 +3,12 @@ name-to-symbol matching, cross-broker merging, and valuation math. The
 sample CSV bodies below are the real Zerodha/Dhan export shapes this
 feature was built against."""
 import io
+from datetime import date
 
 import pytest
 
 from src.models.company import Company
+from src.models.enums import OptionType
 from src.services import portfolio_service
 
 ZERODHA_CSV = """"Instrument","Qty.","Avg. cost","LTP","Invested","Cur. val","P&L","Net chg.","Day chg.",""
@@ -191,6 +193,130 @@ class TestLooksLikeEtfName:
         assert portfolio_service.looks_like_etf_name("Hindustan Zinc Limited") is False
         assert portfolio_service.looks_like_etf_name("IndusInd Bank Limited") is False
         assert portfolio_service.looks_like_etf_name("Vedanta Aluminium Metal Limited") is False
+
+
+ZERODHA_POSITIONS_CSV = """"Product","Instrument","Qty.","Avg.","LTP","P&L","Chg.",""
+"NRML","NIFTY2681123000PE",-780,10.15,1.1,7059,-89.16,""
+"NRML","NIFTY2681124000PE",780,56.99,8,-38210.25,-85.96,""
+"NRML","NIFTY2681124200CE",780,159.63,383.45,174580.25,140.21,""
+"""
+
+DHAN_POSITIONS_CSV = """"Name","Product","Qty","Avg Price","LTP","P&L","% Change","Action"
+"HINDALCO 25 AUG 860 PUT","Normal","-700.00","2.55","1.05","1,050.00","58.82"
+"ONGC 25 AUG 260 CALL","Normal","-2,250.00","2.95","0.62","5,242.50","78.98"
+"NIFTY 11 AUG 24200 CALL","Normal","780.00","162.00","395.00","1,81,740.00","143.83"
+"""
+
+
+class TestParseZerodhaOptionInstrument:
+    def test_decodes_weekly_index_option(self):
+        decoded = portfolio_service.parse_zerodha_option_instrument("NIFTY2681123000PE")
+        assert decoded == {
+            "symbol": "NIFTY",
+            "expiry_date": date(2026, 8, 11),
+            "strike_price": 23000.0,
+            "option_type": OptionType.PE,
+        }
+
+    def test_decodes_december_month_letter_code(self):
+        # 'D' (not a digit) stands in for December in Zerodha's weekly
+        # tradingsymbol -- year 26, month D, day 06, strike 63000, CE.
+        decoded = portfolio_service.parse_zerodha_option_instrument("BANKNIFTY26D0663000CE")
+        assert decoded["option_type"] == OptionType.CE
+        assert decoded["expiry_date"] == date(2026, 12, 6)
+
+    def test_returns_none_for_unrecognized_format(self):
+        assert portfolio_service.parse_zerodha_option_instrument("SBIN25AUG970PE") is None
+        assert portfolio_service.parse_zerodha_option_instrument("NOTANOPTION") is None
+
+
+class TestParseZerodhaPositionsCsv:
+    def test_decodes_every_row_and_keeps_signed_qty(self):
+        positions = portfolio_service.parse_zerodha_positions_csv(io.StringIO(ZERODHA_POSITIONS_CSV))
+        assert len(positions) == 3
+        short_put = next(p for p in positions if p["raw_name"] == "NIFTY2681123000PE")
+        assert short_put["symbol"] == "NIFTY"
+        assert short_put["qty"] == -780
+        assert short_put["avg_price"] == 10.15
+        assert short_put["ltp"] == 1.1
+        assert short_put["expiry_date"] == date(2026, 8, 11)
+        assert short_put["strike_price"] == 23000.0
+        assert short_put["option_type"] == OptionType.PE
+
+
+class TestParseDhanPositionName:
+    def test_decodes_put_with_explicit_reference_date(self):
+        decoded = portfolio_service.parse_dhan_position_name("ONGC 25 AUG 230 PUT", as_of=date(2026, 8, 7))
+        assert decoded == {
+            "symbol": "ONGC",
+            "expiry_date": date(2026, 8, 25),
+            "strike_price": 230.0,
+            "option_type": OptionType.PE,
+        }
+
+    def test_infers_next_year_when_date_has_already_passed_this_year(self):
+        decoded = portfolio_service.parse_dhan_position_name("NIFTY 15 JAN 24000 CALL", as_of=date(2026, 8, 7))
+        assert decoded["expiry_date"] == date(2027, 1, 15)
+
+    def test_returns_none_for_unrecognized_format(self):
+        assert portfolio_service.parse_dhan_position_name("SOME FUTURE CONTRACT", as_of=date(2026, 8, 7)) is None
+
+
+class TestParseDhanPositionsCsv:
+    def test_decodes_indian_grouped_numbers_and_signed_qty(self):
+        positions = portfolio_service.parse_dhan_positions_csv(io.StringIO(DHAN_POSITIONS_CSV), as_of=date(2026, 8, 7))
+        assert len(positions) == 3
+        ongc = next(p for p in positions if p["raw_name"] == "ONGC 25 AUG 260 CALL")
+        assert ongc["symbol"] == "ONGC"
+        assert ongc["qty"] == -2250
+        assert ongc["avg_price"] == pytest.approx(2.95)
+        assert ongc["ltp"] == pytest.approx(0.62)
+        assert ongc["expiry_date"] == date(2026, 8, 25)
+        assert ongc["option_type"] == OptionType.CE
+
+
+class TestComputePositionsView:
+    def test_pnl_is_direction_correct_for_short_and_long(self):
+        # Real sample rows: a short (qty<0) and a long (qty>0) position,
+        # cross-checked against each broker's own reported P&L.
+        rows = [
+            {"raw_name": "HINDALCO 25 AUG 860 PUT", "symbol": "HINDALCO", "qty": -700, "avg_price": 2.55, "ltp": 1.05},
+            {"raw_name": "NIFTY 11 AUG 24200 CALL", "symbol": "NIFTY", "qty": 780, "avg_price": 162.0, "ltp": 395.0},
+        ]
+        computed = portfolio_service.compute_positions_view(rows)
+        short_put = next(r for r in computed if r["raw_name"].startswith("HINDALCO"))
+        long_call = next(r for r in computed if r["raw_name"].startswith("NIFTY"))
+        assert short_put["pnl"] == pytest.approx(1050.0)
+        assert long_call["pnl"] == pytest.approx(181740.0)
+        assert short_put["pnl_pct"] == pytest.approx(1050.0 / (2.55 * 700) * 100)
+
+    def test_missing_ltp_leaves_pnl_and_pnl_pct_none(self):
+        rows = [{"raw_name": "X", "symbol": "X", "qty": -100, "avg_price": 5.0, "ltp": None}]
+        computed = portfolio_service.compute_positions_view(rows)
+        assert computed[0]["pnl"] is None
+        assert computed[0]["pnl_pct"] is None
+
+
+class TestPositionsToRecords:
+    def test_builds_portfolio_position_models(self):
+        positions = [
+            {
+                "raw_name": "ONGC 25 AUG 230 PUT",
+                "symbol": "ONGC",
+                "expiry_date": date(2026, 8, 25),
+                "strike_price": 230.0,
+                "option_type": OptionType.PE,
+                "qty": -2250,
+                "avg_price": 1.24,
+                "ltp": 1.5,
+            }
+        ]
+        records = portfolio_service.positions_to_records("u1", "Portfolio 1", "Dhan", positions)
+        assert len(records) == 1
+        assert records[0].user_id == "u1"
+        assert records[0].symbol == "ONGC"
+        assert records[0].option_type == OptionType.PE
+        assert records[0].qty == -2250
 
 
 class TestHoldingsToRecords:

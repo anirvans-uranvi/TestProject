@@ -1,16 +1,21 @@
 """Broker CSV parsing, symbol matching, and valuation for the Portfolio
-page (pages/6_Portfolio.py). Holdings are plain dicts throughout (not a
-dataclass) -- same convention as fo_service's row-dict outputs -- with
-keys: raw_name, symbol (str | None), qty, avg_price, investment.
+page (pages/6_Portfolio.py). Holdings and positions are plain dicts
+throughout (not a dataclass) -- same convention as fo_service's row-dict
+outputs. Holdings keys: raw_name, symbol (str | None), qty, avg_price,
+investment. Positions keys: raw_name, symbol (str | None, the underlying),
+expiry_date (date | None), strike_price (float | None), option_type
+(OptionType | None), qty (signed -- negative is short), avg_price, ltp.
 """
 from __future__ import annotations
 
 import re
+from datetime import date
 
 import pandas as pd
 
 from src.models.company import Company
-from src.models.portfolio import PortfolioHolding
+from src.models.enums import OptionType
+from src.models.portfolio import PortfolioHolding, PortfolioPosition
 
 
 def _to_float(value) -> float | None:
@@ -110,6 +115,205 @@ def parse_dhan_csv(file, companies: list[Company]) -> list[dict]:
             }
         )
     return holdings
+
+
+_MONTH_ABBR = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+_WEEKLY_MONTH_CHARS = {str(m): m for m in range(1, 10)} | {"O": 10, "N": 11, "D": 12}
+
+# Zerodha's own NSE-derived tradingsymbol for a *weekly* option contract --
+# only indices (NIFTY, BANKNIFTY, SENSEX, ...) currently have weekly
+# expiries -- encodes the full expiry inline: 2-digit year, then a single
+# month character (1-9, or O/N/D for Oct/Nov/Dec), then 2-digit day.
+# e.g. "NIFTY2681123000PE" = NIFTY, 2026, month 8 (Aug), day 11, strike
+# 23000, PE. There's no sample of Zerodha's *monthly* stock-option format
+# (e.g. "SBIN25AUG970PE") to work from, so that's deliberately left
+# unparsed below rather than guessed at (monthly expiry falls on the last
+# Thursday of the month, which shifts for exchange holidays -- not safe to
+# infer from the symbol alone without a real template).
+_ZERODHA_WEEKLY_OPTION_RE = re.compile(
+    r"^(?P<symbol>[A-Z]+)(?P<yy>\d{2})(?P<month>[1-9OND])(?P<dd>\d{2})"
+    r"(?P<strike>\d+(?:\.\d+)?)(?P<type>CE|PE)$"
+)
+
+
+def parse_zerodha_option_instrument(instrument: str) -> dict | None:
+    """Decodes a Zerodha F&O tradingsymbol into its underlying/expiry/
+    strike/type. Returns None for anything that isn't a weekly option in
+    the format above (futures, monthly stock options, or malformed
+    input) -- callers keep the row with symbol=None rather than dropping
+    it."""
+    m = _ZERODHA_WEEKLY_OPTION_RE.match(instrument.strip().upper())
+    if not m:
+        return None
+    year = 2000 + int(m.group("yy"))
+    month = _WEEKLY_MONTH_CHARS[m.group("month")]
+    day = int(m.group("dd"))
+    try:
+        expiry_date = date(year, month, day)
+    except ValueError:
+        return None
+    return {
+        "symbol": m.group("symbol"),
+        "expiry_date": expiry_date,
+        "strike_price": float(m.group("strike")),
+        "option_type": OptionType(m.group("type")),
+    }
+
+
+def parse_zerodha_positions_csv(file) -> list[dict]:
+    """Zerodha's positions export -- `Instrument` is the exact NSE
+    tradingsymbol (decoded via parse_zerodha_option_instrument above).
+    `Qty.` keeps its sign (short positions are negative). The file's own
+    LTP is trusted (there's no live per-contract price source for index
+    options -- see nse_fo_provider's IDF/IDO exclusion); P&L is always
+    recomputed from qty/avg_price/ltp rather than trusting the file's own
+    P&L/Chg. columns (see compute_positions_view)."""
+    df = pd.read_csv(file)
+    positions = []
+    for _, row in df.iterrows():
+        instrument = row.get("Instrument")
+        if pd.isna(instrument) or not str(instrument).strip():
+            continue
+        raw_name = str(instrument).strip()
+        qty = _to_float(row.get("Qty."))
+        avg_price = _to_float(row.get("Avg."))
+        ltp = _to_float(row.get("LTP"))
+        if qty is None or avg_price is None:
+            continue
+        decoded = parse_zerodha_option_instrument(raw_name) or {}
+        positions.append(
+            {
+                "raw_name": raw_name,
+                "symbol": decoded.get("symbol"),
+                "expiry_date": decoded.get("expiry_date"),
+                "strike_price": decoded.get("strike_price"),
+                "option_type": decoded.get("option_type"),
+                "qty": qty,
+                "avg_price": avg_price,
+                "ltp": ltp,
+            }
+        )
+    return positions
+
+
+_DHAN_POSITION_NAME_RE = re.compile(
+    r"^(?P<symbol>[A-Z]+)\s+(?P<dd>\d{1,2})\s+(?P<mmm>[A-Z]{3})\s+"
+    r"(?P<strike>\d+(?:\.\d+)?)\s+(?P<type>CALL|PUT)$"
+)
+
+
+def parse_dhan_position_name(raw_name: str, as_of: date | None = None) -> dict | None:
+    """Decodes Dhan's positions "Name" format -- "<SYMBOL> <DD> <MMM>
+    <STRIKE> <CALL|PUT>", e.g. "ONGC 25 AUG 230 PUT" -- used uniformly for
+    both monthly stock options and weekly index options; unlike Zerodha's
+    tradingsymbol it carries no year, so the year is inferred as the
+    nearest DD-MMM on or after `as_of` (an always-open position's expiry
+    can't be in the past). Returns None for anything that doesn't match
+    (futures rows, malformed input)."""
+    m = _DHAN_POSITION_NAME_RE.match(raw_name.strip().upper())
+    if not m:
+        return None
+    month = _MONTH_ABBR.get(m.group("mmm"))
+    if month is None:
+        return None
+    day = int(m.group("dd"))
+    reference = as_of or date.today()
+    try:
+        expiry_date = date(reference.year, month, day)
+    except ValueError:
+        return None
+    if expiry_date < reference:
+        try:
+            expiry_date = date(reference.year + 1, month, day)
+        except ValueError:
+            return None
+    return {
+        "symbol": m.group("symbol"),
+        "expiry_date": expiry_date,
+        "strike_price": float(m.group("strike")),
+        "option_type": OptionType.CE if m.group("type") == "CALL" else OptionType.PE,
+    }
+
+
+def parse_dhan_positions_csv(file, as_of: date | None = None) -> list[dict]:
+    """Dhan's positions export -- `Name` is decoded via
+    parse_dhan_position_name above (no separate company-name matching
+    needed, unlike parse_dhan_csv for holdings -- Dhan's positions export
+    already embeds the exact NSE symbol). `Qty` keeps its sign. Numbers
+    are quoted with Indian-style grouping, same as the holdings export."""
+    df = pd.read_csv(file)
+    positions = []
+    for _, row in df.iterrows():
+        name = row.get("Name")
+        if pd.isna(name) or not str(name).strip():
+            continue
+        raw_name = str(name).strip()
+        qty = _to_float(row.get("Qty"))
+        avg_price = _to_float(row.get("Avg Price"))
+        ltp = _to_float(row.get("LTP"))
+        if qty is None or avg_price is None:
+            continue
+        decoded = parse_dhan_position_name(raw_name, as_of) or {}
+        positions.append(
+            {
+                "raw_name": raw_name,
+                "symbol": decoded.get("symbol"),
+                "expiry_date": decoded.get("expiry_date"),
+                "strike_price": decoded.get("strike_price"),
+                "option_type": decoded.get("option_type"),
+                "qty": qty,
+                "avg_price": avg_price,
+                "ltp": ltp,
+            }
+        )
+    return positions
+
+
+def compute_positions_view(positions: list[dict]) -> list[dict]:
+    """Adds pnl/pnl_pct to each position, recomputed from qty/avg_price/
+    ltp rather than trusted from the file (the two sample broker exports
+    disagree on what their own "P&L %"/"Chg." columns even mean -- Dhan's
+    is direction-aware, Zerodha's is a raw price change -- so neither is
+    trustworthy as-is). pnl = (ltp - avg_price) * qty, which is direction-
+    correct for both long (positive qty) and short (negative qty)
+    positions. pnl_pct is against the premium notional (avg_price *
+    |qty|), not stock notional -- there's no equivalent of a holding's
+    "investment" for a written option. Both are None when ltp is missing
+    (no live-like price to compare against)."""
+    rows = []
+    for p in positions:
+        ltp = p["ltp"]
+        pnl = (ltp - p["avg_price"]) * p["qty"] if ltp is not None else None
+        notional = p["avg_price"] * abs(p["qty"])
+        pnl_pct = (pnl / notional * 100) if pnl is not None and notional else None
+        rows.append({**p, "pnl": pnl, "pnl_pct": pnl_pct})
+    return rows
+
+
+def positions_to_records(
+    user_id: str, portfolio_name: str, broker: str, positions: list[dict]
+) -> list[PortfolioPosition]:
+    """Converts parsed position dicts into PortfolioPosition rows ready
+    for portfolio_repo.replace_broker_positions."""
+    return [
+        PortfolioPosition(
+            user_id=user_id,
+            portfolio_name=portfolio_name,
+            broker=broker,
+            raw_name=p["raw_name"],
+            symbol=p["symbol"],
+            expiry_date=p["expiry_date"],
+            strike_price=p["strike_price"],
+            option_type=p["option_type"],
+            qty=p["qty"],
+            avg_price=p["avg_price"],
+            ltp=p["ltp"],
+        )
+        for p in positions
+    ]
 
 
 def merge_holdings(rows: list[dict]) -> list[dict]:

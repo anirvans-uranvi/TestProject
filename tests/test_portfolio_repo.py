@@ -5,8 +5,10 @@ leaving every other broker/portfolio untouched -- including a portfolio
 that's never been uploaded to before, which is how a brand-new portfolio
 gets created (nothing to delete, just an insert)."""
 import types
+from datetime import date
 
-from src.models.portfolio import PortfolioHolding
+from src.models.enums import OptionType
+from src.models.portfolio import PortfolioHolding, PortfolioPosition
 from src.repositories import portfolio_repo
 
 
@@ -138,6 +140,23 @@ class TestReplaceBrokerHoldings:
         assert "uploaded_at" not in insert_calls[0][2][0]
 
 
+def _position_row(portfolio_name, broker, raw_name, symbol="NIFTY"):
+    return {
+        "user_id": "u1",
+        "portfolio_name": portfolio_name,
+        "broker": broker,
+        "raw_name": raw_name,
+        "symbol": symbol,
+        "expiry_date": None,
+        "strike_price": None,
+        "option_type": None,
+        "qty": -100,
+        "avg_price": 10,
+        "ltp": 5,
+        "uploaded_at": None,
+    }
+
+
 class TestDeletePortfolio:
     def test_deletes_every_broker_within_the_named_portfolio_only(self):
         client = _FakeClient()
@@ -158,6 +177,25 @@ class TestDeletePortfolio:
         assert len(remaining) == 1
         assert remaining[0]["raw_name"] == "KEEP"
         assert remaining[0]["portfolio_name"] == "Portfolio 2"
+
+    def test_also_deletes_positions_within_the_named_portfolio_only(self):
+        client = _FakeClient()
+        client.store["portfolio_holdings"] = [_row("Portfolio 1", "Zerodha", "SBIN")]
+        client.store["portfolio_positions"] = [
+            _position_row("Portfolio 1", "Zerodha", "NIFTY2681123000PE"),
+            _position_row("Portfolio 2", "Zerodha", "KEEP"),
+        ]
+
+        portfolio_repo.delete_portfolio(client, "u1", "Portfolio 1")
+
+        assert (
+            "delete",
+            "portfolio_positions",
+            {"user_id": "u1", "portfolio_name": "Portfolio 1"},
+        ) in client.calls
+        remaining = client.store["portfolio_positions"]
+        assert len(remaining) == 1
+        assert remaining[0]["raw_name"] == "KEEP"
 
     def test_does_not_touch_other_users_portfolio_of_the_same_name(self):
         client = _FakeClient()
@@ -232,3 +270,84 @@ class TestListPortfolioSymbols:
         result = portfolio_repo.list_portfolio_symbols(client, "u1")
 
         assert result == []
+
+
+class TestReplaceBrokerPositions:
+    def test_deletes_only_the_target_portfolio_and_brokers_rows(self):
+        client = _FakeClient()
+        client.store["portfolio_positions"] = [
+            _position_row("Portfolio 1", "Zerodha", "OLD"),
+            _position_row("Portfolio 1", "Dhan", "KEEP_OTHER_BROKER"),
+            _position_row("Portfolio 2", "Zerodha", "KEEP_OTHER_PORTFOLIO"),
+        ]
+        positions = [
+            PortfolioPosition(
+                user_id="u1", portfolio_name="Portfolio 1", broker="Zerodha",
+                raw_name="NIFTY2681123000PE", symbol="NIFTY", expiry_date=date(2026, 8, 11),
+                strike_price=23000, option_type=OptionType.PE, qty=-780, avg_price=10.15, ltp=1.1,
+            ),
+        ]
+
+        portfolio_repo.replace_broker_positions(client, "u1", "Portfolio 1", "Zerodha", positions)
+
+        assert (
+            "delete",
+            "portfolio_positions",
+            {"user_id": "u1", "portfolio_name": "Portfolio 1", "broker": "Zerodha"},
+        ) in client.calls
+        remaining = client.store["portfolio_positions"]
+        assert not any(r["raw_name"] == "OLD" for r in remaining)
+        assert any(r["raw_name"] == "KEEP_OTHER_BROKER" for r in remaining)
+        assert any(r["raw_name"] == "KEEP_OTHER_PORTFOLIO" for r in remaining)
+        assert any(r["raw_name"] == "NIFTY2681123000PE" and r["symbol"] == "NIFTY" for r in remaining)
+
+    def test_empty_positions_deletes_existing_rows_and_inserts_nothing(self):
+        client = _FakeClient()
+        client.store["portfolio_positions"] = [_position_row("Portfolio 1", "Zerodha", "OLD")]
+
+        portfolio_repo.replace_broker_positions(client, "u1", "Portfolio 1", "Zerodha", [])
+
+        assert client.store["portfolio_positions"] == []
+        assert not any(call[0] == "insert" for call in client.calls)
+
+    def test_insert_payload_omits_uploaded_at_so_the_db_default_applies(self):
+        client = _FakeClient()
+        positions = [
+            PortfolioPosition(
+                user_id="u1", portfolio_name="Portfolio 1", broker="Zerodha",
+                raw_name="NIFTY2681123000PE", symbol="NIFTY", expiry_date=date(2026, 8, 11),
+                strike_price=23000, option_type=OptionType.PE, qty=-780, avg_price=10.15, ltp=1.1,
+            ),
+        ]
+
+        portfolio_repo.replace_broker_positions(client, "u1", "Portfolio 1", "Zerodha", positions)
+
+        insert_calls = [c for c in client.calls if c[0] == "insert"]
+        assert len(insert_calls) == 1
+        assert "uploaded_at" not in insert_calls[0][2][0]
+
+
+class TestListPositions:
+    def test_returns_only_the_requested_users_rows_as_models(self):
+        client = _FakeClient()
+        client.store["portfolio_positions"] = [
+            _position_row("Portfolio 1", "Zerodha", "NIFTY2681123000PE", symbol="NIFTY"),
+            {**_position_row("Portfolio 1", "Dhan", "OTHER", symbol="OTHER"), "user_id": "u2"},
+        ]
+
+        result = portfolio_repo.list_positions(client, "u1")
+
+        assert len(result) == 1
+        assert result[0].symbol == "NIFTY"
+        assert result[0].raw_name == "NIFTY2681123000PE"
+
+    def test_positions_across_multiple_portfolios_all_come_back(self):
+        client = _FakeClient()
+        client.store["portfolio_positions"] = [
+            _position_row("Portfolio 1", "Zerodha", "A"),
+            _position_row("Portfolio 2", "Dhan", "B"),
+        ]
+
+        result = portfolio_repo.list_positions(client, "u1")
+
+        assert {p.portfolio_name for p in result} == {"Portfolio 1", "Portfolio 2"}
