@@ -272,6 +272,96 @@ def parse_dhan_positions_csv(file, as_of: date | None = None) -> list[dict]:
     return positions
 
 
+def dhan_holdings_from_api(rows: list[dict]) -> list[dict]:
+    """Translates GET /v2/holdings rows (src/data_providers/dhan_provider.py's
+    get_holdings()) into the same holding-dict shape parse_zerodha_csv/
+    parse_dhan_csv produce, so holdings_to_records/merge_holdings/
+    compute_portfolio_view are reused unchanged regardless of source.
+    `tradingSymbol` is already the exact NSE symbol -- no match_symbol()
+    fuzzy matching needed here, unlike the Dhan CSV export's human company
+    name. Skips rows with no quantity (a holding fully sold off today)."""
+    holdings = []
+    for row in rows:
+        qty = row.get("totalQty") or 0
+        symbol = str(row.get("tradingSymbol") or "").strip().upper()
+        if not qty or not symbol:
+            continue
+        avg_price = float(row.get("avgCostPrice") or 0)
+        holdings.append(
+            {
+                "raw_name": symbol,
+                "symbol": symbol,
+                "qty": float(qty),
+                "avg_price": avg_price,
+                "investment": float(qty) * avg_price,
+            }
+        )
+    return holdings
+
+
+_DHAN_DERIVATIVE_SYMBOL_RE = re.compile(r"^([A-Z]+)")
+
+
+def _dhan_underlying_symbol(trading_symbol: str) -> str | None:
+    """Best-effort underlying extraction from Dhan's derivative
+    `tradingSymbol` -- takes the leading alphabetic run (e.g. "NIFTY" out
+    of whatever expiry/strike/type suffix Dhan appends). Dhan's docs don't
+    show a sample derivative tradingSymbol value, so this is confirmed and
+    adjusted against a real authenticated response during testing rather
+    than a fixed, verified format."""
+    m = _DHAN_DERIVATIVE_SYMBOL_RE.match(trading_symbol.strip().upper())
+    return m.group(1) if m else None
+
+
+# Confirmed against a real GET /v2/positions response: drvOptionType comes
+# back as the full word ("PUT"/"CALL"), not the CE/PE code Dhan uses
+# elsewhere (e.g. option_contracts.option_type, or the Dhan CSV export's
+# own "CALL"/"PUT" -- see parse_dhan_position_name) -- both spellings are
+# accepted here for safety.
+_DHAN_OPTION_TYPES = {"PUT": OptionType.PE, "PE": OptionType.PE, "CALL": OptionType.CE, "CE": OptionType.CE}
+
+
+def dhan_positions_from_api(rows: list[dict], ltp_by_security_id: dict[str, float]) -> list[dict]:
+    """Translates GET /v2/positions rows into the same position-dict shape
+    the CSV parsers produce. Unlike the CSV path, expiry/strike/type come
+    straight from Dhan's own drvExpiryDate/drvStrikePrice/drvOptionType --
+    no regex instrument-name decoding needed. `netQty` is already signed
+    (positive long, negative short), matching this app's convention. `ltp`
+    comes from a separate Market Quote call (dhan_provider.get_ltp_by_security_id)
+    since the positions payload itself carries no live price. Skips closed
+    (netQty == 0) rows -- Dhan still lists those for the trading day."""
+    positions = []
+    for row in rows:
+        qty = row.get("netQty") or 0
+        if not qty:
+            continue
+        trading_symbol = str(row.get("tradingSymbol") or "").strip()
+        security_id = str(row.get("securityId") or "")
+        cost_price = row.get("costPrice")
+        if cost_price:
+            avg_price = float(cost_price)
+        elif qty > 0:
+            avg_price = float(row.get("buyAvg") or 0)
+        else:
+            avg_price = float(row.get("sellAvg") or 0)
+        expiry_raw = row.get("drvExpiryDate")
+        option_type_raw = str(row.get("drvOptionType") or "").strip().upper()
+        strike_raw = row.get("drvStrikePrice")
+        positions.append(
+            {
+                "raw_name": trading_symbol or security_id,
+                "symbol": _dhan_underlying_symbol(trading_symbol) if trading_symbol else None,
+                "expiry_date": date.fromisoformat(str(expiry_raw)[:10]) if expiry_raw else None,
+                "strike_price": float(strike_raw) if strike_raw else None,
+                "option_type": _DHAN_OPTION_TYPES.get(option_type_raw),
+                "qty": float(qty),
+                "avg_price": avg_price,
+                "ltp": ltp_by_security_id.get(security_id),
+            }
+        )
+    return positions
+
+
 def compute_positions_view(positions: list[dict]) -> list[dict]:
     """Adds pnl/pnl_pct to each position, recomputed from qty/avg_price/
     ltp rather than trusted from the file (the two sample broker exports

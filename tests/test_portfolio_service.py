@@ -328,3 +328,101 @@ class TestHoldingsToRecords:
         assert records[0].portfolio_name == "Portfolio 1"
         assert records[0].broker == "Zerodha"
         assert records[0].symbol == "SBIN"
+
+
+class TestDhanHoldingsFromApi:
+    def test_translates_holdings_endpoint_rows(self):
+        rows = [
+            {
+                "exchange": "NSE",
+                "tradingSymbol": "sbin",
+                "securityId": "3045",
+                "isin": "INE062A01020",
+                "totalQty": 10,
+                "avgCostPrice": 900.0,
+            }
+        ]
+        holdings = portfolio_service.dhan_holdings_from_api(rows)
+        assert holdings == [
+            {"raw_name": "SBIN", "symbol": "SBIN", "qty": 10.0, "avg_price": 900.0, "investment": 9000.0}
+        ]
+
+    def test_skips_rows_with_zero_or_missing_quantity(self):
+        rows = [
+            {"tradingSymbol": "SOLDOFF", "totalQty": 0, "avgCostPrice": 100.0},
+            {"tradingSymbol": "", "totalQty": 5, "avgCostPrice": 100.0},
+        ]
+        assert portfolio_service.dhan_holdings_from_api(rows) == []
+
+
+class TestDhanPositionsFromApi:
+    def test_translates_short_position_using_cost_price_and_ltp_lookup(self):
+        # Field values match a real GET /v2/positions response: tradingSymbol
+        # is "SYMBOL-MonYYYY-STRIKE-CE/PE" and drvOptionType is the full
+        # word ("PUT"/"CALL"), not a CE/PE code.
+        rows = [
+            {
+                "tradingSymbol": "NIFTY-Aug2026-23000-PE",
+                "securityId": "49081",
+                "exchangeSegment": "NSE_FNO",
+                "netQty": -780,
+                "costPrice": 10.15,
+                "buyAvg": 0,
+                "sellAvg": 10.15,
+                "drvExpiryDate": "2026-08-11",
+                "drvStrikePrice": 23000,
+                "drvOptionType": "PUT",
+            }
+        ]
+        positions = portfolio_service.dhan_positions_from_api(rows, {"49081": 1.1})
+        assert len(positions) == 1
+        p = positions[0]
+        assert p["symbol"] == "NIFTY"
+        assert p["expiry_date"] == date(2026, 8, 11)
+        assert p["strike_price"] == 23000.0
+        assert p["option_type"] == OptionType.PE
+        assert p["qty"] == -780.0
+        assert p["avg_price"] == 10.15
+        assert p["ltp"] == 1.1
+
+    def test_accepts_both_ce_pe_codes_and_call_put_words(self):
+        rows = [
+            {"tradingSymbol": "A-1", "securityId": "1", "netQty": 1, "costPrice": 1, "drvOptionType": "CE"},
+            {"tradingSymbol": "A-2", "securityId": "2", "netQty": 1, "costPrice": 1, "drvOptionType": "PE"},
+            {"tradingSymbol": "A-3", "securityId": "3", "netQty": 1, "costPrice": 1, "drvOptionType": "CALL"},
+            {"tradingSymbol": "A-4", "securityId": "4", "netQty": 1, "costPrice": 1, "drvOptionType": "put"},
+        ]
+        positions = portfolio_service.dhan_positions_from_api(rows, {})
+        assert [p["option_type"] for p in positions] == [
+            OptionType.CE, OptionType.PE, OptionType.CE, OptionType.PE,
+        ]
+
+    def test_falls_back_to_buy_or_sell_avg_when_cost_price_is_absent(self):
+        long_row = {
+            "tradingSymbol": "ONGC-Aug2026-230-PE", "securityId": "1", "exchangeSegment": "NSE_FNO",
+            "netQty": 100, "costPrice": 0, "buyAvg": 1.24, "sellAvg": 0,
+            "drvExpiryDate": "2026-08-25", "drvStrikePrice": 230, "drvOptionType": "PUT",
+        }
+        short_row = {
+            "tradingSymbol": "ONGC-Aug2026-257.5-CE", "securityId": "2", "exchangeSegment": "NSE_FNO",
+            "netQty": -100, "costPrice": None, "buyAvg": 0, "sellAvg": 2.5,
+            "drvExpiryDate": "2026-08-25", "drvStrikePrice": 257.5, "drvOptionType": "CALL",
+        }
+        positions = portfolio_service.dhan_positions_from_api([long_row, short_row], {})
+        assert positions[0]["avg_price"] == 1.24
+        assert positions[1]["avg_price"] == 2.5
+
+    def test_missing_ltp_lookup_leaves_ltp_none(self):
+        rows = [
+            {
+                "tradingSymbol": "NIFTY26AUG23000PE", "securityId": "49081", "exchangeSegment": "NSE_FNO",
+                "netQty": -780, "costPrice": 10.15,
+                "drvExpiryDate": "2026-08-11", "drvStrikePrice": 23000, "drvOptionType": "PE",
+            }
+        ]
+        positions = portfolio_service.dhan_positions_from_api(rows, {})
+        assert positions[0]["ltp"] is None
+
+    def test_skips_closed_positions_with_zero_net_qty(self):
+        rows = [{"tradingSymbol": "CLOSED", "securityId": "1", "netQty": 0, "costPrice": 1.0}]
+        assert portfolio_service.dhan_positions_from_api(rows, {}) == []

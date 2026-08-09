@@ -49,3 +49,23 @@ class PortfolioPosition(BaseModel):
     avg_price: float
     ltp: float | None = None
     uploaded_at: datetime | None = None
+
+
+class BrokerConnection(BaseModel):
+    """Saved API credentials letting one portfolio pull holdings/positions
+    directly from a broker's API (see src/data_providers/dhan_provider.py
+    and pages/6_Portfolio.py's "Connect Dhan account" flow) instead of a
+    CSV upload. `access_token` is stored as given -- see
+    supabase/migrations/0017_broker_connections.sql's docstring for the
+    plaintext/RLS-only trade-off this implies. `token_saved_at` is set only
+    when credentials are saved/updated (not on every sync), so the UI can
+    warn once it's old enough that Dhan's 24-hour token is likely expired."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    user_id: str
+    portfolio_name: str
+    broker: str
+    client_id: str
+    access_token: str
+    token_saved_at: datetime | None = None

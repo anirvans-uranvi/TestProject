@@ -8,7 +8,7 @@ import types
 from datetime import date
 
 from src.models.enums import OptionType
-from src.models.portfolio import PortfolioHolding, PortfolioPosition
+from src.models.portfolio import BrokerConnection, PortfolioHolding, PortfolioPosition
 from src.repositories import portfolio_repo
 
 
@@ -18,6 +18,7 @@ class _FakeTable:
         self.calls = calls
         self.name = name
         self._pending_delete = False
+        self._pending_upsert = None
         self._filters: dict = {}
 
     def select(self, *args, **kwargs):
@@ -28,6 +29,11 @@ class _FakeTable:
         self.store.setdefault(self.name, []).extend(payload)
         return self
 
+    def upsert(self, payload, on_conflict=None):
+        self.calls.append(("upsert", self.name, payload))
+        self._pending_upsert = (payload, on_conflict)
+        return self
+
     def delete(self):
         self._pending_delete = True
         return self
@@ -36,7 +42,25 @@ class _FakeTable:
         self._filters[column] = value
         return self
 
+    def limit(self, _n):
+        return self
+
     def execute(self):
+        if self._pending_upsert is not None:
+            payload, on_conflict = self._pending_upsert
+            rows = self.store.setdefault(self.name, [])
+            key_cols = [c.strip() for c in (on_conflict or "").split(",") if c.strip()]
+            for item in payload:
+                existing_idx = next(
+                    (i for i, r in enumerate(rows) if key_cols and all(r.get(k) == item.get(k) for k in key_cols)),
+                    None,
+                )
+                if existing_idx is not None:
+                    rows[existing_idx] = item
+                else:
+                    rows.append(item)
+            return types.SimpleNamespace(data=payload)
+
         rows = self.store.get(self.name, [])
         matching = [r for r in rows if all(r.get(k) == v for k, v in self._filters.items())]
         if self._pending_delete:
@@ -197,6 +221,19 @@ class TestDeletePortfolio:
         assert len(remaining) == 1
         assert remaining[0]["raw_name"] == "KEEP"
 
+    def test_also_deletes_broker_connections_within_the_named_portfolio_only(self):
+        client = _FakeClient()
+        client.store["broker_connections"] = [
+            _connection_row("Portfolio 1", "Dhan"),
+            _connection_row("Portfolio 2", "Dhan"),
+        ]
+
+        portfolio_repo.delete_portfolio(client, "u1", "Portfolio 1")
+
+        remaining = client.store["broker_connections"]
+        assert len(remaining) == 1
+        assert remaining[0]["portfolio_name"] == "Portfolio 2"
+
     def test_does_not_touch_other_users_portfolio_of_the_same_name(self):
         client = _FakeClient()
         client.store["portfolio_holdings"] = [
@@ -351,3 +388,64 @@ class TestListPositions:
         result = portfolio_repo.list_positions(client, "u1")
 
         assert {p.portfolio_name for p in result} == {"Portfolio 1", "Portfolio 2"}
+
+
+def _connection_row(portfolio_name, broker="Dhan", client_id="CID1234", token="TOKEN1", user_id="u1"):
+    return {
+        "user_id": user_id,
+        "portfolio_name": portfolio_name,
+        "broker": broker,
+        "client_id": client_id,
+        "access_token": token,
+        "token_saved_at": None,
+    }
+
+
+class TestBrokerConnections:
+    def test_get_returns_none_when_not_connected(self):
+        client = _FakeClient()
+
+        assert portfolio_repo.get_broker_connection(client, "u1", "Portfolio 1", "Dhan") is None
+
+    def test_upsert_then_get_round_trips(self):
+        client = _FakeClient()
+        connection = BrokerConnection(
+            user_id="u1", portfolio_name="Portfolio 1", broker="Dhan", client_id="CID1234", access_token="TOKEN1",
+        )
+
+        portfolio_repo.upsert_broker_connection(client, connection)
+        result = portfolio_repo.get_broker_connection(client, "u1", "Portfolio 1", "Dhan")
+
+        assert result is not None
+        assert result.client_id == "CID1234"
+        assert result.access_token == "TOKEN1"
+
+    def test_upsert_twice_replaces_rather_than_duplicates(self):
+        client = _FakeClient()
+        first = BrokerConnection(
+            user_id="u1", portfolio_name="Portfolio 1", broker="Dhan", client_id="OLD", access_token="OLDTOKEN"
+        )
+        second = BrokerConnection(
+            user_id="u1", portfolio_name="Portfolio 1", broker="Dhan", client_id="NEW", access_token="NEWTOKEN"
+        )
+
+        portfolio_repo.upsert_broker_connection(client, first)
+        portfolio_repo.upsert_broker_connection(client, second)
+
+        assert len(client.store["broker_connections"]) == 1
+        result = portfolio_repo.get_broker_connection(client, "u1", "Portfolio 1", "Dhan")
+        assert result.client_id == "NEW"
+
+    def test_delete_removes_only_the_targeted_broker_within_the_portfolio(self):
+        client = _FakeClient()
+        client.store["broker_connections"] = [
+            _connection_row("Portfolio 1", "Dhan"),
+            _connection_row("Portfolio 1", "OtherBroker"),
+            _connection_row("Portfolio 2", "Dhan"),
+        ]
+
+        portfolio_repo.delete_broker_connection(client, "u1", "Portfolio 1", "Dhan")
+
+        remaining = client.store["broker_connections"]
+        assert len(remaining) == 2
+        assert portfolio_repo.get_broker_connection(client, "u1", "Portfolio 1", "Dhan") is None

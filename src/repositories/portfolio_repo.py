@@ -1,12 +1,13 @@
 """Per-user portfolio holdings (migration 0012, portfolio_name added in
-0014) and positions (migration 0016). All reads/writes go through the
-calling user's own client -- RLS scopes every row to auth.uid() = user_id,
-same as saved_filters/alerts/user_settings."""
+0014), positions (migration 0016), and broker API connections (migration
+0017). All reads/writes go through the calling user's own client -- RLS
+scopes every row to auth.uid() = user_id, same as
+saved_filters/alerts/user_settings."""
 from __future__ import annotations
 
 from supabase import Client
 
-from src.models.portfolio import PortfolioHolding, PortfolioPosition
+from src.models.portfolio import BrokerConnection, PortfolioHolding, PortfolioPosition
 
 
 def list_holdings(client: Client, user_id: str) -> list[PortfolioHolding]:
@@ -56,11 +57,12 @@ def replace_broker_holdings(
 
 def delete_portfolio(client: Client, user_id: str, portfolio_name: str) -> None:
     """Permanently deletes every row for (user_id, portfolio_name) --
-    every broker's holdings AND positions within it. Used by the Portfolio
-    page's "Delete this portfolio" control; every other portfolio is
-    untouched."""
+    every broker's holdings, positions, AND saved API connection within it.
+    Used by the Portfolio page's "Delete this portfolio" control; every
+    other portfolio is untouched."""
     client.table("portfolio_holdings").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
     client.table("portfolio_positions").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
+    client.table("broker_connections").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
 
 
 def list_positions(client: Client, user_id: str) -> list[PortfolioPosition]:
@@ -90,3 +92,45 @@ def replace_broker_positions(
         return
     payload = [p.model_dump(mode="json", exclude={"uploaded_at"}) for p in positions]
     client.table("portfolio_positions").insert(payload).execute()
+
+
+def get_broker_connection(
+    client: Client, user_id: str, portfolio_name: str, broker: str
+) -> BrokerConnection | None:
+    """The saved API connection for one broker within one portfolio, if
+    any -- None means the user hasn't connected this broker's API here
+    (they may still have CSV-uploaded holdings/positions for it)."""
+    resp = (
+        client.table("broker_connections")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("portfolio_name", portfolio_name)
+        .eq("broker", broker)
+        .limit(1)
+        .execute()
+    )
+    rows = resp.data or []
+    return BrokerConnection.model_validate(rows[0]) if rows else None
+
+
+def upsert_broker_connection(client: Client, connection: BrokerConnection) -> None:
+    """Saves or replaces one broker's API credentials for one portfolio --
+    used both for the initial "Save & Sync" and for "Update credentials"
+    (which re-saves both fields and resets token_saved_at)."""
+    payload = [connection.model_dump(mode="json", exclude_none=True)]
+    client.table("broker_connections").upsert(payload, on_conflict="user_id,portfolio_name,broker").execute()
+
+
+def delete_broker_connection(client: Client, user_id: str, portfolio_name: str, broker: str) -> None:
+    """"Disconnect" -- removes the saved API credentials only. Any
+    holdings/positions already synced from this broker are left as-is,
+    same as switching a portfolio away from CSV upload never deletes prior
+    data."""
+    (
+        client.table("broker_connections")
+        .delete()
+        .eq("user_id", user_id)
+        .eq("portfolio_name", portfolio_name)
+        .eq("broker", broker)
+        .execute()
+    )

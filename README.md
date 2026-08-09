@@ -601,6 +601,35 @@ override for positions the way there is for unresolved holdings, since a
 position's contract identity (unlike a holding's free-text company name)
 is either decodable from the string or it isn't.
 
+**Dhan can also be connected directly, instead of a CSV upload.** Picking
+"Dhan" as the broker offers a choice: "Upload CSV" (as above) or "Connect
+Dhan account". The latter asks for a Dhan Client ID and Access Token
+(generate one on `web.dhan.co` -> Profile -> "DhanHQ Trading APIs"; it's
+valid for 24 hours), saves them to `broker_connections` (migration `0017`),
+and a "Sync now" button then pulls holdings + positions straight from
+Dhan's API (`GET /v2/holdings`, `GET /v2/positions`, and `POST
+/v2/marketfeed/ltp` for position LTPs) via
+`src/data_providers/dhan_provider.py`. The synced rows are translated into
+the exact same shape the CSV parsers produce
+(`portfolio_service.dhan_holdings_from_api`/`dhan_positions_from_api`) and
+saved through the same `replace_broker_holdings`/`replace_broker_positions`
+calls, so the resulting tables are indistinguishable from a CSV upload --
+except symbol/expiry/strike/type come from Dhan's own structured fields
+(`tradingSymbol`, `drvExpiryDate`, `drvStrikePrice`, `drvOptionType`)
+rather than fuzzy name-matching or regex decoding. Since the token expires
+every 24 hours, syncing is always a manual click (no background refresh in
+this version) -- the page warns once a saved token is more than ~23 hours
+old. Fetching live LTP for positions needs Dhan's separate "Data APIs"
+subscription (distinct from "Trading APIs", enabled on the same
+`web.dhan.co` page) -- without it, positions still sync fine, just with
+LTP/P&L/P&L% shown as N/A, same as any other unpriced row. **Security trade-off:** the access token can also place trades (Dhan
+has no read-only scope for individual accounts), and it's stored as
+entered, protected only by the same row-level security every other
+per-user table in this app relies on -- not separately encrypted. This
+app's own code only ever calls the read-only endpoints above. "Disconnect"
+removes the saved credentials only; previously synced holdings/positions
+are left as-is, same as switching away from CSV upload.
+
 Both holdings and positions are saved per-user (`portfolio_holdings`,
 migrations `0012`/`0014`; `portfolio_positions`, migration `0016`), and
 **you can maintain multiple, independently-named portfolios that all

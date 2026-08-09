@@ -135,7 +135,7 @@ tests/                             Pytest suite -- almost entirely calculations/
 ## Database schema
 
 All migrations live in `supabase/migrations/`, applied in numeric order
-(`0001` → `0016`). Nineteen tables, in three groups (`0008` doesn't add a
+(`0001` → `0017`). Twenty tables, in three groups (`0008` doesn't add a
 table -- it just extends `provider_fetch_log.fetch_type`'s CHECK
 constraint with `'fo'`, for the `fo-refresh` Edge Function's logging;
 `0010`/`0011` drop and recreate `dashboard_fo_metrics` with a different
@@ -144,7 +144,8 @@ below; `0012` adds `portfolio_holdings`; `0013` only redefines
 `latest_screener_view`, no new table; `0014` only adds a column +
 widens `portfolio_holdings`' primary key, no new table; `0015` only adds
 a column to `companies` (`is_etf`) + redefines `latest_screener_view`
-again, no new table; `0016` adds `portfolio_positions`):
+again, no new table; `0016` adds `portfolio_positions`; `0017` adds
+`broker_connections`):
 
 **Reference data** (written by `scripts/fetch_nifty50_constituents.py` /
 `seed.sql`, read-only to the app):
@@ -168,6 +169,7 @@ again, no new table; `0016` adds `portfolio_positions`):
 - `notification_log` — alert-fired history, deduped via a unique `dedupe_key`
 - `portfolio_holdings` — broker-CSV-uploaded holdings (migration `0012`, `portfolio_name` added in `0014`), keyed `(user_id, portfolio_name, broker, raw_name)` -- a user can maintain multiple independently-named portfolios that all coexist. `symbol` is nullable and deliberately **not** FK'd to `companies` -- a resolved symbol may not exist there yet (an ETF/fund or non-Nifty50 stock the screener doesn't otherwise track); see the My Portfolio section below for how it gets registered.
 - `portfolio_positions` — broker-CSV-uploaded F&O positions (migration `0016`), same keying/RLS shape as `portfolio_holdings`. `symbol`/`expiry_date`/`strike_price`/`option_type` are nullable together (an undecoded instrument format), and `qty` keeps its broker-reported sign (negative = short). See the My Portfolio section's Positions subsection.
+- `broker_connections` — saved Dhan API credentials per `(user_id, portfolio_name, broker)` (migration `0017`), letting a portfolio sync holdings/positions directly from Dhan's API instead of a CSV upload. `access_token` is stored as entered, protected only by this table's own RLS policy -- no application-level encryption. See the My Portfolio section's "Connect Dhan account" subsection.
 
 Two generated helpers, defined in `0003_views_functions.sql` (and patched
 in `0004`):
@@ -1184,6 +1186,71 @@ otherwise tracked, so "wait for the next refresh" (the holdings playbook
 for an unpriced symbol) would never resolve for these. The file's own
 LTP is the only live-like number available, so it's used as-is; only the
 *derived* P&L/P&L% are recomputed, per the point above.
+
+**Connect Dhan account (`broker_connections`, migration `0017`)** — an
+alternative to CSV upload, Dhan only. `pages/6_Portfolio.py` offers a
+CSV-vs-API toggle whenever the selected broker is Dhan; picking "Connect
+Dhan account" saves a Client ID + Access Token (`upsert_broker_connection`)
+and a "Sync now" button drives the sync (`_sync_dhan`). This reuses
+`src/data_providers/dhan_provider.py`'s existing `DhanProvider` class —
+already present in this codebase as an alternative live-price source for
+the main screener pipeline (`settings.market_data_provider == "dhan"`,
+using one app-wide credential pair) — rather than a separate module,
+since the auth/header/throttle mechanics are identical; only the
+credentials differ (per-user/per-portfolio here, vs. one pair from
+`.env`/`Settings` for the price pipeline). Three new methods were added to
+that same class: `get_holdings()` (`GET /v2/holdings`), `get_positions()`
+(`GET /v2/positions`), and `get_ltp_by_security_id()` (`POST
+/v2/marketfeed/ltp`, generalized to arbitrary exchange segments like
+`NSE_FNO`/`IDX_I`, unlike the existing `get_quotes()` which is hardcoded
+to `NSE_EQ` for the equity pipeline). These deliberately skip the
+`@retry`-decorated, auto-backoff `_post()` the price pipeline uses — a
+manual "Sync now" click should fail fast (especially on an expired token)
+rather than silently retrying for up to ~20s — and instead go through a
+plain `_request()` that raises `DhanAuthError` (a `ProviderError`
+subclass) specifically on a 401, so the page can show "your token expired"
+instead of a generic error.
+
+`portfolio_service.dhan_holdings_from_api`/`dhan_positions_from_api`
+translate Dhan's raw JSON rows into the exact same dict shapes the CSV
+parsers produce, so every downstream function
+(`holdings_to_records`/`positions_to_records`/`compute_portfolio_view`/
+`compute_positions_view`) and the rendered tables are identical regardless
+of source. Two things are notably *easier* here than the CSV path:
+`tradingSymbol` in the holdings response is already the exact NSE symbol
+(no `match_symbol()` fuzzy matching needed), and the positions response
+carries `drvExpiryDate`/`drvStrikePrice`/`drvOptionType` directly (no
+regex instrument-name decoding needed) — only the underlying symbol itself
+is extracted from `tradingSymbol` by a best-effort leading-alphabetic-run
+regex (`_dhan_underlying_symbol`), confirmed against a real account's
+positions (`tradingSymbol` looks like `"NIFTY-Aug2026-23000-PE"` /
+`"HDFCBANK-Aug2026-700-PE"` — always letters up to the first `-`, so the
+regex holds). One thing *isn't* as documented: `drvOptionType` comes back
+as the full word (`"PUT"`/`"CALL"`), not the `CE`/`PE` code used elsewhere
+in this app (`option_contracts.option_type`, Dhan's own CSV export) — the
+docs excerpts pulled during planning didn't show a sample value, and this
+was only caught by testing against a real connected account (all 27
+positions came back with `option_type=None` before the fix). `_DHAN_OPTION_TYPES`
+now accepts both spellings. Positions carry no LTP of their own, so
+`get_ltp_by_security_id` is called separately for the distinct
+`(exchangeSegment, securityId)` pairs before translating — in practice
+this call needs Dhan's separate "Data APIs" subscription (distinct from
+"Trading APIs"); without it, Dhan returns a 401 ("Data APIs not
+Subscribed") that's caught as a `DhanAuthError` and silently degrades to
+no LTP for every position (same "N/A" treatment as any other unpriced row)
+rather than failing the whole sync.
+
+**Security trade-off, stated in the UI itself, not just here:** the
+access token can also place trades — Dhan has no read-only scope for an
+individual account — and it's stored in `broker_connections` as entered,
+protected only by that table's RLS policy (`auth.uid() = user_id`), the
+same protection model as every other per-user table in this app. No
+application-level encryption is applied. This app's own code only ever
+calls the read-only endpoints above. The token also expires after 24
+hours (a Dhan platform limit, not a choice made here), so there is no
+background/scheduled sync in this version — `token_saved_at` only tracks
+when credentials were last saved, purely so the page can warn once it's
+old enough to likely be expired.
 
 ## Auth: a non-obvious quirk
 

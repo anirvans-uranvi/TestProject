@@ -82,6 +82,12 @@ def _load_instrument_master() -> pd.DataFrame:
     return df[["security_id", "trading_symbol"]].drop_duplicates("trading_symbol")
 
 
+class DhanAuthError(ProviderError):
+    """Raised on a 401 from the Dhan API -- the access token is invalid or
+    (most commonly) has passed its 24-hour expiry. Callers show a distinct
+    "regenerate your token" message rather than a generic failure."""
+
+
 def resolve_security_id(symbol: str) -> str:
     master = _load_instrument_master()
     match = master[master["trading_symbol"].astype(str).str.upper() == symbol.upper()]
@@ -191,4 +197,55 @@ class DhanProvider(PriceDataProvider):
             if entry is None:
                 continue
             result[symbol] = Quote(symbol=symbol, latest_price=entry["last_price"], as_of=now, source=self.name)
+        return result
+
+    # ------------------------------------------------------------------
+    # Per-user portfolio sync (pages/6_Portfolio.py "Connect Dhan account")
+    # -- reuses this same class's auth/header handling for a per-user
+    # client_id/access_token pair (rather than this app's own single
+    # settings.dhan_client_id/dhan_access_token), since the request
+    # mechanics are identical. Deliberately not decorated with the
+    # `@retry` used by _post above: these are manual, user-initiated
+    # "Sync now" clicks, not part of the automated price pipeline, so a
+    # failure -- especially an expired token -- should surface immediately
+    # rather than retrying for up to ~20s first.
+    # ------------------------------------------------------------------
+    def _request(self, method: str, url: str, *, json: dict | None = None):
+        _throttle()
+        try:
+            resp = httpx.request(method, url, json=json, headers=self._headers, timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"Dhan request to {url} failed: {exc}") from exc
+        if resp.status_code == 401:
+            raise DhanAuthError(f"Dhan access token rejected (401): {resp.text[:200]}")
+        if resp.status_code >= 400:
+            raise ProviderError(f"Dhan request error {resp.status_code}: {resp.text[:200]}")
+        return resp.json()
+
+    def get_holdings(self) -> list[dict]:
+        """Raw rows from GET /v2/holdings -- one per equity/ETF holding.
+        Response shape per Dhan's v2 docs as researched; verify against a
+        live account before relying on this, same caveat as the rest of
+        this module."""
+        return self._request("GET", f"{BASE_URL}/holdings") or []
+
+    def get_positions(self) -> list[dict]:
+        """Raw rows from GET /v2/positions -- one per open F&O position."""
+        return self._request("GET", f"{BASE_URL}/positions") or []
+
+    def get_ltp_by_security_id(self, security_ids_by_segment: dict[str, list[str]]) -> dict[str, float]:
+        """POST /v2/marketfeed/ltp for arbitrary exchange segments (e.g.
+        NSE_FNO, IDX_I for index options) -- unlike get_quotes() above,
+        which is hardcoded to NSE_EQ for this app's own equity price
+        pipeline. Returns {security_id: last_price} flattened across
+        segments (security_id is unique across all of them, so the segment
+        isn't needed in the result key)."""
+        payload = {segment: [int(sid) for sid in ids] for segment, ids in security_ids_by_segment.items() if ids}
+        if not payload:
+            return {}
+        data = self._request("POST", LTP_ENDPOINT, json=payload)
+        result: dict[str, float] = {}
+        for segment_data in (data.get("data") or {}).values():
+            for sec_id, entry in segment_data.items():
+                result[str(sec_id)] = entry["last_price"]
         return result

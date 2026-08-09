@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import streamlit as st
 from postgrest.exceptions import APIError
 from pydantic import ValidationError
 
+from src.data_providers.base import ProviderError
+from src.data_providers.dhan_provider import DhanAuthError, DhanProvider
+from src.models.portfolio import BrokerConnection
 from src.repositories import companies_repo, fo_repo, portfolio_repo, settings_repo, snapshot_repo
 from src.services import fo_service, portfolio_service
 from src.utils.formatting import format_inr, format_pct
@@ -37,6 +40,11 @@ def _load_holdings(_client, _user_id: str, _cache_bust: int):
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_positions(_client, _user_id: str, _cache_bust: int):
     return portfolio_repo.list_positions(_client, _user_id)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_broker_connection(_client, _user_id: str, portfolio_name: str, broker: str, _cache_bust: int):
+    return portfolio_repo.get_broker_connection(_client, _user_id, portfolio_name, broker)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -239,6 +247,166 @@ def _render_positions_upload_section(
         st.rerun()
 
 
+def _hours_since(dt: datetime) -> float:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - dt).total_seconds() / 3600
+
+
+def _relative_age(hours: float) -> str:
+    if hours < 1:
+        return f"{max(int(hours * 60), 1)} minute(s) ago"
+    if hours < 48:
+        return f"{int(hours)} hour(s) ago"
+    return f"{int(hours / 24)} day(s) ago"
+
+
+def _sync_dhan(*, portfolio_name: str, broker: str, connection: BrokerConnection) -> None:
+    """Pulls holdings + positions straight from Dhan's API and replaces
+    this portfolio's Dhan-sourced rows -- the exact same repo calls the
+    CSV upload path uses (replace_broker_holdings/replace_broker_positions),
+    so the rendered "My Holdings"/"My Positions" tables look identical
+    regardless of which path populated them."""
+    provider = DhanProvider(client_id=connection.client_id, access_token=connection.access_token)
+    try:
+        holding_rows = provider.get_holdings()
+        position_rows = provider.get_positions()
+    except DhanAuthError:
+        st.error(
+            "Your Dhan access token was rejected -- it's likely expired (Dhan tokens last ~24 hours). "
+            "Generate a new one on web.dhan.co and paste it below."
+        )
+        return
+    except ProviderError as exc:
+        st.error(f"Could not sync from Dhan: {exc}")
+        return
+
+    security_ids_by_segment: dict[str, list[str]] = {}
+    for row in position_rows:
+        if row.get("netQty") and row.get("securityId") and row.get("exchangeSegment"):
+            security_ids_by_segment.setdefault(row["exchangeSegment"], []).append(str(row["securityId"]))
+    try:
+        ltp_by_security_id = provider.get_ltp_by_security_id(security_ids_by_segment) if security_ids_by_segment else {}
+    except (DhanAuthError, ProviderError):
+        # Holdings/positions themselves already came back fine with this
+        # token -- degrade to no LTP (positions still save, shown as N/A)
+        # rather than discarding a sync that mostly worked.
+        ltp_by_security_id = {}
+
+    holdings = portfolio_service.dhan_holdings_from_api(holding_rows)
+    positions = portfolio_service.dhan_positions_from_api(position_rows, ltp_by_security_id)
+    holding_records = portfolio_service.holdings_to_records(user_id, portfolio_name, broker, holdings)
+    position_records = portfolio_service.positions_to_records(user_id, portfolio_name, broker, positions)
+    portfolio_repo.replace_broker_holdings(client, user_id, portfolio_name, broker, holding_records)
+    portfolio_repo.replace_broker_positions(client, user_id, portfolio_name, broker, position_records)
+    st.session_state["portfolio_cache_bust"] += 1
+    st.cache_data.clear()
+    st.success(
+        f"Synced {len(holding_records)} holding(s) and {len(position_records)} position(s) "
+        f"from Dhan to \"{portfolio_name}\"."
+    )
+    st.rerun()
+
+
+def _render_dhan_connect_section(*, portfolio_name: str, key_prefix: str, on_saved=None) -> None:
+    """Enter a Dhan Client ID + Access Token once, then "Sync now" pulls
+    holdings + positions straight from Dhan's API -- no CSV export needed.
+    Only offered for the Dhan broker (see _render_upload_section); Zerodha
+    stays CSV-only since its API needs a separate paid subscription."""
+    try:
+        connection = _load_broker_connection(
+            client, user_id, portfolio_name, "Dhan", st.session_state["portfolio_cache_bust"]
+        )
+    except APIError:
+        st.info(
+            "Connecting a Dhan account isn't set up yet. Apply migration "
+            "`supabase/migrations/0017_broker_connections.sql` in the Supabase SQL editor, "
+            "then reload this page."
+        )
+        return
+
+    if connection is None:
+        st.caption(
+            "Generate an Access Token on web.dhan.co -> Profile -> \"DhanHQ Trading APIs\" "
+            "(valid for 24 hours). This app only ever reads your Holdings/Positions/quotes with "
+            "it -- it never places or modifies orders -- but the token is stored as entered in "
+            "your account's data, protected the same way as everything else here (row-level "
+            "security), not separately encrypted. Anyone who could read your account's data could "
+            "use it -- including to trade -- until it expires."
+        )
+        with st.form(f"dhan_connect_form_{key_prefix}"):
+            new_client_id = st.text_input("Dhan Client ID")
+            new_token = st.text_input("Dhan Access Token", type="password")
+            submitted = st.form_submit_button("Save & Sync")
+        if submitted:
+            if not new_client_id.strip() or not new_token.strip():
+                st.error("Both Client ID and Access Token are required.")
+                return
+            new_connection = BrokerConnection(
+                user_id=user_id,
+                portfolio_name=portfolio_name,
+                broker="Dhan",
+                client_id=new_client_id.strip(),
+                access_token=new_token.strip(),
+                token_saved_at=datetime.now(timezone.utc),
+            )
+            portfolio_repo.upsert_broker_connection(client, new_connection)
+            st.session_state["portfolio_cache_bust"] += 1
+            st.cache_data.clear()
+            if on_saved:
+                on_saved()
+            _sync_dhan(portfolio_name=portfolio_name, broker="Dhan", connection=new_connection)
+        return
+
+    masked_id = f"...{connection.client_id[-4:]}" if len(connection.client_id) > 4 else connection.client_id
+    if connection.token_saved_at is not None:
+        hours_old = _hours_since(connection.token_saved_at)
+        st.caption(f"Connected -- Client ID {masked_id}, token saved {_relative_age(hours_old)}.")
+        if hours_old >= 23:
+            st.warning(
+                "This token is likely expired (Dhan tokens last ~24 hours) -- regenerate it on "
+                "web.dhan.co and update it below."
+            )
+    else:
+        st.caption(f"Connected -- Client ID {masked_id}.")
+
+    sync_col, disconnect_col = st.columns(2)
+    with sync_col:
+        if st.button("Sync now", key=f"dhan_sync_{key_prefix}"):
+            _sync_dhan(portfolio_name=portfolio_name, broker="Dhan", connection=connection)
+    with disconnect_col:
+        if st.button("Disconnect", key=f"dhan_disconnect_{key_prefix}"):
+            portfolio_repo.delete_broker_connection(client, user_id, portfolio_name, "Dhan")
+            st.session_state["portfolio_cache_bust"] += 1
+            st.cache_data.clear()
+            st.success("Disconnected. Previously synced holdings/positions are unaffected.")
+            st.rerun()
+
+    with st.expander("Update credentials"):
+        with st.form(f"dhan_update_form_{key_prefix}"):
+            updated_client_id = st.text_input("Dhan Client ID", value=connection.client_id)
+            updated_token = st.text_input(
+                "Dhan Access Token", type="password", placeholder="Paste a freshly generated token"
+            )
+            update_submitted = st.form_submit_button("Save & Sync")
+        if update_submitted:
+            if not updated_client_id.strip() or not updated_token.strip():
+                st.error("Both Client ID and Access Token are required.")
+                return
+            updated_connection = BrokerConnection(
+                user_id=user_id,
+                portfolio_name=portfolio_name,
+                broker="Dhan",
+                client_id=updated_client_id.strip(),
+                access_token=updated_token.strip(),
+                token_saved_at=datetime.now(timezone.utc),
+            )
+            portfolio_repo.upsert_broker_connection(client, updated_connection)
+            st.session_state["portfolio_cache_bust"] += 1
+            st.cache_data.clear()
+            _sync_dhan(portfolio_name=portfolio_name, broker="Dhan", connection=updated_connection)
+
+
 def _render_upload_section(
     *, portfolio_name: str, broker: str, key_prefix: str, save_label: str, on_saved=None
 ) -> None:
@@ -246,7 +414,20 @@ def _render_upload_section(
     the page (an existing portfolio's tab, the first-portfolio flow, and
     the "+ New portfolio" tab) -- routes to the holdings or positions
     upload flow based on the selection, both of which share the same
-    (portfolio_name, broker, key_prefix, save_label, on_saved) contract."""
+    (portfolio_name, broker, key_prefix, save_label, on_saved) contract.
+    For Dhan specifically, a CSV-vs-API toggle comes first -- Zerodha has
+    no API path here, so it goes straight to the upload-type picker."""
+    if broker == "Dhan":
+        connect_mode = st.radio(
+            "How do you want to add Dhan data?",
+            ["Upload CSV", "Connect Dhan account"],
+            key=f"portfolio_dhan_mode_{key_prefix}",
+            horizontal=True,
+        )
+        if connect_mode == "Connect Dhan account":
+            _render_dhan_connect_section(portfolio_name=portfolio_name, key_prefix=key_prefix, on_saved=on_saved)
+            return
+
     upload_type = st.selectbox("What are you uploading?", UPLOAD_TYPES, key=f"portfolio_upload_type_{key_prefix}")
     if upload_type == "Holdings":
         _render_holdings_upload_section(
@@ -519,8 +700,8 @@ def _render_portfolio_tab(
     st.divider()
     with st.expander(f'🗑️ Delete "{portfolio_name}"'):
         st.warning(
-            f'This permanently deletes every holding and position in "{portfolio_name}" (every broker within it). '
-            "This cannot be undone."
+            f'This permanently deletes every holding, position, and saved broker connection in "{portfolio_name}" '
+            "(every broker within it). This cannot be undone."
         )
         confirm = st.checkbox(
             f'I understand -- permanently delete "{portfolio_name}"',
