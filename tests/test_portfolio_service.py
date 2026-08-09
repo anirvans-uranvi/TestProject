@@ -426,3 +426,56 @@ class TestDhanPositionsFromApi:
     def test_skips_closed_positions_with_zero_net_qty(self):
         rows = [{"tradingSymbol": "CLOSED", "securityId": "1", "netQty": 0, "costPrice": 1.0}]
         assert portfolio_service.dhan_positions_from_api(rows, {}) == []
+
+
+class TestApplyFallbackOptionLtp:
+    def _position(self, **overrides):
+        base = {
+            "raw_name": "HDFCBANK-Aug2026-700-PE",
+            "symbol": "HDFCBANK",
+            "expiry_date": date(2026, 8, 25),
+            "strike_price": 700.0,
+            "option_type": OptionType.PE,
+            "qty": -1300.0,
+            "avg_price": 4.9,
+            "ltp": None,
+        }
+        return {**base, **overrides}
+
+    def test_fills_missing_ltp_from_matching_chain_row(self):
+        chains = {
+            ("HDFCBANK", date(2026, 8, 25)): [
+                {"strike_price": 700.0, "option_type": "PE", "last_price": 5.2, "close": 5.0},
+            ]
+        }
+        positions = portfolio_service.apply_fallback_option_ltp([self._position()], chains)
+        assert positions[0]["ltp"] == 5.2
+
+    def test_falls_back_to_close_when_last_price_is_missing(self):
+        chains = {
+            ("HDFCBANK", date(2026, 8, 25)): [
+                {"strike_price": 700.0, "option_type": "PE", "last_price": None, "close": 5.0},
+            ]
+        }
+        positions = portfolio_service.apply_fallback_option_ltp([self._position()], chains)
+        assert positions[0]["ltp"] == 5.0
+
+    def test_never_overwrites_an_ltp_the_broker_already_supplied(self):
+        chains = {("HDFCBANK", date(2026, 8, 25)): [{"strike_price": 700.0, "option_type": "PE", "last_price": 5.2}]}
+        positions = portfolio_service.apply_fallback_option_ltp([self._position(ltp=9.9)], chains)
+        assert positions[0]["ltp"] == 9.9
+
+    def test_leaves_ltp_none_when_no_chain_for_that_symbol_and_expiry(self):
+        # e.g. NIFTY index options -- this app tracks no F&O data for indices.
+        positions = portfolio_service.apply_fallback_option_ltp([self._position(symbol="NIFTY")], {})
+        assert positions[0]["ltp"] is None
+
+    def test_leaves_ltp_none_when_strike_not_in_chain(self):
+        chains = {("HDFCBANK", date(2026, 8, 25)): [{"strike_price": 850.0, "option_type": "PE", "last_price": 1.0}]}
+        positions = portfolio_service.apply_fallback_option_ltp([self._position()], chains)
+        assert positions[0]["ltp"] is None
+
+    def test_ignores_non_option_positions(self):
+        stock_row = self._position(option_type=None, strike_price=None, expiry_date=None)
+        positions = portfolio_service.apply_fallback_option_ltp([stock_row], {})
+        assert positions[0]["ltp"] is None

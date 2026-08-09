@@ -621,8 +621,14 @@ every 24 hours, syncing is always a manual click (no background refresh in
 this version) -- the page warns once a saved token is more than ~23 hours
 old. Fetching live LTP for positions needs Dhan's separate "Data APIs"
 subscription (distinct from "Trading APIs", enabled on the same
-`web.dhan.co` page) -- without it, positions still sync fine, just with
-LTP/P&L/P&L% shown as N/A, same as any other unpriced row. **Security trade-off:** the access token can also place trades (Dhan
+`web.dhan.co` page); without it (or for any security Dhan's own feed
+omits), `portfolio_service.apply_fallback_option_ltp` fills the gap from
+this app's own F&O data (`option_daily_prices` via
+`latest_option_chain_view`) for any symbol/expiry/strike this app tracks --
+the previous trading day's close, not a live tick, but still enough to show
+P&L instead of N/A. Only NIFTY/BANKNIFTY/SENSEX index options (which this
+app tracks no F&O data for at all) and strikes outside the tracked chain
+stay N/A. **Security trade-off:** the access token can also place trades (Dhan
 has no read-only scope for individual accounts), and it's stored as
 entered, protected only by the same row-level security every other
 per-user table in this app relies on -- not separately encrypted. This

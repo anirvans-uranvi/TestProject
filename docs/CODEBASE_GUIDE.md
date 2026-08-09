@@ -1236,9 +1236,17 @@ now accepts both spellings. Positions carry no LTP of their own, so
 `(exchangeSegment, securityId)` pairs before translating — in practice
 this call needs Dhan's separate "Data APIs" subscription (distinct from
 "Trading APIs"); without it, Dhan returns a 401 ("Data APIs not
-Subscribed") that's caught as a `DhanAuthError` and silently degrades to
-no LTP for every position (same "N/A" treatment as any other unpriced row)
-rather than failing the whole sync.
+Subscribed") that's caught as a `DhanAuthError` and degrades to no LTP
+from Dhan for every position, rather than failing the whole sync.
+`_sync_dhan` then calls `portfolio_service.apply_fallback_option_ltp`,
+which fills any still-missing `ltp` from this app's own F&O data
+(`option_daily_prices` via `latest_option_chain_view`,
+`fo_repo.get_option_chain`) — matched on `(symbol, expiry_date,
+strike_price, option_type)`, the previous trading day's close rather than
+a live tick, but real data instead of a blanket N/A. Verified against a
+real synced account: 21 of 27 positions resolved this way; the 6 misses
+were all NIFTY index options, which this app tracks no F&O data for at
+all regardless of Dhan subscription level.
 
 **Security trade-off, stated in the UI itself, not just here:** the
 access token can also place trades — Dhan has no read-only scope for an

@@ -362,6 +362,39 @@ def dhan_positions_from_api(rows: list[dict], ltp_by_security_id: dict[str, floa
     return positions
 
 
+def apply_fallback_option_ltp(
+    positions: list[dict], option_chains: dict[tuple[str, date], list[dict]]
+) -> list[dict]:
+    """Fills any still-missing `ltp` (e.g. a Dhan sync whose Market Quote
+    call 401'd because the account lacks the separate "Data APIs"
+    subscription -- see dhan_positions_from_api's docstring and
+    pages/6_Portfolio.py's _sync_dhan) from this app's own F&O data:
+    `option_chains` is `{(symbol, expiry_date): latest_option_chain_view
+    rows}`, the same shape fo_repo.get_option_chain returns. This is the
+    most recent trading day's close/settle, not a live tick -- same
+    "not live" caveat this page already shows under the positions table.
+    Only ever fills gaps; never overwrites an `ltp` a broker already gave.
+    Positions with no matching chain entry (most commonly index options --
+    NIFTY/BANKNIFTY/SENSEX aren't tracked by this app at all) are left as
+    they were."""
+    lookups: dict[tuple[str, date], dict[tuple[float, str], float]] = {}
+    for key, rows in option_chains.items():
+        lookups[key] = {
+            (round(float(r["strike_price"]), 4), r["option_type"]): price
+            for r in rows
+            if (price := r.get("last_price") or r.get("close")) is not None
+        }
+    filled = []
+    for p in positions:
+        if p["ltp"] is None and p["symbol"] and p["expiry_date"] and p["option_type"] and p["strike_price"] is not None:
+            lookup = lookups.get((p["symbol"], p["expiry_date"]), {})
+            ltp = lookup.get((round(p["strike_price"], 4), p["option_type"].value))
+            if ltp is not None:
+                p = {**p, "ltp": ltp}
+        filled.append(p)
+    return filled
+
+
 def compute_positions_view(positions: list[dict]) -> list[dict]:
     """Adds pnl/pnl_pct to each position, recomputed from qty/avg_price/
     ltp rather than trusted from the file (the two sample broker exports

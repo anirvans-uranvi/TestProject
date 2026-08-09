@@ -261,6 +261,21 @@ def _relative_age(hours: float) -> str:
     return f"{int(hours / 24)} day(s) ago"
 
 
+def _fetch_fallback_option_chains(positions: list[dict]) -> dict[tuple[str, date], list[dict]]:
+    """Fetches this app's own F&O chain (option_daily_prices via
+    latest_option_chain_view) for every (symbol, expiry) still missing an
+    `ltp` -- the fallback source portfolio_service.apply_fallback_option_ltp
+    matches against. Needed for a Dhan account without the separate "Data
+    APIs" subscription (the Market Quote call 401s, see _sync_dhan) or for
+    a security Dhan's own feed simply omits."""
+    needed = {
+        (p["symbol"], p["expiry_date"])
+        for p in positions
+        if p["ltp"] is None and p["symbol"] and p["expiry_date"] and p["option_type"] and p["strike_price"] is not None
+    }
+    return {(symbol, expiry_date): fo_repo.get_option_chain(client, symbol, expiry_date) for symbol, expiry_date in needed}
+
+
 def _sync_dhan(*, portfolio_name: str, broker: str, connection: BrokerConnection) -> None:
     """Pulls holdings + positions straight from Dhan's API and replaces
     this portfolio's Dhan-sourced rows -- the exact same repo calls the
@@ -295,6 +310,8 @@ def _sync_dhan(*, portfolio_name: str, broker: str, connection: BrokerConnection
 
     holdings = portfolio_service.dhan_holdings_from_api(holding_rows)
     positions = portfolio_service.dhan_positions_from_api(position_rows, ltp_by_security_id)
+    option_chains = _fetch_fallback_option_chains(positions)
+    positions = portfolio_service.apply_fallback_option_ltp(positions, option_chains)
     holding_records = portfolio_service.holdings_to_records(user_id, portfolio_name, broker, holdings)
     position_records = portfolio_service.positions_to_records(user_id, portfolio_name, broker, positions)
     portfolio_repo.replace_broker_holdings(client, user_id, portfolio_name, broker, holding_records)
@@ -650,12 +667,13 @@ def _render_portfolio_tab(
         )
         if len(priced) < len(computed_positions):
             st.caption(
-                f"Total excludes {len(computed_positions) - len(priced)} position(s) with no LTP in the "
-                "uploaded file (shown as N/A below)."
+                f"Total excludes {len(computed_positions) - len(priced)} position(s) with no LTP available "
+                "(shown as N/A below)."
             )
         st.caption(
-            "P&L is (LTP - Avg Price) x Qty (qty is signed -- negative is short) against each file's own "
-            "LTP, not live -- index F&O (NIFTY/BANKNIFTY/SENSEX) isn't tracked by this app's own market data."
+            "P&L is (LTP - Avg Price) x Qty (qty is signed -- negative is short) against each position's "
+            "last-known LTP, not live -- index F&O (NIFTY/BANKNIFTY/SENSEX) isn't tracked by this app's own "
+            "market data."
         )
 
         position_table_rows = [
