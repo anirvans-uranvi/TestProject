@@ -9,7 +9,7 @@ from postgrest.exceptions import APIError
 from src.calculations.classification import criterion_fundamentals
 from src.config import get_settings
 from src.models.user import SavedFilter
-from src.repositories import fetch_log_repo, fo_repo, settings_repo, snapshot_repo
+from src.repositories import companies_repo, fetch_log_repo, fo_repo, settings_repo, snapshot_repo
 from src.services import edge_refresh
 from src.services.market_calendar import get_market_state
 from src.services.threshold_override import apply_user_thresholds
@@ -48,6 +48,20 @@ def _load_last_fo_fetch(_client, _cache_bust: int):
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_latest_fo_trade_date(_client, _cache_bust: int):
     return fo_repo.get_latest_fo_trade_date(_client)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_universe_counts(_client, _cache_bust: int) -> tuple[int, int]:
+    """(stock_count, etf_count) across every symbol this app currently
+    tracks -- Nifty 50 constituents plus any portfolio-only symbol the
+    refresh pipeline has registered (see companies_repo.list_all_companies).
+    The refresh summary's own succeeded/total counts include ETFs/funds,
+    but the screener list below excludes them (migration 0015) -- so
+    "refreshed all N" and "N of N stocks" in the screener look mismatched
+    without this breakdown."""
+    companies = companies_repo.list_all_companies(_client)
+    etf_count = sum(1 for c in companies if c.is_etf)
+    return len(companies) - etf_count, etf_count
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -140,14 +154,17 @@ if st.session_state.get("last_manual_refresh_summary"):
     summary = st.session_state.pop("last_manual_refresh_summary")
     if summary.get("error"):
         st.error(summary["error"])
-    elif summary["failed"] == 0:
-        st.success(f"✅ Refreshed all {summary['succeeded']} stocks.")
     else:
-        failed_symbols = ", ".join(f["symbol"] for f in summary["symbolsFailed"])
-        st.warning(
-            f"Refreshed {summary['succeeded']} of {summary['total']} stocks -- "
-            f"{summary['failed']} failed: {failed_symbols}"
-        )
+        stock_count, etf_count = _load_universe_counts(client, st.session_state["dashboard_cache_bust"])
+        breakdown = f" ({stock_count} stocks, {etf_count} ETFs/funds)" if etf_count else ""
+        if summary["failed"] == 0:
+            st.success(f"✅ Refreshed all {summary['succeeded']} symbols{breakdown}.")
+        else:
+            failed_symbols = ", ".join(f["symbol"] for f in summary["symbolsFailed"])
+            st.warning(
+                f"Refreshed {summary['succeeded']} of {summary['total']} symbols{breakdown} -- "
+                f"{summary['failed']} failed: {failed_symbols}"
+            )
 
 if st.session_state.get("last_fo_refresh_summary"):
     fo_summary = st.session_state.pop("last_fo_refresh_summary")
