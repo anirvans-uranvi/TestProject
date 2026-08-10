@@ -4,6 +4,8 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from src.models.enums import CompanyType
+
 
 class Company(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -14,7 +16,7 @@ class Company(BaseModel):
     industry: str | None = None
     isin: str | None = None
     updated_at: datetime | None = None
-    is_etf: bool = False
+    company_type: CompanyType = CompanyType.EQUITY
 
 
 class Nifty50Constituent(BaseModel):

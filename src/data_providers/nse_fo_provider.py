@@ -10,8 +10,11 @@ a browser User-Agent (no cookie handshake) from the `nsearchives` host:
 Each row is one contract's full trading-day summary: OHLC, LTP, previous
 close, settlement, underlying (spot) price, open interest + change, volume,
 turnover, number of trades, expiry, strike, option type, and lot size.
-Instrument types: STF = stock future, STO = stock option (IDF/IDO are index
-derivatives -- out of scope).
+Instrument types: STF = stock future, STO = stock option, IDO = index
+option (NIFTY/BANKNIFTY -- see migration 0018's Index company_type rows).
+IDF (index future) stays out of scope -- no Index position on this app
+needs a futures LTP today (see pages/6_Portfolio.py's Dhan sync, which
+only deals in option positions), so it isn't worth widening for yet.
 
 The HTTP download and the CSV parse are deliberately separated so the parse
 is unit-testable against an inline fixture with no network.
@@ -50,9 +53,11 @@ _BROWSER_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# Bhavcopy FinInstrmTp codes we care about (stock derivatives only).
+# Bhavcopy FinInstrmTp codes we care about: stock futures/options, plus
+# index options (IDO) -- see the file header for why index futures (IDF)
+# stay out of scope.
 _FUTURES_TYPES = {"STF"}
-_OPTION_TYPES = {"STO"}
+_OPTION_TYPES = {"STO", "IDO"}
 
 
 @dataclass
@@ -110,9 +115,10 @@ def parse_fo_bhavcopy(
 ) -> FOBhavcopy:
     """Parse bhavcopy CSV text into the four F&O table shapes.
 
-    Keeps only stock futures (STF) and stock options (STO); ignores index
-    derivatives (IDF/IDO). If `universe` is given, keeps only those
-    underlying symbols. `trade_date` defaults to each row's own TradDt.
+    Keeps stock futures (STF), stock options (STO), and index options
+    (IDO); ignores index futures (IDF -- see the module docstring for why).
+    If `universe` is given, keeps only those underlying symbols. `trade_date`
+    defaults to each row's own TradDt.
     """
     reader = csv.DictReader(io.StringIO(csv_text))
     rows = list(reader)

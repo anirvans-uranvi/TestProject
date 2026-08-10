@@ -8,7 +8,7 @@ from datetime import date
 import pytest
 
 from src.models.company import Company
-from src.models.enums import OptionType
+from src.models.enums import CompanyType, OptionType
 from src.services import portfolio_service
 
 ZERODHA_CSV = """"Instrument","Qty.","Avg. cost","LTP","Invested","Cur. val","P&L","Net chg.","Day chg.",""
@@ -174,11 +174,12 @@ class TestResolveTrackedSymbols:
         new = portfolio_service.resolve_tracked_symbols(["SBIN"], known_company_symbols={"SBIN"}, raw_name_by_symbol={})
         assert new == []
 
-    def test_new_companies_default_to_not_etf(self):
-        """is_etf classification is the caller's job (a live display-name
-        lookup, see looks_like_etf_name below) -- this stays a pure diff."""
+    def test_new_companies_default_to_equity(self):
+        """company_type classification is the caller's job (a live
+        display-name lookup, see looks_like_etf_name below) -- this stays
+        a pure diff."""
         new = portfolio_service.resolve_tracked_symbols(["NIFTYBEES"], known_company_symbols=set(), raw_name_by_symbol={})
-        assert new[0].is_etf is False
+        assert new[0].company_type == CompanyType.EQUITY
 
 
 class TestLooksLikeEtfName:

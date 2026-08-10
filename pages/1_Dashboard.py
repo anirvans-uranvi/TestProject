@@ -8,6 +8,7 @@ from postgrest.exceptions import APIError
 
 from src.calculations.classification import criterion_fundamentals
 from src.config import get_settings
+from src.models.enums import CompanyType
 from src.models.user import SavedFilter
 from src.repositories import companies_repo, fetch_log_repo, fo_repo, settings_repo, snapshot_repo
 from src.services import edge_refresh
@@ -56,12 +57,17 @@ def _load_universe_counts(_client, _cache_bust: int) -> tuple[int, int]:
     tracks -- Nifty 50 constituents plus any portfolio-only symbol the
     refresh pipeline has registered (see companies_repo.list_all_companies).
     The refresh summary's own succeeded/total counts include ETFs/funds,
-    but the screener list below excludes them (migration 0015) -- so
+    but the screener list below excludes them (migration 0018) -- so
     "refreshed all N" and "N of N stocks" in the screener look mismatched
-    without this breakdown."""
+    without this breakdown. Counted explicitly by company_type rather than
+    "everything that isn't a stock", since `companies` also holds Index
+    rows (NIFTY/BANKNIFTY/SENSEX, migration 0018) that were never part of
+    the price-refresh pipeline's own total and would otherwise inflate
+    stock_count."""
     companies = companies_repo.list_all_companies(_client)
-    etf_count = sum(1 for c in companies if c.is_etf)
-    return len(companies) - etf_count, etf_count
+    stock_count = sum(1 for c in companies if c.company_type == CompanyType.EQUITY)
+    etf_count = sum(1 for c in companies if c.company_type == CompanyType.ETF)
+    return stock_count, etf_count
 
 
 @st.cache_data(ttl=60, show_spinner=False)

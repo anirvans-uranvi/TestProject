@@ -154,9 +154,13 @@ settings.
   the last snapshot row that actually has a price instead of always
   using today's, and folds in the viewing user's portfolio symbols --
   see [My Portfolio](#my-portfolio) for why), and
-  `0015_add_is_etf_to_companies.sql` (adds `companies.is_etf`, filtered
+  `0015_add_is_etf_to_companies.sql` (added `companies.is_etf`, filtered
   out of this same view -- ETFs/funds tracked via a portfolio still
-  showed up on this stock-focused screener otherwise; see
+  showed up on this stock-focused screener otherwise) and
+  `0018_company_type.sql` (replaced that boolean with a proper
+  `company_type` category -- `Equity`/`ETF`/`Index`/`Fund` -- filtering
+  the view on `company_type = 'Equity'` instead, so it now also excludes
+  the Index rows the same migration seeds; see
   [My Portfolio](#my-portfolio) for the classification story).
 - **Password reset uses a 6-digit code, not the email's magic link.**
   Supabase's recovery link puts the session token in the URL fragment
@@ -559,13 +563,16 @@ Nifty50 screener universe. Each portfolio tab has two sections:
 - **My Positions** -- open F&O (options) positions decoded from the same
   broker exports: Symbol, Expiry, Strike, Type, Qty (signed -- negative
   is short), Avg Price, LTP, P&L, P&L%. Unlike holdings, LTP here is
-  trusted from the uploaded file rather than fetched live -- index F&O
-  (NIFTY, BANKNIFTY, SENSEX) is out of scope for this app's own F&O
-  ingestion (see `src/data_providers/nse_fo_provider.py`'s STF/STO-only
-  filter), so there's no live per-contract price source to fall back on.
-  P&L/P&L% are still recomputed from qty/avg price/LTP rather than
-  trusted from the file, since Zerodha's and Dhan's own P&L% columns
-  turned out to mean different things (Dhan's is direction-aware,
+  trusted from the uploaded file rather than fetched live. For a
+  Dhan-synced position missing LTP (see "Connect Dhan account" below),
+  `portfolio_service.apply_fallback_option_ltp` fills the gap from this
+  app's own F&O data -- which now includes index options (NIFTY,
+  BANKNIFTY; migration `0018`, see `src/data_providers/nse_fo_provider.py`'s
+  STF/STO/IDO filter), not just stock options. SENSEX is BSE-listed, so
+  it stays unsupported (no BSE data source), and index *futures* remain
+  out of scope. P&L/P&L% are still recomputed from qty/avg price/LTP
+  rather than trusted from the file, since Zerodha's and Dhan's own P&L%
+  columns turned out to mean different things (Dhan's is direction-aware,
   Zerodha's is a raw price change) -- see `portfolio_service.compute_positions_view`.
 
 Both sections upload the same way: pick "Holdings" or "Positions" from a
@@ -626,9 +633,10 @@ omits), `portfolio_service.apply_fallback_option_ltp` fills the gap from
 this app's own F&O data (`option_daily_prices` via
 `latest_option_chain_view`) for any symbol/expiry/strike this app tracks --
 the previous trading day's close, not a live tick, but still enough to show
-P&L instead of N/A. Only NIFTY/BANKNIFTY/SENSEX index options (which this
-app tracks no F&O data for at all) and strikes outside the tracked chain
-stay N/A. **Security trade-off:** the access token can also place trades (Dhan
+P&L instead of N/A. This now covers NIFTY/BANKNIFTY index options too
+(migration `0018`); only SENSEX (BSE-listed -- no BSE data source) and a
+strike/expiry genuinely outside the tracked chain stay N/A.
+**Security trade-off:** the access token can also place trades (Dhan
 has no read-only scope for individual accounts), and it's stored as
 entered, protected only by the same row-level security every other
 per-user table in this app relies on -- not separately encrypted. This
@@ -696,15 +704,21 @@ cron run) → real LTP appears, and the symbol becomes viewable everywhere
 except the Settings page's alert "Applies to" list.
 
 **Except the Dashboard's screener list itself doesn't show ETFs/funds**
-(migration `0015`, `companies.is_etf`) -- a momentum/dividend/PEG stock
-screener doesn't make much sense for a fund (those criteria are all
-meaningless for one), so real ETFs/funds (NIFTYBEES, GILT5YBEES,
-LIQUIDCASE, LTGILTCASE) are excluded from this one list specifically;
-Stock Detail, Options, and the Portfolio page still show them fine. This
-is classified automatically the first time a new symbol is tracked, via
-its real display name (yfinance's `longName`) -- not yfinance's own
-`quoteType` field, which is unreliable for Indian-listed ETFs (it
-returns `"EQUITY"` for every one of these). See
+(migration `0018`'s `companies.company_type`, replacing the boolean
+`is_etf` from `0015`) -- a momentum/dividend/PEG stock screener doesn't
+make much sense for a fund (those criteria are all meaningless for one),
+so real ETFs/funds (NIFTYBEES, GILT5YBEES, LIQUIDCASE, LTGILTCASE) are
+excluded from this one list specifically; Stock Detail, Options, and the
+Portfolio page still show them fine. `company_type` is one of `Equity`
+(default), `ETF`, `Index`, or `Fund` (reserved, no rows yet); the
+screener view only ever shows `Equity` rows, so `Index` (NIFTY,
+BANKNIFTY, SENSEX -- seeded by `0018` so Dhan-synced index option
+positions and this app's F&O ingestion have a `companies` row to
+reference) is excluded the same way ETFs are, with no separate flag
+needed. ETF classification happens automatically the first time a new
+symbol is tracked, via its real display name (yfinance's `longName`) --
+not yfinance's own `quoteType` field, which is unreliable for
+Indian-listed ETFs (it returns `"EQUITY"` for every one of these). See
 `docs/CODEBASE_GUIDE.md`'s Futures & Options section for the full story.
 
 `0013` also fixed a related bug: the view previously always used
@@ -877,5 +891,8 @@ docker compose up               # + the APScheduler refresh daemon
   archive still serves). Greeks and IV are **not** in the bhavcopy (or any
   free source) and were intentionally left out -- the option tables are
   shaped to gain those columns later (via a Black-Scholes helper) without a
-  migration reshape. Index F&O (NIFTY/BANKNIFTY) is out of scope; only the
-  50 equity underlyings are ingested.
+  migration reshape. Index *options* (NIFTY/BANKNIFTY, migration `0018`)
+  are ingested alongside the 50 equity underlyings; index *futures* (IDF
+  bhavcopy rows) stay out of scope, and SENSEX (BSE-listed, seeded as a
+  company row anyway) will never actually have F&O rows since this app has
+  no BSE data source.

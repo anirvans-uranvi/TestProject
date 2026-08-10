@@ -293,10 +293,11 @@ Deno.serve(async (req: Request) => {
   // nifty50_constituents is never touched, so these never become an
   // official constituent -- but (since migration 0013)
   // latest_screener_view's own portfolio_holdings widening still puts
-  // them on the Dashboard for the tracking user; isEtf (migration 0015)
-  // is what actually excludes real ETFs/funds from that list. Tolerant
-  // of the portfolio_holdings migration not being applied yet, same as
-  // the dashboard_fo_metrics recompute below.
+  // them on the Dashboard for the tracking user; companyType (migration
+  // 0018, formerly the isEtf boolean from 0015) is what actually excludes
+  // real ETFs/funds from that list. Tolerant of the portfolio_holdings
+  // migration not being applied yet, same as the dashboard_fo_metrics
+  // recompute below.
   try {
     const { data: portfolioRows } = await serviceClient
       .from("portfolio_holdings")
@@ -316,18 +317,18 @@ Deno.serve(async (req: Request) => {
         // Best-effort ETF/fund classification via each symbol's real
         // display name (see portfolioSymbols.ts's looksLikeEtfName() for
         // why this, not yfinance's own quoteType, is the signal) -- a
-        // failed lookup just leaves isEtf at its false default rather
-        // than blocking registration.
+        // failed lookup just leaves companyType at its "Equity" default
+        // rather than blocking registration.
         for (const company of newCompanies) {
           const displayName = await fetchDisplayName(company.symbol);
           if (displayName && looksLikeEtfName(displayName)) {
-            company.isEtf = true;
+            company.companyType = "ETF";
           }
         }
         await serviceClient
           .from("companies")
           .upsert(
-            newCompanies.map((c) => ({ symbol: c.symbol, name: c.name, is_etf: c.isEtf })),
+            newCompanies.map((c) => ({ symbol: c.symbol, name: c.name, company_type: c.companyType })),
             { onConflict: "symbol" },
           );
       }

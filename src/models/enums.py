@@ -31,6 +31,28 @@ class OptionType(StrEnum):
     PE = "PE"
 
 
+class CompanyType(StrEnum):
+    """`companies.company_type` (migration 0018) -- what kind of instrument
+    a symbol is, not just "is this an ETF". EQUITY is the default for every
+    real Nifty 50 constituent and portfolio-tracked stock. ETF is set by
+    src.services.portfolio_service.looks_like_etf_name() at company-
+    registration time. INDEX covers NIFTY/BANKNIFTY/SENSEX, seeded once by
+    migration 0018 so Dhan-synced index option positions (see
+    pages/6_Portfolio.py) and this app's F&O ingestion (widened to index
+    options, src/data_providers/nse_fo_provider.py) have a companies row to
+    reference. FUND has no rows yet -- reserved for a future non-ETF fund
+    classification (see looks_like_etf_name()'s own docstring for why
+    LIQUIDCASE/GILT5YBEES/LTGILTCASE stay classified as ETF for now rather
+    than being split out). latest_screener_view (0018) only ever shows
+    EQUITY rows -- ETF/INDEX/FUND are excluded by construction, not a
+    separate flag."""
+
+    EQUITY = "Equity"
+    ETF = "ETF"
+    INDEX = "Index"
+    FUND = "Fund"
+
+
 class AlertType(StrEnum):
     STATUS_CHANGE = "status_change"
     ENTERS_GREEN = "enters_green"

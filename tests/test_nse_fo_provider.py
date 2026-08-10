@@ -4,8 +4,10 @@ from src.data_providers.nse_fo_provider import bhavcopy_url, parse_fo_bhavcopy
 from src.models.enums import OptionType
 
 # A trimmed but real-shaped UDiFF F&O bhavcopy fragment: one stock future
-# (STF), two stock options (STO CE/PE), one index future (IDF) and one row
-# for a symbol outside a restricted universe -- to exercise all the filters.
+# (STF), two stock options (STO CE/PE), one index future (IDF, still out of
+# scope), one index option (IDO, migration 0018's NIFTY/BANKNIFTY widening)
+# and one row for a symbol outside a restricted universe -- to exercise all
+# the filters.
 HEADER = (
     "TradDt,BizDt,Sgmt,Src,FinInstrmTp,FinInstrmId,ISIN,TckrSymb,SctySrs,XpryDt,"
     "FininstrmActlXpryDt,StrkPric,OptnTp,FinInstrmNm,OpnPric,HghPric,LwPric,ClsPric,"
@@ -33,6 +35,10 @@ ROWS = [
     "2026-07-16,2026-07-16,FO,NSE,STF,140005,,TCS,,2026-07-28,2026-07-28,,,"
     "TCS26JULFUT,3800.00,3820.00,3790.00,3805.00,3805.00,3810.00,3802.00,3805.00,"
     "8000000,10000,5000,1900000.00,3000,F1,175,,,,,",
+    # NIFTY 25000 CE (IDO) -- an index option, kept (unlike IDF above)
+    "2026-07-16,2026-07-16,FO,NSE,IDO,140006,,NIFTY,,2026-07-30,2026-07-30,25000.00,CE,"
+    "NIFTY26JUL25000CE,120.00,140.00,110.00,130.00,128.00,125.00,25040.00,130.00,"
+    "800000,20000,45000,3500000.00,12000,F1,65,,,,,",
 ]
 SAMPLE_CSV = HEADER + "\n" + "\n".join(ROWS) + "\n"
 
@@ -40,11 +46,12 @@ SAMPLE_CSV = HEADER + "\n" + "\n".join(ROWS) + "\n"
 class TestParseFoBhavcopy:
     def test_splits_futures_and_options(self):
         book = parse_fo_bhavcopy(SAMPLE_CSV)
-        # RELIANCE + TCS futures; RELIANCE CE + PE options; NIFTY (IDF) ignored
+        # RELIANCE + TCS futures (NIFTY IDF ignored); RELIANCE CE + PE and
+        # NIFTY CE options (IDO kept)
         assert len(book.futures_prices) == 2
-        assert len(book.option_prices) == 2
+        assert len(book.option_prices) == 3
         assert {p.symbol for p in book.futures_prices} == {"RELIANCE", "TCS"}
-        assert {p.symbol for p in book.option_prices} == {"RELIANCE"}
+        assert {p.symbol for p in book.option_prices} == {"RELIANCE", "NIFTY"}
 
     def test_universe_filter(self):
         book = parse_fo_bhavcopy(SAMPLE_CSV, universe={"RELIANCE"})
@@ -52,9 +59,16 @@ class TestParseFoBhavcopy:
         assert all(p.symbol == "RELIANCE" for p in book.option_prices)
         assert len(book.futures_prices) == 1
 
-    def test_ignores_index_derivatives(self):
+    def test_ignores_index_futures(self):
         book = parse_fo_bhavcopy(SAMPLE_CSV)
         assert "NIFTY" not in {p.symbol for p in book.futures_prices}
+
+    def test_includes_index_options(self):
+        book = parse_fo_bhavcopy(SAMPLE_CSV)
+        nifty_opt = next(p for p in book.option_prices if p.symbol == "NIFTY")
+        assert nifty_opt.option_type == OptionType.CE
+        assert nifty_opt.strike_price == 25000.0
+        assert nifty_opt.close == 130.0
 
     def test_futures_field_mapping(self):
         book = parse_fo_bhavcopy(SAMPLE_CSV, universe={"RELIANCE"})

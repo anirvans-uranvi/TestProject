@@ -135,7 +135,7 @@ tests/                             Pytest suite -- almost entirely calculations/
 ## Database schema
 
 All migrations live in `supabase/migrations/`, applied in numeric order
-(`0001` → `0017`). Twenty tables, in three groups (`0008` doesn't add a
+(`0001` → `0018`). Twenty tables, in three groups (`0008` doesn't add a
 table -- it just extends `provider_fetch_log.fetch_type`'s CHECK
 constraint with `'fo'`, for the `fo-refresh` Edge Function's logging;
 `0010`/`0011` drop and recreate `dashboard_fo_metrics` with a different
@@ -145,12 +145,14 @@ below; `0012` adds `portfolio_holdings`; `0013` only redefines
 widens `portfolio_holdings`' primary key, no new table; `0015` only adds
 a column to `companies` (`is_etf`) + redefines `latest_screener_view`
 again, no new table; `0016` adds `portfolio_positions`; `0017` adds
-`broker_connections`):
+`broker_connections`; `0018` replaces `is_etf` with `company_type`, seeds
+three `Index` rows, and redefines `latest_screener_view` a third time --
+no new table):
 
 **Reference data** (written by `scripts/fetch_nifty50_constituents.py` /
 `seed.sql`, read-only to the app):
 - `nifty50_constituents` — which symbols are in the index and when (supports historical reconstitution tracking)
-- `companies` — name/sector/industry per symbol, plus `is_etf` (migration `0015`) -- see the Futures & Options section's "A follow-up problem 0013 itself introduced" paragraph for what this excludes and why
+- `companies` — name/sector/industry per symbol, plus `company_type` (`Equity`/`ETF`/`Index`/`Fund`, migration `0018`, replacing the `is_etf` boolean from `0015`) -- see the Futures & Options section's "A follow-up problem 0013 itself introduced" paragraph for what this excludes and why
 
 **Market data** (written by `refresh_service` / provider scripts, read-only to the app):
 - `price_history` — daily OHLCV, one row per symbol per trade_date
@@ -173,7 +175,7 @@ again, no new table; `0016` adds `portfolio_positions`; `0017` adds
 
 Two generated helpers, defined in `0003_views_functions.sql` (and patched
 in `0004`):
-- `latest_screener_view` — one joined row per current constituent (companies + its latest daily_screener_snapshot), plus (as of `0013`) every symbol the *viewing* user holds in their own `portfolio_holdings`, minus (as of `0015`) any row with `is_etf = true`. This is what the Dashboard queries in a single call instead of joining client-side. `0004` added `coalesce(status, 'unavailable')` / `coalesce(data_quality, '{}')` here because a constituent with no snapshot yet would otherwise return `NULL` for those columns, which fails Pydantic validation on the `ScreenerRow` model. `0006` added `week_52_high`/`week_52_low`/`criterion_52w_high`/`criterion_52w_low` — **a real deploy-time error hit here**: `create or replace view` can only *append* new output columns; inserting them positionally in the middle of the existing `select` list (as the first draft of `0006` did) makes Postgres think you're renaming the columns that got pushed down a slot, and it fails with `42P16: cannot change name of view column ... HINT: Use ALTER VIEW ... RENAME COLUMN ... instead`. The fix is to always append new columns at the very end of the `select` list in any future `create or replace view` migration, never insert them mid-list — column *order* doesn't matter to the app since every read is by name (`ScreenerRow.model_validate(dict)`), so this costs nothing. `0013` made two further changes, both **real production bugs found after the Portfolio feature shipped** (see the My Portfolio section's "Screener fallback" note below for the full story): the per-symbol lateral join now prefers the most recent snapshot row that actually has a price (falling back across days when today's fetch failed) instead of always taking literally the latest date regardless of whether it has data, and the join went from `nifty50_constituents` inner-join to `left join ... where nc.is_current or exists (select 1 from portfolio_holdings where symbol = c.symbol and user_id = auth.uid())` — `security_invoker = true` means `auth.uid()` here is the actual querying user, so this stays correctly scoped per user (reinforced by `portfolio_holdings`' own RLS policy on top).
+- `latest_screener_view` — one joined row per current constituent (companies + its latest daily_screener_snapshot), plus (as of `0013`) every symbol the *viewing* user holds in their own `portfolio_holdings`, filtered (as of `0018`, originally `0015`'s `where not is_etf`) to `company_type = 'Equity'` -- excluding ETF/Index/Fund rows by construction rather than a separate flag per category. This is what the Dashboard queries in a single call instead of joining client-side. `0004` added `coalesce(status, 'unavailable')` / `coalesce(data_quality, '{}')` here because a constituent with no snapshot yet would otherwise return `NULL` for those columns, which fails Pydantic validation on the `ScreenerRow` model. `0006` added `week_52_high`/`week_52_low`/`criterion_52w_high`/`criterion_52w_low` — **a real deploy-time error hit here**: `create or replace view` can only *append* new output columns; inserting them positionally in the middle of the existing `select` list (as the first draft of `0006` did) makes Postgres think you're renaming the columns that got pushed down a slot, and it fails with `42P16: cannot change name of view column ... HINT: Use ALTER VIEW ... RENAME COLUMN ... instead`. The fix is to always append new columns at the very end of the `select` list in any future `create or replace view` migration, never insert them mid-list — column *order* doesn't matter to the app since every read is by name (`ScreenerRow.model_validate(dict)`), so this costs nothing. `0013` made two further changes, both **real production bugs found after the Portfolio feature shipped** (see the My Portfolio section's "Screener fallback" note below for the full story): the per-symbol lateral join now prefers the most recent snapshot row that actually has a price (falling back across days when today's fetch failed) instead of always taking literally the latest date regardless of whether it has data, and the join went from `nifty50_constituents` inner-join to `left join ... where nc.is_current or exists (select 1 from portfolio_holdings where symbol = c.symbol and user_id = auth.uid())` — `security_invoker = true` means `auth.uid()` here is the actual querying user, so this stays correctly scoped per user (reinforced by `portfolio_holdings`' own RLS policy on top).
 - `get_classification_history(symbol, days)` — a SQL function returning one symbol's snapshot history, used by the Stock Detail status-over-time chart.
 
 Migration `0007` adds two more views on the same `DISTINCT ON` pattern:
@@ -353,14 +355,46 @@ constituents — futures + option chains — feeding the Options screen
   bot-blocked and serves a PDF). Each row is one contract's full trading
   day: OHLC, LTP, prev close, settlement, underlying (spot), open interest
   + change, volume, turnover, trades, expiry, strike, CE/PE, lot size.
-  Instrument types: `STF` = stock future, `STO` = stock option (index
-  `IDF`/`IDO` are ignored). **This is end-of-day data** (published ~6pm
-  IST) — "latest price" means the most recent close/settlement, never an
-  intraday live quote. There is no free live/intraday F&O feed.
+  Instrument types: `STF` = stock future, `STO` = stock option, `IDO` =
+  index option (NIFTY/BANKNIFTY, migration `0018` -- see the "Index F&O"
+  paragraph below). `IDF` (index future) is still ignored -- no Index
+  position on this app needs a futures LTP today. **This is end-of-day
+  data** (published ~6pm IST) — "latest price" means the most recent
+  close/settlement, never an intraday live quote. There is no free
+  live/intraday F&O feed.
 
 **Greeks / implied volatility are intentionally NOT stored** — not in the
 bhavcopy (or any free source), and computing them was scoped out. The
 tables can gain those columns + a `greeks.py` later without reshaping.
+
+**Index F&O (migration `0018_company_type.sql`)** — added so Dhan-synced
+index option positions (`pages/6_Portfolio.py`'s "Connect Dhan account")
+have real F&O data to fall back on for LTP instead of a blanket N/A (see
+the My Portfolio section's "Connect Dhan account" subsection). Three
+symbols are seeded into `companies` as `company_type = 'Index'`: `NIFTY`,
+`BANKNIFTY`, and `SENSEX`. `option_contracts`/`option_daily_prices`
+themselves are unchanged -- a NIFTY option row is stored identically to a
+stock option row, just `symbol = 'NIFTY'`, so no schema change was
+needed there, only widening which bhavcopy rows get kept
+(`nse_fo_provider.py`'s `_OPTION_TYPES` gained `IDO`) and which symbols
+`scripts/fetch_fo_data.py`/`fo-refresh/index.ts` include in their
+ingestion universe (every `companies` row with `company_type = 'Index'`,
+same widening pattern as the existing portfolio-symbols widening below).
+**SENSEX is a labeled gap, not a bug**: it's BSE-listed, and this app's
+only F&O source is NSE's bhavcopy, which never contains a SENSEX row --
+seeded anyway so a Dhan-synced SENSEX position at least resolves a symbol
+instead of showing "undecoded", but it will never actually get F&O rows
+without a BSE data source. Index *futures* (`IDF` bhavcopy rows) stay out
+of scope -- no Index position on this app needs a futures LTP today, only
+options. New F&O rows only appear once `fetch_fo_data.py` or the
+Dashboard's "F&O Data Refresh" button actually runs against a universe
+that includes these symbols; the on-demand Edge Function only fetches the
+*latest* bhavcopy and skips entirely if it's already loaded (see "A real
+incident this caused" below for that watermark logic), so widening the
+universe alone doesn't retroactively backfill days already ingested for
+stocks -- a one-off `scripts/fetch_fo_data.py` run (idempotent upserts)
+is what actually backfills NIFTY/BANKNIFTY history immediately rather
+than waiting for tomorrow's refresh to naturally pick them up.
 
 **Schema (migration `0007_add_fo_tables.sql`) — four tables + two views.**
 Futures and options are separate instruments, and each splits into a
@@ -943,7 +977,18 @@ Dashboard-screener-only exclusion). Fixed in
 `0015_add_is_etf_to_companies.sql`: a new `companies.is_etf boolean not
 null default false` column, filtered out of `latest_screener_view` with
 a plain `where not c.is_etf` (Nifty50 constituents are always real
-stocks, so this never affects them).
+stocks, so this never affects them). `0018_company_type.sql` later
+replaced that boolean with a proper category column,
+`company_type` (`Equity`/`ETF`/`Index`/`Fund`, default `Equity`), and the
+view's filter became `where c.company_type = 'Equity'` -- functionally
+the same exclusion for ETFs, but it now also covers `Index` (three rows
+`0018` seeds: NIFTY, BANKNIFTY, SENSEX -- see the Futures & Options
+section's "Index F&O" paragraph for why) without a second flag, and
+leaves room for a future `Fund` category with no code change to the view
+itself. `looks_like_etf_name`'s classifier is unchanged -- it only ever
+produces `ETF`, never `Fund` -- so LIQUIDCASE/GILT5YBEES/LTGILTCASE (debt/
+gilt funds, not equity ETFs) stay classified as `ETF` for now rather than
+being split out; `Fund` is reserved for a future pass at that distinction.
 
 The hard part was classification, not the column. yfinance's own
 `quoteType` field is **unreliable for Indian-listed ETFs**: checked live
@@ -979,14 +1024,16 @@ as before -- classification is entirely the caller's job, applied to the
 `Company`/`NewCompany` objects just before the upsert. **One known gap**:
 `fo-refresh/index.ts` also registers new portfolio symbols (for F&O
 universe widening) but has no Yahoo Finance access at all, so it can't
-classify there -- a symbol this path registers first stays `is_etf =
-false` until one of the other three paths next sees it. Accepted as
-narrow in practice: real ETFs/funds don't have listed derivatives, so
-this path being the *first* to register one would be unusual. Migration
-`0015` also backfills the four ETFs already tracked at the time it was
-written, verified via a live yfinance `longName` check against every
-non-Nifty50 symbol tracked at the time (all four straightforwardly
-matched; HINDZINC/INDUSINDBK/INDHOTEL/VAML correctly did not).
+classify there -- a symbol this path registers first stays
+`company_type = 'Equity'` until one of the other three paths next sees
+it. Accepted as narrow in practice: real ETFs/funds don't have listed
+derivatives, so this path being the *first* to register one would be
+unusual. Migration `0015` also backfills the four ETFs already tracked
+at the time it was written, verified via a live yfinance `longName`
+check against every non-Nifty50 symbol tracked at the time (all four
+straightforwardly matched; HINDZINC/INDUSINDBK/INDHOTEL/VAML correctly
+did not) -- `0018` carries that same data forward (`ETF` rows stay
+`ETF`) as part of its `is_etf` → `company_type` backfill.
 
 Once the fallback could silently show a stale price, the Dashboard
 needed a way to say so: `pages/1_Dashboard.py` computes
@@ -1112,12 +1159,13 @@ symbol-override form here, since a position's contract identity (unlike
 a holding's free-text company name) is either decodable from the string
 or it isn't; there's nothing for the user to correct. `qty` keeps its
 broker-reported sign (negative = short). Deliberately no FK to
-`option_contracts` — index derivatives (NIFTY, BANKNIFTY, SENSEX, ...)
-are explicitly out of scope for this app's own F&O ingestion
+`option_contracts` — even with `0018`'s Index-option widening
 (`src/data_providers/nse_fo_provider.py`'s `_FUTURES_TYPES`/`_OPTION_TYPES`
-keep only `STF`/`STO`, i.e. stock derivatives — `IDF`/`IDO` index rows
-are skipped), so a decoded position's contract may never exist in that
-table at all. `pages/6_Portfolio.py` degrades gracefully (an `st.info`
+now keep `STF`/`STO`/`IDO`, still skipping index futures `IDF`), SENSEX
+(BSE-listed -- no BSE data source), a strike/expiry this app hasn't
+ingested yet, or a plain CSV-parsing gap can all leave a decoded
+position's contract missing from that table, so a hard FK would be too
+strict. `pages/6_Portfolio.py` degrades gracefully (an `st.info`
 pointing at the migration, no `st.stop()`) if `portfolio_positions`
 doesn't exist yet — Holdings keeps working either way, unlike the
 holdings-table load itself, which does `st.stop()` if `0012`/`0014`
@@ -1178,14 +1226,17 @@ instead.
 **LTP itself, unlike holdings, is trusted from the uploaded file** rather
 than fetched live. Holdings can always be revalued live because every
 tracked equity symbol has a `daily_screener_snapshots` row from this
-app's own refresh pipeline; there's no equivalent live source for
-options, and — as noted above — index F&O (a large share of any real
-options book: NIFTY/BANKNIFTY/SENSEX) is architecturally out of scope
-for `nse_fo_provider.py` regardless of whether the underlying is
-otherwise tracked, so "wait for the next refresh" (the holdings playbook
-for an unpriced symbol) would never resolve for these. The file's own
-LTP is the only live-like number available, so it's used as-is; only the
-*derived* P&L/P&L% are recomputed, per the point above.
+app's own refresh pipeline; there's no equivalent *live* source for
+options at all -- `nse_fo_provider.py` is EOD-only for every underlying,
+index or stock (see "This is end-of-day data" above) -- so "wait for the
+next refresh" (the holdings playbook for an unpriced symbol) never
+produces a live intraday quote for a CSV-uploaded position the way it
+does for a holding. The file's own LTP is the only live-like number
+available for the CSV-upload path, so it's used as-is; only the
+*derived* P&L/P&L% are recomputed, per the point above. (A Dhan API-synced
+position is different -- see "Connect Dhan account" below, which can
+fall back to this app's own EOD F&O data, including index options as of
+migration `0018`, when Dhan's own live quote is unavailable.)
 
 **Connect Dhan account (`broker_connections`, migration `0017`)** — an
 alternative to CSV upload, Dhan only. `pages/6_Portfolio.py` offers a
@@ -1244,9 +1295,14 @@ which fills any still-missing `ltp` from this app's own F&O data
 `fo_repo.get_option_chain`) — matched on `(symbol, expiry_date,
 strike_price, option_type)`, the previous trading day's close rather than
 a live tick, but real data instead of a blanket N/A. Verified against a
-real synced account: 21 of 27 positions resolved this way; the 6 misses
-were all NIFTY index options, which this app tracks no F&O data for at
-all regardless of Dhan subscription level.
+real synced account (before `0018`'s Index widening): 21 of 27 positions
+resolved this way; the 6 misses were all NIFTY index options, which this
+app tracked no F&O data for at all at the time. `0018` closes most of
+that gap -- NIFTY/BANKNIFTY option chains are now ingested too (see the
+Futures & Options section's "Index F&O" paragraph) -- so those same 6
+positions resolve once `fetch_fo_data.py` has actually run against the
+widened universe; only a SENSEX position or a strike/expiry genuinely
+outside the tracked chain would still fall back to N/A.
 
 **Security trade-off, stated in the UI itself, not just here:** the
 access token can also place trades — Dhan has no read-only scope for an

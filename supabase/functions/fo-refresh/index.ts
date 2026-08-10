@@ -142,6 +142,18 @@ Deno.serve(async (req: Request) => {
   // deno-lint-ignore no-explicit-any
   const universe = new Set<string>(constituents.map((c: any) => c.symbol as string));
 
+  // Index rows (NIFTY, BANKNIFTY, SENSEX -- migration 0018) so index
+  // options actually get ingested, not just stock options. parseFoBhavcopy
+  // only keeps IDO (index option) rows for symbols in this universe --
+  // SENSEX is seeded too but is BSE-listed, so it will never actually
+  // match a row in NSE's bhavcopy.
+  const { data: indexCompanies } = await serviceClient
+    .from("companies")
+    .select("symbol")
+    .eq("company_type", "Index");
+  // deno-lint-ignore no-explicit-any
+  for (const c of (indexCompanies ?? []) as any[]) universe.add(c.symbol as string);
+
   // Also fetch F&O for any symbol referenced by uploaded portfolios (ETFs,
   // non-Nifty50 stocks) that has derivatives -- same widening
   // manual-refresh already does for cash-market data, applied here so a
@@ -168,12 +180,12 @@ Deno.serve(async (req: Request) => {
         // Unlike manual-refresh/index.ts, this function has no Yahoo
         // Finance access (it only ever talks to NSE's F&O bhavcopy), so
         // it can't classify a brand-new symbol as an ETF/fund here --
-        // every row registered by this path stays `is_etf = false`
+        // every row registered by this path stays `company_type = 'Equity'`
         // (the column's own default) until manual-refresh or
         // scripts/run_refresh.py/fetch_fo_data.py next sees it. In
         // practice this is a narrow gap: real ETFs/funds don't have
         // listed derivatives, so this path registering one first (before
-        // either of those) would be unusual. See migration 0015 and
+        // either of those) would be unusual. See migration 0018 and
         // src/services/portfolio_service.py's looksLikeEtfName()
         // docstring for the full story.
         await serviceClient

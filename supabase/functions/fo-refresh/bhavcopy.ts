@@ -194,8 +194,12 @@ export async function findLatestAvailableBhavcopy(
 
 // --- CSV parsing -----------------------------------------------------
 
+// Mirrors src/data_providers/nse_fo_provider.py's _FUTURES_TYPES/
+// _OPTION_TYPES -- IDO (index option) is included so NIFTY/BANKNIFTY
+// (migration 0018's Index company_type rows) get ingested; IDF (index
+// future) stays out of scope, see that Python module's file header.
 const FUTURES_TYPES = new Set(["STF"]);
-const OPTION_TYPES = new Set(["STO"]);
+const OPTION_TYPES = new Set(["STO", "IDO"]);
 
 export interface FuturesContractRow {
   symbol: string;
@@ -259,11 +263,12 @@ function parseIntField(v: string | undefined): number | null {
   return n === null ? null : Math.round(n);
 }
 
-/** Parses bhavcopy CSV text into the four F&O table shapes. Keeps only
- * stock futures (STF) and stock options (STO) for symbols in `universe`;
- * ignores index derivatives (IDF/IDO) and everything outside the universe.
- * No quoted/embedded-comma fields in this file format, so a plain split
- * is sufficient (mirrors csv.DictReader's simplicity in the Python port).
+/** Parses bhavcopy CSV text into the four F&O table shapes. Keeps stock
+ * futures (STF), stock options (STO), and index options (IDO) for symbols
+ * in `universe`; ignores index futures (IDF) and everything outside the
+ * universe. No quoted/embedded-comma fields in this file format, so a
+ * plain split is sufficient (mirrors csv.DictReader's simplicity in the
+ * Python port).
  */
 export function parseFoBhavcopy(csvText: string, universe: Set<string>): ParsedBhavcopy {
   const lines = csvText.split(/\r?\n/).filter((l) => l.length > 0);

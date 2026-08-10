@@ -11,10 +11,15 @@
 // other -- same accepted tradeoff as dashboardMetrics.ts /
 // calculations.ts (see docs/CODEBASE_GUIDE.md).
 
+// Mirrors src.models.enums.CompanyType (migration 0018) -- the string
+// values are written straight into the `company_type` column, which has a
+// check constraint on exactly these four values.
+export type CompanyType = "Equity" | "ETF" | "Index" | "Fund";
+
 export interface NewCompany {
   symbol: string;
   name: string;
-  isEtf: boolean;
+  companyType: CompanyType;
 }
 
 export function resolveTrackedSymbols(
@@ -28,7 +33,7 @@ export function resolveTrackedSymbols(
   return newSymbols.map((symbol) => ({
     symbol,
     name: rawNameBySymbol[symbol] ?? symbol,
-    isEtf: false,
+    companyType: "Equity",
   }));
 }
 
@@ -39,9 +44,9 @@ export function resolveTrackedSymbols(
 // Indian-listed ETFs (verified live: it returns "EQUITY" for every
 // ETF/fund this app tracks). The caller (index.ts) fetches each new
 // symbol's real display name via yahoo.ts's fetchDisplayName() and sets
-// `isEtf` on the NewCompany objects above before upserting -- this stays
-// a pure string check, mirroring resolveTrackedSymbols() staying a pure,
-// network-free diff.
+// `companyType` on the NewCompany objects above before upserting -- this
+// stays a pure string check, mirroring resolveTrackedSymbols() staying a
+// pure, network-free diff.
 export function looksLikeEtfName(name: string): boolean {
   return name.toLowerCase().includes("etf");
 }

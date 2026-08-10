@@ -158,7 +158,7 @@ def fetch_display_name(symbol: str) -> str | None:
     Dhan/manual/mock providers have no equivalent). Deliberately swallows
     every failure and returns None rather than raising -- this is a
     best-effort classification, not a critical-path fetch worth
-    retrying; a symbol whose lookup fails just stays `is_etf=False`."""
+    retrying; a symbol whose lookup fails just stays `company_type=Equity`."""
     try:
         _throttle()
         info = yf.Ticker(_yf_symbol(symbol)).get_info()

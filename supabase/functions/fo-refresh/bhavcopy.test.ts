@@ -213,15 +213,19 @@ const ROWS = [
   "2026-07-16,2026-07-16,FO,NSE,STF,140005,,TCS,,2026-07-28,2026-07-28,,," +
     "TCS26JULFUT,3800.00,3820.00,3790.00,3805.00,3805.00,3810.00,3802.00,3805.00," +
     "8000000,10000,5000,1900000.00,3000,F1,175,,,,,",
+  // NIFTY 25000 CE (IDO) -- an index option, kept (unlike IDF above)
+  "2026-07-16,2026-07-16,FO,NSE,IDO,140006,,NIFTY,,2026-07-30,2026-07-30,25000.00,CE," +
+    "NIFTY26JUL25000CE,120.00,140.00,110.00,130.00,128.00,125.00,25040.00,130.00," +
+    "800000,20000,45000,3500000.00,12000,F1,65,,,,,",
 ];
 const SAMPLE_CSV = HEADER + "\n" + ROWS.join("\n") + "\n";
 
-Deno.test("parseFoBhavcopy - splits futures and options, ignores index derivatives", () => {
-  const book = parseFoBhavcopy(SAMPLE_CSV, new Set(["RELIANCE", "TCS"]));
+Deno.test("parseFoBhavcopy - splits futures and options, ignores index futures but keeps index options", () => {
+  const book = parseFoBhavcopy(SAMPLE_CSV, new Set(["RELIANCE", "TCS", "NIFTY"]));
   assertEquals(book.futuresPrices.length, 2);
-  assertEquals(book.optionPrices.length, 2);
+  assertEquals(book.optionPrices.length, 3);
   assertEquals(new Set(book.futuresPrices.map((p) => p.symbol)), new Set(["RELIANCE", "TCS"]));
-  assertEquals(new Set(book.optionPrices.map((p) => p.symbol)), new Set(["RELIANCE"]));
+  assertEquals(new Set(book.optionPrices.map((p) => p.symbol)), new Set(["RELIANCE", "NIFTY"]));
 });
 
 Deno.test("parseFoBhavcopy - universe filter excludes symbols outside it", () => {

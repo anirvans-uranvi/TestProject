@@ -21,7 +21,7 @@ Deno.test("resolveTrackedSymbols: returns only symbols not already known", () =>
 
 Deno.test("resolveTrackedSymbols: falls back to the symbol itself when no raw name is known", () => {
   const result = resolveTrackedSymbols(["NIFTYBEES"], new Set(), {});
-  assertEquals(result, [{ symbol: "NIFTYBEES", name: "NIFTYBEES", isEtf: false }]);
+  assertEquals(result, [{ symbol: "NIFTYBEES", name: "NIFTYBEES", companyType: "Equity" }]);
 });
 
 Deno.test("resolveTrackedSymbols: no new companies when everything is already known", () => {

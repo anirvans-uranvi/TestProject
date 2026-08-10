@@ -542,7 +542,7 @@ def resolve_tracked_symbols(
     constituent -- but (since migration 0013) they DO still show up on
     the Dashboard's own screener for the tracking user, via
     latest_screener_view's own portfolio_holdings widening. Returns
-    `is_etf=False` (the model default) for every row; the caller is
+    `company_type=Equity` (the model default) for every row; the caller is
     responsible for classifying real ETFs/funds via
     looks_like_etf_name() before upserting -- this stays a pure,
     network-free diff on purpose (see its own unit tests)."""
