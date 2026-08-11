@@ -1,6 +1,9 @@
 from datetime import date
 
+import pytest
+
 from src.data_providers import bse_fo_provider
+from src.data_providers.base import ProviderError
 from src.models.enums import OptionType
 
 # Same UDiFF schema as NSE's bhavcopy (tests/test_nse_fo_provider.py exercises
@@ -65,3 +68,52 @@ class TestParseFoBhavcopy:
         book = bse_fo_provider.parse_fo_bhavcopy(SAMPLE_CSV, universe={"BANKEX"})
         assert {p.symbol for p in book.option_prices} == {"BANKEX"}
         assert book.futures_prices == []
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int, content: bytes):
+        self.status_code = status_code
+        self.content = content
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class _FakeSession:
+    def __init__(self, response: _FakeResponse):
+        self._response = response
+
+    def get(self, url, headers=None, timeout=None):
+        return self._response
+
+
+class TestDownloadBhavcopyCsv:
+    def test_404_returns_none(self):
+        session = _FakeSession(_FakeResponse(404, b""))
+        assert bse_fo_provider.download_bhavcopy_csv(date(2026, 8, 11), session=session) is None
+
+    def test_near_empty_body_returns_none(self):
+        session = _FakeSession(_FakeResponse(200, b"too small"))
+        assert bse_fo_provider.download_bhavcopy_csv(date(2026, 8, 11), session=session) is None
+
+    def test_real_csv_is_returned(self):
+        content = SAMPLE_CSV.encode("utf-8") + b"," * 500  # pad past the 500-byte guard
+        session = _FakeSession(_FakeResponse(200, content))
+        result = bse_fo_provider.download_bhavcopy_csv(date(2026, 8, 11), session=session)
+        assert result is not None
+        assert result.startswith("TradDt,")
+
+    def test_non_csv_body_past_the_size_guard_raises_instead_of_silently_matching_nothing(self):
+        # Real bug this guards against: BSE's bot-detection can serve a
+        # >500-byte, non-CSV response to a blocked network origin -- it
+        # decodes and "parses" fine, it just matches zero universe
+        # symbols, so a caller previously saw a silent false-success
+        # ("0 futures + 0 option rows") instead of a diagnostic error.
+        # Confirmed live: the identical URL/date returned a real,
+        # fully-populated bhavcopy from a normal dev machine at the same
+        # time a deployed Edge Function reported 0 rows for it.
+        blocked_page = "<html><body>Access denied by security policy</body></html>" + " " * 500
+        session = _FakeSession(_FakeResponse(200, blocked_page.encode("utf-8")))
+        with pytest.raises(ProviderError, match="did not return a bhavcopy CSV"):
+            bse_fo_provider.download_bhavcopy_csv(date(2026, 8, 11), session=session)

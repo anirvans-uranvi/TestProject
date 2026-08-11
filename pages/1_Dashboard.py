@@ -41,8 +41,8 @@ def _load_last_fetch(_client, _cache_bust: int):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def _load_latest_fo_trade_date(_client, _cache_bust: int):
-    return fo_repo.get_latest_fo_trade_date(_client)
+def _load_latest_fo_trade_date(_client, _cache_bust: int, source_prefix: str | None = None):
+    return fo_repo.get_latest_fo_trade_date(_client, source_prefix=source_prefix)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -80,10 +80,12 @@ header_col1, header_col2 = st.columns(2)
 last_fetch = _load_last_fetch(client, st.session_state["dashboard_cache_bust"])
 last_fetch_at = last_fetch.finished_at if last_fetch else None
 try:
-    latest_fo_trade_date = _load_latest_fo_trade_date(client, st.session_state["dashboard_cache_bust"])
+    latest_nse_fo_trade_date = _load_latest_fo_trade_date(client, st.session_state["dashboard_cache_bust"], "nse_fo_bhavcopy")
+    latest_bse_fo_trade_date = _load_latest_fo_trade_date(client, st.session_state["dashboard_cache_bust"], "bse_fo_bhavcopy")
 except APIError:
     # F&O tables (migration 0007) not applied yet -- degrade to "--" rather than crashing the Dashboard.
-    latest_fo_trade_date = None
+    latest_nse_fo_trade_date = None
+    latest_bse_fo_trade_date = None
 market_state = get_market_state(
     now=now_ist(),
     last_successful_fetch_at=last_fetch_at,
@@ -91,7 +93,8 @@ market_state = get_market_state(
 )
 with header_col1:
     st.markdown(f"**Market state:** {market_state_label(market_state)}")
-    st.markdown(f"**Latest Bhavcopy:** {latest_fo_trade_date.strftime('%d %b %Y') if latest_fo_trade_date else '—'}")
+    st.markdown(f"**Latest NSE Bhavcopy:** {latest_nse_fo_trade_date.strftime('%d %b %Y') if latest_nse_fo_trade_date else '—'}")
+    st.markdown(f"**Latest BSE Bhavcopy:** {latest_bse_fo_trade_date.strftime('%d %b %Y') if latest_bse_fo_trade_date else '—'}")
 with header_col2:
     if last_fetch_at is None:
         st.markdown("**Data freshness:** ⚪ no successful refresh yet")

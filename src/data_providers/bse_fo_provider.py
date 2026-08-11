@@ -26,6 +26,7 @@ from datetime import date, timedelta
 
 import requests
 
+from src.data_providers.base import ProviderError
 from src.data_providers.udiff_bhavcopy import FOBhavcopy, parse_udiff_bhavcopy
 
 SOURCE_NAME = "bse_fo_bhavcopy"
@@ -91,7 +92,23 @@ def download_bhavcopy_csv(
     # body) with a 200, same reasoning as NSE's zip-size guard.
     if len(resp.content) < 500:
         return None
-    return resp.content.decode("utf-8", errors="replace")
+    text = resp.content.decode("utf-8", errors="replace")
+    # A real bhavcopy always starts with this exact header row. **A real
+    # bug this caught**: BSE's bot-detection can serve a >500-byte
+    # response to a non-browser network origin (confirmed live from
+    # Supabase's Edge Runtime -- see bhavcopy.ts's identical check) that
+    # isn't the real CSV -- the bad body still parses cleanly, it just
+    # matches nothing in `universe`, so a caller sees a silent "0 rows"
+    # success instead of a diagnostic error. BSE has no zip/content-type
+    # signal to check (always served as application/octet-stream, real or
+    # not), so the header text itself is the only available signal.
+    if not text.startswith("TradDt,"):
+        snippet = " ".join(text[:200].split())
+        raise ProviderError(
+            f"BSE did not return a bhavcopy CSV for {trade_date} (likely blocked the request) -- "
+            f"HTTP {resp.status_code}, {len(resp.content)} bytes. Body starts: {snippet!r}"
+        )
+    return text
 
 
 def fetch_fo_bhavcopy(

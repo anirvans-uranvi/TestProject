@@ -68,13 +68,22 @@ class TestPaginate:
 
 
 class _FakeLatestDateTable:
-    """Mimics .select().order(...).limit(...).execute() -- just enough
-    for get_latest_fo_trade_date, which doesn't filter/paginate."""
+    """Mimics .select().like(...).order(...).limit(...).execute() -- just
+    enough for get_latest_fo_trade_date, which doesn't paginate. `.like()`
+    actually filters (unlike the other no-op chain methods) so tests can
+    confirm source_prefix scoping works, not just that the call doesn't
+    crash."""
 
     def __init__(self, rows: list[dict]):
         self.rows = rows
 
     def select(self, *args, **kwargs):
+        return self
+
+    def like(self, column: str, pattern: str):
+        assert pattern.endswith("%")
+        prefix = pattern[:-1]
+        self.rows = [r for r in self.rows if str(r.get(column, "")).startswith(prefix)]
         return self
 
     def order(self, *args, **kwargs):
@@ -113,3 +122,24 @@ class TestGetLatestFoTradeDate:
     def test_no_rows_returns_none(self):
         client = _FakeLatestDateClient([])
         assert fo_repo.get_latest_fo_trade_date(client) is None
+
+    def test_source_prefix_filters_to_that_exchange_only(self):
+        # Real bug this guards against: NSE and BSE publish on the same
+        # trading days, so an unscoped query can't tell you which
+        # exchange's file is actually newest -- only the newest of either.
+        client = _FakeLatestDateClient([
+            {"trade_date": "2026-08-10", "source": "nse_fo_bhavcopy"},
+            {"trade_date": "2026-08-11", "source": "nse_fo_bhavcopy_edge"},
+            {"trade_date": "2026-08-09", "source": "bse_fo_bhavcopy"},
+        ])
+        result = fo_repo.get_latest_fo_trade_date(client, source_prefix="bse_fo_bhavcopy")
+        assert result == date(2026, 8, 9)
+
+    def test_source_prefix_covers_both_cron_and_edge_rows_for_the_same_exchange(self):
+        client = _FakeLatestDateClient([{"trade_date": "2026-08-11", "source": "nse_fo_bhavcopy_edge"}])
+        result = fo_repo.get_latest_fo_trade_date(client, source_prefix="nse_fo_bhavcopy")
+        assert result == date(2026, 8, 11)
+
+    def test_no_source_prefix_ignores_source_entirely(self):
+        client = _FakeLatestDateClient([{"trade_date": "2026-08-11", "source": "bse_fo_bhavcopy_edge"}])
+        assert fo_repo.get_latest_fo_trade_date(client) == date(2026, 8, 11)

@@ -172,7 +172,27 @@ export async function fetchBhavcopyText(isoDate: string, exchange: Exchange = "N
     // or a small HTML/PDF error body), mirroring
     // src/data_providers/bse_fo_provider.py's Python equivalent.
     if (buf.length < 500) return null;
-    return new TextDecoder("utf-8").decode(buf);
+    const text = new TextDecoder("utf-8").decode(buf);
+    // A real bhavcopy always starts with this exact header row. **A real
+    // bug this caught**: BSE's bot-detection can serve a >500-byte
+    // response to Supabase's Edge Runtime network origin that isn't the
+    // real CSV -- confirmed live: the identical URL/date returned a
+    // genuine, fully-populated bhavcopy from a normal dev machine at the
+    // same time this function reported "0 futures + 0 option rows" as a
+    // false success (the bad body parsed cleanly, it just matched
+    // nothing in `universe`). Exactly the same failure shape NSE hit
+    // before its own content-type check was added -- BSE has no
+    // content-type signal to check (it's always served as
+    // application/octet-stream, real or not), so the header text itself
+    // is the only available signal.
+    if (!text.startsWith("TradDt,")) {
+      const snippet = text.slice(0, 200).replace(/\s+/g, " ").trim();
+      throw new Error(
+        `BSE did not return a bhavcopy CSV for ${isoDate} (likely blocked the request) -- ` +
+          `HTTP ${resp.status}, content-type "${contentType}", ${buf.length} bytes. Body starts: "${snippet}"`,
+      );
+    }
+    return text;
   }
 
   if (buf.length < 1000) return null;

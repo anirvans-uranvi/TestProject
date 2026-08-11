@@ -179,6 +179,56 @@ Deno.test("fetchBhavcopyText - passes a bounded AbortSignal to fetch (so a hang 
   }
 });
 
+Deno.test("fetchBhavcopyText - BSE: a real-looking CSV body is returned as-is", async () => {
+  const originalFetch = globalThis.fetch;
+  const realCsv = "TradDt,BizDt,Sgmt\n2026-08-11,2026-08-11,FO\n" + "x".repeat(500);
+  globalThis.fetch = (() => Promise.resolve(new Response(realCsv, { status: 200 }))) as typeof fetch;
+  try {
+    const result = await fetchBhavcopyText("2026-08-11", "BSE");
+    assertEquals(result, realCsv);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("fetchBhavcopyText - BSE: a non-CSV body past the size guard throws instead of silently matching nothing", async () => {
+  // Real bug this guards against: BSE's bot-detection can serve a
+  // >500-byte, non-CSV response to a blocked network origin (confirmed
+  // live: the identical URL/date returned a real, fully-populated
+  // bhavcopy from a normal dev machine at the same time a deployed Edge
+  // Function reported "0 futures + 0 option rows" as a false success --
+  // the blocked body decoded and "parsed" fine, it just matched nothing
+  // in `universe`). BSE has no zip/content-type signal to check (always
+  // served as application/octet-stream, real or not), so the header text
+  // itself is the only available signal.
+  const originalFetch = globalThis.fetch;
+  const blockedPage = "<html><body>Access denied</body></html>" + " ".repeat(500);
+  globalThis.fetch = (() => Promise.resolve(new Response(blockedPage, { status: 200 }))) as typeof fetch;
+  try {
+    let message = "";
+    try {
+      await fetchBhavcopyText("2026-08-11", "BSE");
+      throw new Error("expected fetchBhavcopyText to reject");
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    assert(message.includes("did not return a bhavcopy CSV"), `unexpected error message: ${message}`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("fetchBhavcopyText - BSE: a near-empty body returns null (not a throw)", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (() => Promise.resolve(new Response("too small", { status: 200 }))) as typeof fetch;
+  try {
+    const result = await fetchBhavcopyText("2026-08-11", "BSE");
+    assertEquals(result, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 // --- URL building --------------------------------------------------------
 
 Deno.test("bhavcopyUrl - formats YYYYMMDD and uses the nsearchives host for NSE (default)", () => {

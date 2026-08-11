@@ -109,16 +109,28 @@ def list_fo_symbols(client: Client) -> list[str]:
     return sorted({r["symbol"] for r in (resp.data or [])})
 
 
-def get_latest_fo_trade_date(client: Client) -> date | None:
-    """The most recent NSE F&O bhavcopy trade_date actually loaded --
-    distinct from `fetch_log_repo`'s `finished_at` (when the ingestion job
-    last *ran*), since a bhavcopy is published for a specific trading day
-    that can lag the run itself (e.g. a run on a non-trading day finds
-    nothing new and reuses the prior session's file). Futures and options
-    are always ingested together from the same bhavcopy file, so either
+def get_latest_fo_trade_date(client: Client, source_prefix: str | None = None) -> date | None:
+    """The most recent F&O bhavcopy trade_date actually loaded -- distinct
+    from `fetch_log_repo`'s `finished_at` (when the ingestion job last
+    *ran*), since a bhavcopy is published for a specific trading day that
+    can lag the run itself (e.g. a run on a non-trading day finds nothing
+    new and reuses the prior session's file). Futures and options are
+    always ingested together from the same bhavcopy file, so either
     table's max trade_date is equivalent -- futures_daily_prices is
-    smaller and queried here for that reason."""
-    resp = client.table("futures_daily_prices").select("trade_date").order("trade_date", desc=True).limit(1).execute()
+    smaller and queried here for that reason.
+
+    `source_prefix` narrows to one exchange (`"nse_fo_bhavcopy"` /
+    `"bse_fo_bhavcopy"`, matching both that exchange's cron/backfill rows
+    and its `..._edge`-suffixed on-demand-refresh rows) -- same `source`-
+    prefix scoping fo-refresh's Edge Function uses for its "already
+    loaded" watermark, and for the same reason: NSE and BSE publish on
+    the same trading days, so an unscoped query can't tell you which
+    exchange's file is actually the most recent, only the newest of
+    either."""
+    query = client.table("futures_daily_prices").select("trade_date")
+    if source_prefix is not None:
+        query = query.like("source", f"{source_prefix}%")
+    resp = query.order("trade_date", desc=True).limit(1).execute()
     rows = resp.data or []
     if not rows:
         return None
