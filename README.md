@@ -22,7 +22,7 @@ operations; that doc covers the code itself.
 - [Calculation logic](#calculation-logic)
 - [Running tests](#running-tests)
 - [Scheduled refresh](#scheduled-refresh)
-- [On-demand refresh (Dashboard refresh buttons)](#on-demand-refresh-dashboard-refresh-buttons)
+- [On-demand refresh (the refresh bar)](#on-demand-refresh-the-refresh-bar)
 - [Futures & Options (F&O) data](#futures--options-fo-data)
 - [My Portfolio](#my-portfolio)
 - [Docker](#docker)
@@ -52,7 +52,7 @@ src/
 scripts/
   fetch_nifty50_constituents.py   Refresh companies/nifty50_constituents
   seed_mock_data.py                Backfill synthetic prices/fundamentals/dividends/snapshots + mock F&O
-  fetch_fo_data.py                  Backfill NSE F&O bhavcopy (futures + options) into Supabase
+  fetch_fo_data.py                  Backfill NSE or BSE F&O bhavcopy (--exchange nse|bse) into Supabase
   cleanup_mock_data.py               Delete leftover source='mock' rows (dry-run by default)
   run_refresh.py                    CLI entrypoint for cron/GitHub Actions/APScheduler
   import_screener_csv.py            Import a screener.in CSV export as PE/PEG/dividend-yield data
@@ -60,7 +60,7 @@ supabase/
   migrations/               Schema, RLS policies, views/functions
   seed.sql                   Current Nifty 50 constituents + companies (reference data only)
   functions/manual-refresh/  Edge Function behind the "Stock Data Refresh" button
-  functions/fo-refresh/       Edge Function behind the "F&O Data Refresh" button
+  functions/fo-refresh/       Edge Function behind "NSE/BSE F&O Data Refresh" (one function, exchange param)
 tests/                     Pytest suite (calculations, providers, services)
 ```
 
@@ -359,23 +359,33 @@ retry transient provider failures with exponential backoff
 (`tenacity`, in `src/services/refresh_service.py` and
 `src/data_providers/dhan_provider.py`).
 
-## On-demand refresh (Dashboard refresh buttons)
+## On-demand refresh (the refresh bar)
 
 The scheduled mechanisms above run independently of the Streamlit app.
-The Dashboard has two on-demand buttons that do an actual live fetch on
-click, each implemented as a **Supabase Edge Function** rather than in
-Streamlit page code -- a real fetch-and-write needs the Supabase
-service-role key (bypasses RLS), which must never live in Streamlit page
-code since Streamlit Cloud runs that code in every logged-in user's own
-browser session. Each Edge Function holds the key safely as a
-Supabase-injected environment variable (runs server-side inside
-Supabase's infrastructure); Streamlit only ever sends the *calling user's
-own* access token (`src/services/edge_refresh.py`), never any secret.
+Three on-demand buttons do an actual live fetch on click, each
+implemented as a **Supabase Edge Function** rather than in Streamlit page
+code -- a real fetch-and-write needs the Supabase service-role key
+(bypasses RLS), which must never live in Streamlit page code since
+Streamlit Cloud runs that code in every logged-in user's own browser
+session. Each Edge Function holds the key safely as a Supabase-injected
+environment variable (runs server-side inside Supabase's infrastructure);
+Streamlit only ever sends the *calling user's own* access token
+(`src/services/edge_refresh.py`), never any secret.
+
+`src/utils/refresh_bar.py`'s `render_global_refresh_bar()` renders all
+three at once, at the same spot on every page (right after the title and
+disclaimer) -- **Dashboard, Stock Detail, Options, My Portfolio, and
+Settings** -- so refreshing data never requires navigating back to one
+specific page. A click clears Streamlit's entire cache (`st.cache_data.clear()`)
+before rerunning, so every page's own cached loaders pick up the fresh
+data regardless of which page triggered the refresh.
 
 - **🔄 Stock Data Refresh** -- cash-market data (prices, dividends,
   fundamentals, screener recompute), via `supabase/functions/manual-refresh/`.
-- **📊 F&O Data Refresh** -- futures + options, via
-  `supabase/functions/fo-refresh/` (see below).
+- **📊 NSE F&O Data Refresh** / **📊 BSE F&O Data Refresh** -- futures +
+  options for each exchange, both via the same
+  `supabase/functions/fo-refresh/` (see below) -- one Edge Function,
+  parameterized by a POST body `{"exchange": "NSE" | "BSE"}`.
 
 It reimplements price/dividend/fundamentals fetching (via Yahoo Finance,
 unofficial endpoints, see [Limitations](#limitations)) and the
@@ -430,15 +440,20 @@ needed. No changes are required on the Streamlit side beyond having
 `SUPABASE_URL` set (already required for everything else) -- the
 function's URL is derived from it.
 
-### F&O Data Refresh button (`supabase/functions/fo-refresh/`)
+### F&O Data Refresh buttons (`supabase/functions/fo-refresh/`)
 
-The Dashboard's **📊 F&O Data Refresh** button checks whether NSE has
-published a newer F&O bhavcopy than what's already in Supabase
-(`max(trade_date)` in `futures_daily_prices`) and, only if so, downloads +
-ingests that one day -- so clicking it when nothing new is available is
-cheap (a handful of HTTP requests, no writes) and returns "Already up to
-date" instead of silently doing nothing or re-fetching data you already
-have.
+The **📊 NSE F&O Data Refresh** / **📊 BSE F&O Data Refresh** buttons both
+call the *same* Edge Function, `supabase/functions/fo-refresh/`, with a
+POST body of `{"exchange": "NSE"}` or `{"exchange": "BSE"}`
+(`src/services/edge_refresh.py::trigger_fo_refresh(access_token, exchange)`;
+omitting the body defaults to `"NSE"`, so any old caller keeps working).
+Each checks whether that exchange has published a newer F&O bhavcopy than
+what's already in Supabase for it (`max(trade_date)` in
+`futures_daily_prices`, scoped by a `source` prefix -- see below for why)
+and, only if so, downloads + ingests that one day -- so clicking either
+when nothing new is available is cheap (a handful of HTTP requests, no
+writes) and returns "Already up to date" instead of silently doing
+nothing or re-fetching data you already have.
 
 Deploy it the same way as `manual-refresh` (same CLI, same one-time
 `login`/`link` setup):
@@ -447,21 +462,32 @@ Deploy it the same way as `manual-refresh` (same CLI, same one-time
 supabase functions deploy fo-refresh
 ```
 
-It reimplements the bhavcopy zip download + parse **in TypeScript**
+It reimplements the bhavcopy download + parse **in TypeScript**
 (`supabase/functions/fo-refresh/bhavcopy.ts`) -- the same
 duplicated-business-logic tradeoff `manual-refresh` already accepts, for
-the same reason (a truly instant on-demand path). Since Deno's Edge
-Runtime has no zip library built in and pulling a third-party one felt
-like overkill for a single-entry archive, it reads the ZIP directly via
-the Central Directory record and the Web Streams API's native
-`DecompressionStream("deflate-raw")` -- no external dependency. Verified
-against a real, live NSE bhavcopy (not just a synthetic test fixture)
-before this was considered done; run `deno test
+the same reason (a truly instant on-demand path). NSE serves a zip;
+Deno's Edge Runtime has no zip library built in and pulling a third-party
+one felt like overkill for a single-entry archive, so it reads the ZIP
+directly via the Central Directory record and the Web Streams API's
+native `DecompressionStream("deflate-raw")` -- no external dependency.
+**BSE serves a plain CSV, no zip step at all** -- confirmed live, see
+`src/data_providers/bse_fo_provider.py`'s file header. Both exchanges
+verified against real, live bhavcopy data (not just synthetic test
+fixtures) before this was considered done; run `deno test
 supabase/functions/fo-refresh/bhavcopy.test.ts` to check it.
 
-Same 5-minute cross-user cooldown as `manual-refresh` (`provider_fetch_log`,
-`provider_name = 'fo_edge'`, `fetch_type = 'fo'` -- added to the allowed
-`fetch_type` values by migration `0008_add_fo_fetch_type.sql`).
+Same 5-minute cooldown as `manual-refresh`, but scoped **per exchange** --
+`provider_fetch_log`, `provider_name = 'fo_edge_nse'` or `'fo_edge_bse'`
+(renamed from the pre-multi-exchange `'fo_edge'`), `fetch_type = 'fo'`
+(added to the allowed `fetch_type` values by migration
+`0008_add_fo_fetch_type.sql`) -- so an NSE refresh and a BSE refresh never
+block each other. The "already loaded" watermark is scoped the same way,
+by a `source` prefix (`nse_fo_bhavcopy%`/`bse_fo_bhavcopy%`, covering both
+this Edge Function's own rows and `scripts/fetch_fo_data.py`'s cron/backfill
+rows for that exchange) -- **a real bug this fixed**: an exchange-agnostic
+watermark (comparing the newest `trade_date` across *any* source) would
+make a same-day BSE refresh think it's already up to date the moment an
+NSE refresh ran, since both exchanges publish on the same trading days.
 
 Also recomputes `dashboard_fo_metrics` as its last step whenever it
 actually ingests a newer bhavcopy (skipped on the "already up to date"
@@ -545,10 +571,10 @@ broken; otherwise already-expired contracts from those days can be left
 showing as open on the Options screen. See `docs/CODEBASE_GUIDE.md`'s
 Futures & Options section for the full incident this caused.
 
-Day-to-day, once the initial backfill is done, the Dashboard's **📊 F&O
-Data Refresh** button (see [On-demand refresh](#on-demand-refresh-dashboard-refresh-buttons)
-above) is the easier way to pick up each new trading day's bhavcopy --
-no terminal/service-role key needed, and it's a no-op if nothing new is
+Day-to-day, once the initial backfill is done, the **📊 NSE/BSE F&O Data
+Refresh** buttons (see [On-demand refresh](#on-demand-refresh-the-refresh-bar)
+above) are the easier way to pick up each new trading day's bhavcopy --
+no terminal/service-role key needed, and each is a no-op if nothing new is
 published yet.
 
 ## My Portfolio

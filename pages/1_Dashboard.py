@@ -8,15 +8,14 @@ from postgrest.exceptions import APIError
 
 from src.calculations.classification import criterion_fundamentals
 from src.config import get_settings
-from src.models.enums import CompanyType
 from src.models.user import SavedFilter
-from src.repositories import companies_repo, fetch_log_repo, fo_repo, settings_repo, snapshot_repo
-from src.services import edge_refresh
+from src.repositories import fetch_log_repo, fo_repo, settings_repo, snapshot_repo
 from src.services.market_calendar import get_market_state
 from src.services.threshold_override import apply_user_thresholds
 from src.utils.formatting import direction_arrow, format_inr, format_pct, pass_fail_icon
+from src.utils.refresh_bar import render_global_refresh_bar
 from src.utils.session import current_user_id, get_user_client_cached, require_login
-from src.utils.timezones import format_ist, now_ist
+from src.utils.timezones import now_ist
 from src.utils.ui import inject_global_styles, market_state_label, render_disclaimer, render_pill
 
 st.set_page_config(page_title="Dashboard | Nifty 50 Screener", page_icon="📊", layout="wide")
@@ -42,32 +41,8 @@ def _load_last_fetch(_client, _cache_bust: int):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def _load_last_fo_fetch(_client, _cache_bust: int):
-    return fetch_log_repo.get_last_successful_fetch(_client, "fo")
-
-
-@st.cache_data(ttl=60, show_spinner=False)
 def _load_latest_fo_trade_date(_client, _cache_bust: int):
     return fo_repo.get_latest_fo_trade_date(_client)
-
-
-@st.cache_data(ttl=60, show_spinner=False)
-def _load_universe_counts(_client, _cache_bust: int) -> tuple[int, int]:
-    """(stock_count, etf_count) across every symbol this app currently
-    tracks -- Nifty 50 constituents plus any portfolio-only symbol the
-    refresh pipeline has registered (see companies_repo.list_all_companies).
-    The refresh summary's own succeeded/total counts include ETFs/funds,
-    but the screener list below excludes them (migration 0018) -- so
-    "refreshed all N" and "N of N stocks" in the screener look mismatched
-    without this breakdown. Counted explicitly by company_type rather than
-    "everything that isn't a stock", since `companies` also holds Index
-    rows (NIFTY/BANKNIFTY/SENSEX, migration 0018) that were never part of
-    the price-refresh pipeline's own total and would otherwise inflate
-    stock_count."""
-    companies = companies_repo.list_all_companies(_client)
-    stock_count = sum(1 for c in companies if c.company_type == CompanyType.EQUITY)
-    etf_count = sum(1 for c in companies if c.company_type == CompanyType.ETF)
-    return stock_count, etf_count
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -98,14 +73,12 @@ st.caption(
 st.caption(
     f"Data sources — Stock prices: `{app_settings.market_data_provider}` · "
     f"Fundamentals (PE/PEG/dividends): `{app_settings.fundamentals_provider}` · "
-    "Options/F&O: NSE Bhavcopy (end-of-day)"
+    "Options/F&O: NSE + BSE Bhavcopy (end-of-day)"
 )
 
-header_col1, header_col2, header_col3, header_col4 = st.columns([2, 1, 1, 1])
+header_col1, header_col2 = st.columns(2)
 last_fetch = _load_last_fetch(client, st.session_state["dashboard_cache_bust"])
 last_fetch_at = last_fetch.finished_at if last_fetch else None
-last_fo_fetch = _load_last_fo_fetch(client, st.session_state["dashboard_cache_bust"])
-last_fo_fetch_at = last_fo_fetch.finished_at if last_fo_fetch else None
 try:
     latest_fo_trade_date = _load_latest_fo_trade_date(client, st.session_state["dashboard_cache_bust"])
 except APIError:
@@ -117,74 +90,17 @@ market_state = get_market_state(
     stale_threshold_minutes=user_settings.stale_data_threshold_minutes,
 )
 with header_col1:
-    st.markdown(f"**Last stock refresh:** {format_ist(last_fetch_at)}")
-    st.markdown(f"**Last F&O refresh:** {format_ist(last_fo_fetch_at)}")
     st.markdown(f"**Market state:** {market_state_label(market_state)}")
+    st.markdown(f"**Latest Bhavcopy:** {latest_fo_trade_date.strftime('%d %b %Y') if latest_fo_trade_date else '—'}")
 with header_col2:
     if last_fetch_at is None:
         st.markdown("**Data freshness:** ⚪ no successful refresh yet")
     else:
         age_min = (now_ist() - last_fetch_at.astimezone(now_ist().tzinfo)).total_seconds() / 60
         st.markdown(f"**Data freshness:** {age_min:.0f} min ago")
-    st.markdown(f"**Latest Bhavcopy:** {latest_fo_trade_date.strftime('%d %b %Y') if latest_fo_trade_date else '—'}")
-with header_col3:
-    if st.button("🔄 Stock Data Refresh", use_container_width=True):
-        with st.spinner("Refreshing live data from Yahoo Finance -- this can take up to a minute..."):
-            try:
-                summary = edge_refresh.trigger_manual_refresh(st.session_state["sb_access_token"])
-            except edge_refresh.ManualRefreshError as exc:
-                st.session_state["last_manual_refresh_summary"] = {"error": str(exc)}
-            else:
-                st.session_state["last_manual_refresh_summary"] = summary
-        st.session_state["dashboard_cache_bust"] += 1
-        st.cache_data.clear()
-        st.rerun()
-with header_col4:
-    if st.button("📊 F&O Data Refresh", use_container_width=True):
-        with st.spinner("Checking NSE for a newer F&O bhavcopy -- this can take up to a few minutes..."):
-            try:
-                fo_summary = edge_refresh.trigger_fo_refresh(st.session_state["sb_access_token"])
-            except edge_refresh.ManualRefreshError as exc:
-                st.session_state["last_fo_refresh_summary"] = {"error": str(exc)}
-            else:
-                st.session_state["last_fo_refresh_summary"] = fo_summary
-        st.session_state["dashboard_cache_bust"] += 1
-        st.cache_data.clear()
-        st.rerun()
-
-# Shown once, right after the rerun triggered by the buttons above (a
-# message set and then immediately st.rerun()-ed away would never
-# actually render, so this is stashed in session_state and displayed on
-# the next script run instead).
-if st.session_state.get("last_manual_refresh_summary"):
-    summary = st.session_state.pop("last_manual_refresh_summary")
-    if summary.get("error"):
-        st.error(summary["error"])
-    else:
-        stock_count, etf_count = _load_universe_counts(client, st.session_state["dashboard_cache_bust"])
-        breakdown = f" ({stock_count} stocks, {etf_count} ETFs/funds)" if etf_count else ""
-        if summary["failed"] == 0:
-            st.success(f"✅ Refreshed all {summary['succeeded']} symbols{breakdown}.")
-        else:
-            failed_symbols = ", ".join(f["symbol"] for f in summary["symbolsFailed"])
-            st.warning(
-                f"Refreshed {summary['succeeded']} of {summary['total']} symbols{breakdown} -- "
-                f"{summary['failed']} failed: {failed_symbols}"
-            )
-
-if st.session_state.get("last_fo_refresh_summary"):
-    fo_summary = st.session_state.pop("last_fo_refresh_summary")
-    if fo_summary.get("error"):
-        st.error(fo_summary["error"])
-    elif fo_summary.get("updated"):
-        st.success(
-            f"✅ Loaded F&O bhavcopy for {fo_summary['tradeDate']}: "
-            f"{fo_summary['futuresRows']} futures + {fo_summary['optionRows']} option rows."
-        )
-    else:
-        st.info(fo_summary.get("message", "F&O data is already up to date."))
 
 render_disclaimer()
+render_global_refresh_bar(client)
 
 rows = _load_screener_rows(client, st.session_state["dashboard_cache_bust"])
 rows = apply_user_thresholds(rows, user_settings)

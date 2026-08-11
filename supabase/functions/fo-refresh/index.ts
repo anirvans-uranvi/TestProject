@@ -1,16 +1,20 @@
-// F&O on-demand refresh, triggered from the Dashboard's "F&O Data
-// Refresh" button (src/services/edge_refresh.py::trigger_fo_refresh).
-// Checks whether NSE has published a newer F&O bhavcopy than what's
-// already loaded in Supabase, and only downloads + parses + ingests when
-// it has -- so repeated clicks on a day with no new data are cheap
-// (one HTTP HEAD-equivalent walk, no writes).
+// F&O on-demand refresh, triggered from the Dashboard's "NSE F&O Data
+// Refresh" / "BSE F&O Data Refresh" buttons
+// (src/services/edge_refresh.py::trigger_fo_refresh). One Edge Function
+// serves both exchanges, selected via the POST body's `exchange` field
+// ("NSE", the default, or "BSE") -- see bhavcopy.ts for the exchange-
+// specific URL/fetch mechanics both share. Checks whether that exchange
+// has published a newer F&O bhavcopy than what's already loaded in
+// Supabase, and only downloads + parses + ingests when it has -- so
+// repeated clicks on a day with no new data are cheap (one HTTP
+// HEAD-equivalent walk, no writes).
 //
 // Runs server-side for the same reason supabase/functions/manual-refresh
 // does: real writes need the service-role key (bypasses RLS), which must
 // never live in Streamlit page code, since Streamlit Cloud runs that code
 // in every logged-in user's own browser session.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { findLatestAvailableBhavcopy, parseFoBhavcopy, type ParsedBhavcopy } from "./bhavcopy.ts";
+import { findLatestAvailableBhavcopy, parseFoBhavcopy, sourceName, type Exchange, type ParsedBhavcopy } from "./bhavcopy.ts";
 import { recomputeDashboardMetrics } from "../_shared/dashboardMetrics.ts";
 import { resolveTrackedSymbols } from "../_shared/portfolioSymbols.ts";
 
@@ -21,8 +25,15 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const COOLDOWN_MINUTES = 5;
 const CHUNK_SIZE = 500;
 const MAX_LOOKBACK_DAYS = 7;
-const PROVIDER_NAME = "fo_edge";
 const FETCH_TYPE = "fo";
+
+// Renamed from the pre-multi-exchange "fo_edge" -- cooldown history is a
+// rolling 5-minute window, so this reset is harmless, and an explicit
+// per-exchange name is what makes the cooldown check below (which
+// filters on provider_name) correctly independent per exchange.
+function providerName(exchange: Exchange): string {
+  return exchange === "BSE" ? "fo_edge_bse" : "fo_edge_nse";
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -69,13 +80,14 @@ async function refreshOpenFlags(client: AnyClient, asOfIso: string): Promise<voi
 
 async function logFetch(
   client: AnyClient,
+  providerNameForLog: string,
   startedAt: Date,
   finishedAt: Date,
   status: "success" | "failure",
   errorMessage: string | null,
 ): Promise<void> {
   await client.from("provider_fetch_log").insert({
-    provider_name: PROVIDER_NAME,
+    provider_name: providerNameForLog,
     fetch_type: FETCH_TYPE,
     symbol: null,
     status,
@@ -97,6 +109,19 @@ Deno.serve(async (req: Request) => {
   }
   const accessToken = authHeader.slice("Bearer ".length);
 
+  // Which exchange to refresh -- defaults to NSE so a caller that sends
+  // no body (or an unrecognized value) keeps the pre-multi-exchange
+  // behavior rather than erroring.
+  let exchange: Exchange = "NSE";
+  try {
+    const body = await req.json();
+    if (body?.exchange === "BSE") exchange = "BSE";
+  } catch {
+    // No body / not JSON -- fine, stays NSE.
+  }
+  const providerNameForRun = providerName(exchange);
+  const sourceForRun = sourceName(exchange);
+
   const anonClient: AnyClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   const { data: userData, error: authError } = await anonClient.auth.getUser(accessToken);
   if (authError || !userData?.user) {
@@ -108,11 +133,13 @@ Deno.serve(async (req: Request) => {
 
   // Cooldown, same pattern/reasoning as manual-refresh: shared dataset
   // (not per-user), so gate on the shared last-success time to protect
-  // NSE from repeated-click hammering across all users.
+  // this exchange from repeated-click hammering across all users. Scoped
+  // to this exchange's own provider_name, so NSE and BSE refreshes never
+  // block each other.
   const { data: recentFetches } = await serviceClient
     .from("provider_fetch_log")
     .select("started_at")
-    .eq("provider_name", PROVIDER_NAME)
+    .eq("provider_name", providerNameForRun)
     .eq("fetch_type", FETCH_TYPE)
     .eq("status", "success")
     .order("started_at", { ascending: false })
@@ -142,11 +169,12 @@ Deno.serve(async (req: Request) => {
   // deno-lint-ignore no-explicit-any
   const universe = new Set<string>(constituents.map((c: any) => c.symbol as string));
 
-  // Index rows (NIFTY, BANKNIFTY, SENSEX -- migration 0018) so index
-  // options actually get ingested, not just stock options. parseFoBhavcopy
-  // only keeps IDO (index option) rows for symbols in this universe --
-  // SENSEX is seeded too but is BSE-listed, so it will never actually
-  // match a row in NSE's bhavcopy.
+  // Index rows (NIFTY, BANKNIFTY on NSE; SENSEX, BANKEX on BSE --
+  // migrations 0018/0019) so index options actually get ingested, not
+  // just stock options. parseFoBhavcopy only keeps IDO (index option)
+  // rows for symbols in this universe -- passed unfiltered to whichever
+  // exchange this run is for, since that exchange's own bhavcopy will
+  // only ever contain the symbols actually listed there.
   const { data: indexCompanies } = await serviceClient
     .from("companies")
     .select("symbol")
@@ -201,37 +229,46 @@ Deno.serve(async (req: Request) => {
     console.error("portfolio symbol tracking skipped:", err instanceof Error ? err.message : String(err));
   }
 
-  // "Already loaded" watermark: newest trade_date across any symbol's
-  // futures (options are always ingested in the same run, so they share
-  // this watermark).
+  // "Already loaded" watermark: newest trade_date across this exchange's
+  // own futures rows (options are always ingested in the same run, so
+  // they share this watermark). Scoped by a `source` prefix rather than
+  // an exact match so it covers both this Edge Function's own rows
+  // (`..._edge`) and scripts/fetch_fo_data.py's cron/backfill rows for
+  // the same exchange -- without this scoping, an NSE refresh today would
+  // make a same-day BSE refresh (or vice versa) wrongly think it's
+  // already up to date, since both exchanges publish on the same trading
+  // days and previously shared one exchange-agnostic watermark query.
+  const sourcePrefix = exchange === "BSE" ? "bse_fo_bhavcopy" : "nse_fo_bhavcopy";
   const { data: latestLoadedRows } = await serviceClient
     .from("futures_daily_prices")
     .select("trade_date")
+    .like("source", `${sourcePrefix}%`)
     .order("trade_date", { ascending: false })
     .limit(1);
   const latestLoaded: string | null = latestLoadedRows?.[0]?.trade_date ?? null;
 
   let found;
   try {
-    found = await findLatestAvailableBhavcopy(todayIsoInIst(), MAX_LOOKBACK_DAYS);
+    found = await findLatestAvailableBhavcopy(todayIsoInIst(), MAX_LOOKBACK_DAYS, exchange);
   } catch (err) {
-    return jsonResponse({ error: `Could not reach NSE: ${err instanceof Error ? err.message : String(err)}` }, 502);
+    return jsonResponse({ error: `Could not reach ${exchange}: ${err instanceof Error ? err.message : String(err)}` }, 502);
   }
   if (!found) {
     return jsonResponse(
-      { error: "No NSE F&O bhavcopy found in the last week -- NSE may be down or blocking this request" },
+      { error: `No ${exchange} F&O bhavcopy found in the last week -- ${exchange} may be down or blocking this request` },
       502,
     );
   }
 
   if (latestLoaded !== null && found.isoDate <= latestLoaded) {
-    // Still a successful refresh -- we reached NSE and confirmed there's
-    // nothing newer -- so it should count for the Dashboard's "Last F&O
-    // refresh" timestamp, not just runs that ingested new rows.
-    await logFetch(serviceClient, startedAt, new Date(), "success", null);
+    // Still a successful refresh -- we reached the exchange and confirmed
+    // there's nothing newer -- so it should count for the Dashboard's
+    // "Last F&O refresh" timestamp, not just runs that ingested new rows.
+    await logFetch(serviceClient, providerNameForRun, startedAt, new Date(), "success", null);
     return jsonResponse({
+      exchange,
       updated: false,
-      message: `Already up to date -- latest NSE bhavcopy (${found.isoDate}) is not newer than what's loaded (${latestLoaded}).`,
+      message: `Already up to date -- latest ${exchange} bhavcopy (${found.isoDate}) is not newer than what's loaded (${latestLoaded}).`,
       latestAvailable: found.isoDate,
       latestLoaded,
     });
@@ -239,10 +276,10 @@ Deno.serve(async (req: Request) => {
 
   let book: ParsedBhavcopy;
   try {
-    book = parseFoBhavcopy(found.csvText, universe);
+    book = parseFoBhavcopy(found.csvText, universe, sourceForRun);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await logFetch(serviceClient, startedAt, new Date(), "failure", `parse: ${message}`);
+    await logFetch(serviceClient, providerNameForRun, startedAt, new Date(), "failure", `parse: ${message}`);
     return jsonResponse({ error: `Failed to parse bhavcopy: ${message}` }, 500);
   }
 
@@ -252,7 +289,7 @@ Deno.serve(async (req: Request) => {
     await refreshOpenFlags(serviceClient, todayIsoInIst());
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await logFetch(serviceClient, startedAt, new Date(), "failure", message);
+    await logFetch(serviceClient, providerNameForRun, startedAt, new Date(), "failure", message);
     return jsonResponse({ error: `Ingest failed: ${message}` }, 500);
   }
 
@@ -269,9 +306,10 @@ Deno.serve(async (req: Request) => {
   }
 
   const finishedAt = new Date();
-  await logFetch(serviceClient, startedAt, finishedAt, "success", null);
+  await logFetch(serviceClient, providerNameForRun, startedAt, finishedAt, "success", null);
 
   return jsonResponse({
+    exchange,
     updated: true,
     tradeDate: found.isoDate,
     previousLatest: latestLoaded,

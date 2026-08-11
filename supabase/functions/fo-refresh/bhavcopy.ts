@@ -28,7 +28,6 @@ const REQUEST_HEADERS: Record<string, string> = {
   "Accept": "*/*",
   "Accept-Language": "en-US,en;q=0.9",
 };
-const SOURCE_NAME = "nse_fo_bhavcopy_edge";
 
 // The original fetch() call here had NO timeout at all -- a real incident
 // this caused: findLatestAvailableBhavcopy() walks back up to
@@ -99,8 +98,23 @@ export async function extractFirstZipEntry(zipBytes: Uint8Array): Promise<Uint8A
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-export function bhavcopyUrl(isoDate: string): string {
+export type Exchange = "NSE" | "BSE";
+
+/** Mirrors src.data_providers.nse_fo_provider.SOURCE_NAME /
+ * bse_fo_provider.SOURCE_NAME, with an "_edge" suffix distinguishing this
+ * on-demand path's rows from the Python cron/backfill script's -- both
+ * ingestion paths for the *same* exchange share this prefix so the
+ * "already loaded" watermark below can treat them as one timeline
+ * without conflating NSE and BSE. */
+export function sourceName(exchange: Exchange): string {
+  return exchange === "BSE" ? "bse_fo_bhavcopy_edge" : "nse_fo_bhavcopy_edge";
+}
+
+export function bhavcopyUrl(isoDate: string, exchange: Exchange = "NSE"): string {
   const yyyymmdd = isoDate.replaceAll("-", "");
+  if (exchange === "BSE") {
+    return `https://www.bseindia.com/download/Bhavcopy/Derivative/BhavCopy_BSE_FO_0_0_0_${yyyymmdd}_F_0000.CSV`;
+  }
   return `https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_${yyyymmdd}_F_0000.csv.zip`;
 }
 
@@ -116,39 +130,51 @@ export function looksLikeZipContentType(contentType: string | null): boolean {
   return ct.includes("zip") || ct.includes("octet-stream") || ct.includes("binary");
 }
 
-/** Downloads + unzips one day's bhavcopy. Null on a 404 (weekend/holiday/
- * not yet published) or an implausibly small response (NSE occasionally
- * serves a small HTML/PDF error body with a 200), so callers can walk
- * back to the previous trading day.
+/** Downloads one day's bhavcopy for the given exchange, returning its raw
+ * CSV text. NSE serves a zip (unzipped here); BSE serves a plain CSV --
+ * confirmed live, no zip step needed or attempted for it. Null on a 404
+ * (weekend/holiday/not yet published) or an implausibly small response
+ * (both exchanges occasionally serve a small HTML/PDF error body -- or
+ * for BSE, just a header row -- with a 200), so callers can walk back to
+ * the previous trading day.
  *
- * Throws a diagnostic error (status, content-type, byte length, and a
- * text snippet of the body) rather than a bare "not a valid zip" when the
- * response clearly isn't one -- NSE's bot-detection can serve an HTML
- * challenge/block page with a 200 status to requests it doesn't like
+ * For NSE, throws a diagnostic error (status, content-type, byte length,
+ * and a text snippet of the body) rather than a bare "not a valid zip"
+ * when the response clearly isn't one -- NSE's bot-detection can serve an
+ * HTML challenge/block page with a 200 status to requests it doesn't like
  * (confirmed: this happened for this exact function's Edge Runtime
  * origin even though the identical request worked fine from a normal dev
  * machine), and a bare zip-parse failure gives no way to tell that apart
  * from a genuinely corrupt download. */
-export async function fetchBhavcopyText(isoDate: string): Promise<string | null> {
+export async function fetchBhavcopyText(isoDate: string, exchange: Exchange = "NSE"): Promise<string | null> {
   let resp: Response;
   try {
-    resp = await fetch(bhavcopyUrl(isoDate), { headers: REQUEST_HEADERS, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    resp = await fetch(bhavcopyUrl(isoDate, exchange), { headers: REQUEST_HEADERS, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   } catch (err) {
     // A hung/refused connection is treated the same as a 404 -- "this day
     // isn't reachable, try the previous one" -- so one bad day (a
-    // transient NSE stall, most likely on today's not-yet-published file)
+    // transient stall, most likely on today's not-yet-published file)
     // can't block discovery of an earlier, genuinely available day. This
     // bounds findLatestAvailableBhavcopy()'s total worst-case runtime to
     // roughly maxLookback * FETCH_TIMEOUT_MS instead of hanging.
     const reason = err instanceof Error ? err.message : String(err);
-    console.warn(`bhavcopy fetch for ${isoDate} timed out or failed (${reason}); treating as unavailable`);
+    console.warn(`${exchange} bhavcopy fetch for ${isoDate} timed out or failed (${reason}); treating as unavailable`);
     return null;
   }
   if (resp.status === 404) return null;
-  if (!resp.ok) throw new Error(`bhavcopy fetch failed for ${isoDate}: HTTP ${resp.status}`);
+  if (!resp.ok) throw new Error(`${exchange} bhavcopy fetch failed for ${isoDate}: HTTP ${resp.status}`);
 
   const contentType = resp.headers.get("content-type");
   const buf = new Uint8Array(await resp.arrayBuffer());
+
+  if (exchange === "BSE") {
+    // Plain CSV, no zip -- guard against a near-empty stub (header-only
+    // or a small HTML/PDF error body), mirroring
+    // src/data_providers/bse_fo_provider.py's Python equivalent.
+    if (buf.length < 500) return null;
+    return new TextDecoder("utf-8").decode(buf);
+  }
+
   if (buf.length < 1000) return null;
 
   if (!looksLikeZipContentType(contentType)) {
@@ -178,14 +204,16 @@ export interface FoundBhavcopy {
 }
 
 /** Walks back from `onOrBefore` up to `maxLookback` days to the most
- * recent published bhavcopy, skipping weekends/holidays. */
+ * recent published bhavcopy for the given exchange, skipping
+ * weekends/holidays. */
 export async function findLatestAvailableBhavcopy(
   onOrBefore: string,
   maxLookback = 7,
+  exchange: Exchange = "NSE",
 ): Promise<FoundBhavcopy | null> {
   let d = onOrBefore;
   for (let i = 0; i < maxLookback; i++) {
-    const csvText = await fetchBhavcopyText(d);
+    const csvText = await fetchBhavcopyText(d, exchange);
     if (csvText !== null) return { isoDate: d, csvText };
     d = isoDateMinusDays(d, 1);
   }
@@ -194,10 +222,11 @@ export async function findLatestAvailableBhavcopy(
 
 // --- CSV parsing -----------------------------------------------------
 
-// Mirrors src/data_providers/nse_fo_provider.py's _FUTURES_TYPES/
-// _OPTION_TYPES -- IDO (index option) is included so NIFTY/BANKNIFTY
-// (migration 0018's Index company_type rows) get ingested; IDF (index
-// future) stays out of scope, see that Python module's file header.
+// Mirrors src/data_providers/udiff_bhavcopy.py's shared allow-list (used
+// by both nse_fo_provider.py and bse_fo_provider.py) -- IDO (index
+// option) is included so NIFTY/BANKNIFTY/SENSEX/BANKEX (migration
+// 0018/0019's Index company_type rows) get ingested; IDF (index future)
+// stays out of scope, see nse_fo_provider.py's file header.
 const FUTURES_TYPES = new Set(["STF"]);
 const OPTION_TYPES = new Set(["STO", "IDO"]);
 
@@ -268,9 +297,12 @@ function parseIntField(v: string | undefined): number | null {
  * in `universe`; ignores index futures (IDF) and everything outside the
  * universe. No quoted/embedded-comma fields in this file format, so a
  * plain split is sufficient (mirrors csv.DictReader's simplicity in the
- * Python port).
+ * Python port). `source` is stamped onto every price row -- pass
+ * `sourceName(exchange)` so ingested rows stay traceable to which
+ * exchange produced them (see that function's docstring for why this
+ * also determines the "already loaded" watermark scoping in index.ts).
  */
-export function parseFoBhavcopy(csvText: string, universe: Set<string>): ParsedBhavcopy {
+export function parseFoBhavcopy(csvText: string, universe: Set<string>, source: string): ParsedBhavcopy {
   const lines = csvText.split(/\r?\n/).filter((l) => l.length > 0);
   if (lines.length === 0) {
     throw new Error("Empty bhavcopy CSV");
@@ -325,7 +357,7 @@ export function parseFoBhavcopy(csvText: string, universe: Set<string>): ParsedB
       volume: parseIntField(get("TtlTradgVol")),
       turnover: parseNum(get("TtlTrfVal")),
       num_trades: parseIntField(get("TtlNbOfTxsExctd")),
-      source: SOURCE_NAME,
+      source,
     };
 
     if (FUTURES_TYPES.has(instr)) {

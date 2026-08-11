@@ -74,15 +74,18 @@ def trigger_manual_refresh(access_token: str) -> dict:
 FO_TIMEOUT_SECONDS = 180.0
 
 
-def trigger_fo_refresh(access_token: str) -> dict:
+def trigger_fo_refresh(access_token: str, exchange: str = "NSE") -> dict:
     """POSTs to the fo-refresh Edge Function (supabase/functions/fo-refresh),
-    which checks whether NSE has published a newer F&O bhavcopy than what's
-    already loaded and, if so, downloads + ingests it. Returns its JSON
-    summary: either {updated: false, message, latestAvailable, latestLoaded}
-    when already current, or {updated: true, tradeDate, futuresRows,
-    optionRows, ...} after a real ingest. Raises ManualRefreshError on
-    failure (reused rather than a parallel exception type, since the
-    calling convention -- cooldown/4xx/5xx handling -- is identical)."""
+    which checks whether the given exchange ("NSE" or "BSE" -- see that
+    function's own docstring for why one Edge Function serves both) has
+    published a newer F&O bhavcopy than what's already loaded and, if so,
+    downloads + ingests it. Returns its JSON summary: either
+    {exchange, updated: false, message, latestAvailable, latestLoaded}
+    when already current, or {exchange, updated: true, tradeDate,
+    futuresRows, optionRows, ...} after a real ingest. Raises
+    ManualRefreshError on failure (reused rather than a parallel exception
+    type, since the calling convention -- cooldown/4xx/5xx handling -- is
+    identical)."""
     settings = get_settings()
     if not settings.supabase_url:
         raise ManualRefreshError("SUPABASE_URL is not configured")
@@ -92,6 +95,7 @@ def trigger_fo_refresh(access_token: str) -> dict:
         resp = httpx.post(
             url,
             headers={"Authorization": f"Bearer {access_token}"},
+            json={"exchange": exchange},
             timeout=FO_TIMEOUT_SECONDS,
         )
     except httpx.HTTPError as exc:
@@ -109,6 +113,6 @@ def trigger_fo_refresh(access_token: str) -> dict:
             detail = resp.json().get("error", resp.text)
         except ValueError:
             detail = resp.text
-        raise ManualRefreshError(f"F&O refresh failed: {detail}")
+        raise ManualRefreshError(f"{exchange} F&O refresh failed: {detail}")
 
     return resp.json()

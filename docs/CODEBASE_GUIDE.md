@@ -128,14 +128,14 @@ supabase/
   migrations/                      Schema, RLS policies, views/functions, in numbered order
   seed.sql                          Current Nifty 50 constituents + companies (reference data only)
   functions/manual-refresh/         Edge Function (Deno/TypeScript) behind "Stock Data Refresh"
-  functions/fo-refresh/              Edge Function (Deno/TypeScript) behind "F&O Data Refresh"
+  functions/fo-refresh/              Edge Function (Deno/TypeScript) behind "NSE/BSE F&O Data Refresh" (exchange param)
 tests/                             Pytest suite -- almost entirely calculations/services, no network
 ```
 
 ## Database schema
 
 All migrations live in `supabase/migrations/`, applied in numeric order
-(`0001` → `0018`). Twenty tables, in three groups (`0008` doesn't add a
+(`0001` → `0019`). Twenty tables, in three groups (`0008` doesn't add a
 table -- it just extends `provider_fetch_log.fetch_type`'s CHECK
 constraint with `'fo'`, for the `fo-refresh` Edge Function's logging;
 `0010`/`0011` drop and recreate `dashboard_fo_metrics` with a different
@@ -146,8 +146,8 @@ widens `portfolio_holdings`' primary key, no new table; `0015` only adds
 a column to `companies` (`is_etf`) + redefines `latest_screener_view`
 again, no new table; `0016` adds `portfolio_positions`; `0017` adds
 `broker_connections`; `0018` replaces `is_etf` with `company_type`, seeds
-three `Index` rows, and redefines `latest_screener_view` a third time --
-no new table):
+three `Index` rows, and redefines `latest_screener_view` a third time;
+`0019` seeds a fourth `Index` row (BANKEX) -- neither adds a new table):
 
 **Reference data** (written by `scripts/fetch_nifty50_constituents.py` /
 `seed.sql`, read-only to the app):
@@ -337,64 +337,98 @@ these, not touching `alert_service.py`.
 
 ## Futures & Options (F&O) data
 
-A separate, self-contained subsystem for NSE derivatives on the 50
-constituents — futures + option chains — feeding the Options screen
+A separate, self-contained subsystem for NSE **and BSE** derivatives —
+futures + option chains — feeding the Options screen
 (`pages/5_Options.py`). It does **not** go through the
 `PriceDataProvider`/`FundamentalsDataProvider` ABCs; F&O has its own shape.
 
-**Data source — and why it's the only viable one** (settled empirically):
-- **yfinance carries no NSE derivatives** — `Ticker("RELIANCE.NS").options`
-  is empty. Yahoo does not list NSE options/futures.
+**Data source — and why these are the only viable ones** (settled
+empirically):
+- **yfinance carries no NSE/BSE derivatives** — `Ticker("RELIANCE.NS").options`
+  is empty. Yahoo does not list Indian options/futures.
 - **NSE's live option-chain API** (`/api/option-chain-equities`) returns
   HTTP 200 with hollow JSON (`expiryDates: None`) to non-interactive
-  sessions — its anti-bot layer. Unusable from a script.
-- **NSE F&O UDiFF bhavcopy** — the reliable source. One zip per trading
-  day at `https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_YYYYMMDD_F_0000.csv.zip`,
-  downloads with just a browser User-Agent (no cookie handshake — note
-  the `nsearchives` host; the older `archives.nseindia.com` host is now
-  bot-blocked and serves a PDF). Each row is one contract's full trading
-  day: OHLC, LTP, prev close, settlement, underlying (spot), open interest
-  + change, volume, turnover, trades, expiry, strike, CE/PE, lot size.
-  Instrument types: `STF` = stock future, `STO` = stock option, `IDO` =
-  index option (NIFTY/BANKNIFTY, migration `0018` -- see the "Index F&O"
-  paragraph below). `IDF` (index future) is still ignored -- no Index
-  position on this app needs a futures LTP today. **This is end-of-day
-  data** (published ~6pm IST) — "latest price" means the most recent
-  close/settlement, never an intraday live quote. There is no free
-  live/intraday F&O feed.
+  sessions — its anti-bot layer. Unusable from a script. BSE has no
+  equivalent live API at all to even try.
+- **Each exchange's own UDiFF bhavcopy** — the reliable source for both.
+  Same SEBI-mandated schema (Unified Distilled File Format) on both
+  exchanges -- same column names, same `FinInstrmTp` instrument codes --
+  confirmed live for BSE too, which is what made adding it as a second
+  source cheap (`src/data_providers/udiff_bhavcopy.py` holds the one
+  parsing routine both `nse_fo_provider.py` and `bse_fo_provider.py`
+  call; see "Two exchanges, one parser" below). NSE: one **zip** per
+  trading day at
+  `https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_YYYYMMDD_F_0000.csv.zip`
+  (the `nsearchives` host; the older `archives.nseindia.com` is now
+  bot-blocked and serves a PDF). BSE: one **plain CSV** per trading day
+  (no zip) at
+  `https://www.bseindia.com/download/Bhavcopy/Derivative/BhavCopy_BSE_FO_0_0_0_YYYYMMDD_F_0000.CSV`.
+  Both need just a browser User-Agent, no cookie handshake. Each row is
+  one contract's full trading day: OHLC, LTP, prev close, settlement,
+  underlying (spot), open interest + change, volume, turnover, trades,
+  expiry, strike, CE/PE, lot size. Instrument types: `STF` = stock
+  future, `STO` = stock option, `IDO` = index option (NIFTY/BANKNIFTY on
+  NSE; SENSEX/BANKEX on BSE -- migrations `0018`/`0019`, see the "Index
+  F&O" paragraph below). `IDF` (index future) is ignored on both
+  exchanges -- no Index position on this app needs a futures LTP today.
+  **This is end-of-day data** (published after close) — "latest price"
+  means the most recent close/settlement, never an intraday live quote.
+  There is no free live/intraday F&O feed for either exchange.
+
+**Two exchanges, one parser.** `src/data_providers/udiff_bhavcopy.py`
+owns `parse_udiff_bhavcopy(csv_text, *, source_name, futures_types,
+option_types, trade_date, universe)` -- the full CSV-to-model parsing
+logic, identical for both exchanges since the schema is identical.
+`nse_fo_provider.py` and `bse_fo_provider.py` are both thin wrappers
+around it: each owns only its exchange-specific URL template, HTTP fetch
+(NSE unzips a `.csv.zip`; BSE decodes the response body directly, no zip
+library needed), and its own `SOURCE_NAME` (`"nse_fo_bhavcopy"` /
+`"bse_fo_bhavcopy"`, stamped onto every price row for traceability).
+`_FUTURES_TYPES`/`_OPTION_TYPES` are also identical between the two
+(`{"STF"}` / `{"STO", "IDO"}`) but kept as separate module-level constants
+rather than shared, since there's no guarantee the two exchanges'
+in-scope instrument sets stay identical forever. The TypeScript mirror
+(`supabase/functions/fo-refresh/bhavcopy.ts`) takes the same approach in
+one file: `bhavcopyUrl`/`fetchBhavcopyText` branch on an `Exchange =
+"NSE" | "BSE"` parameter (BSE skips the zip-specific content-type check
+and unzip step entirely), and `parseFoBhavcopy` takes an explicit
+`source` argument rather than a module constant.
 
 **Greeks / implied volatility are intentionally NOT stored** — not in the
 bhavcopy (or any free source), and computing them was scoped out. The
 tables can gain those columns + a `greeks.py` later without reshaping.
 
-**Index F&O (migration `0018_company_type.sql`)** — added so Dhan-synced
-index option positions (`pages/6_Portfolio.py`'s "Connect Dhan account")
-have real F&O data to fall back on for LTP instead of a blanket N/A (see
-the My Portfolio section's "Connect Dhan account" subsection). Three
-symbols are seeded into `companies` as `company_type = 'Index'`: `NIFTY`,
-`BANKNIFTY`, and `SENSEX`. `option_contracts`/`option_daily_prices`
-themselves are unchanged -- a NIFTY option row is stored identically to a
-stock option row, just `symbol = 'NIFTY'`, so no schema change was
-needed there, only widening which bhavcopy rows get kept
-(`nse_fo_provider.py`'s `_OPTION_TYPES` gained `IDO`) and which symbols
+**Index F&O (migrations `0018_company_type.sql` / `0019_add_bankex.sql`)**
+— added so Dhan-synced index option positions
+(`pages/6_Portfolio.py`'s "Connect Dhan account") have real F&O data to
+fall back on for LTP instead of a blanket N/A (see the My Portfolio
+section's "Connect Dhan account" subsection). Four symbols are seeded
+into `companies` as `company_type = 'Index'`: `NIFTY`, `BANKNIFTY` (both
+NSE-listed), `SENSEX`, `BANKEX` (both BSE-listed -- `0019` added BANKEX
+after `bse_fo_provider.py` confirmed it live alongside SENSEX in a real
+BSE bhavcopy response). `option_contracts`/`option_daily_prices`
+themselves are unchanged -- an index option row is stored identically to
+a stock option row, just e.g. `symbol = 'SENSEX'`, so no schema change
+was needed there, only widening which bhavcopy rows get kept
+(`_OPTION_TYPES` gained `IDO` on both providers) and which symbols
 `scripts/fetch_fo_data.py`/`fo-refresh/index.ts` include in their
 ingestion universe (every `companies` row with `company_type = 'Index'`,
-same widening pattern as the existing portfolio-symbols widening below).
-**SENSEX is a labeled gap, not a bug**: it's BSE-listed, and this app's
-only F&O source is NSE's bhavcopy, which never contains a SENSEX row --
-seeded anyway so a Dhan-synced SENSEX position at least resolves a symbol
-instead of showing "undecoded", but it will never actually get F&O rows
-without a BSE data source. Index *futures* (`IDF` bhavcopy rows) stay out
-of scope -- no Index position on this app needs a futures LTP today, only
-options. New F&O rows only appear once `fetch_fo_data.py` or the
-Dashboard's "F&O Data Refresh" button actually runs against a universe
-that includes these symbols; the on-demand Edge Function only fetches the
-*latest* bhavcopy and skips entirely if it's already loaded (see "A real
-incident this caused" below for that watermark logic), so widening the
-universe alone doesn't retroactively backfill days already ingested for
-stocks -- a one-off `scripts/fetch_fo_data.py` run (idempotent upserts)
-is what actually backfills NIFTY/BANKNIFTY history immediately rather
-than waiting for tomorrow's refresh to naturally pick them up.
+same widening pattern as the existing portfolio-symbols widening below --
+passed unfiltered to *either* exchange's provider, since each one's own
+bhavcopy will only ever contain the symbols actually listed there). Index
+*futures* (`IDF` bhavcopy rows) stay out of scope on both exchanges -- no
+Index position on this app needs a futures LTP today, only options. New
+F&O rows only appear once `fetch_fo_data.py` or the **NSE/BSE F&O Data
+Refresh** buttons actually run against a universe that includes these
+symbols; the on-demand Edge Function only fetches the *latest* bhavcopy
+per exchange and skips entirely if it's already loaded (see "A real
+incident this caused" below for the backfill-completion analog, and the
+Edge Functions section for the per-exchange watermark-scoping fix), so
+widening the universe alone doesn't retroactively backfill days already
+ingested for stocks -- a one-off `scripts/fetch_fo_data.py --exchange
+nse` / `--exchange bse` run (idempotent upserts) is what actually
+backfills index history immediately rather than waiting for the next
+scheduled refresh to naturally pick it up.
 
 **Schema (migration `0007_add_fo_tables.sql`) — four tables + two views.**
 Futures and options are separate instruments, and each splits into a
@@ -437,10 +471,14 @@ log line is `F&O ingest complete: ...`) before assuming it's a data bug.
 **Code layout:**
 - `src/models/fo.py` — the four Pydantic models; `OptionType` (CE/PE) in
   `enums.py`.
-- `src/data_providers/nse_fo_provider.py` — `fetch_fo_bhavcopy(trade_date,
-  universe)` (download + parse); `parse_fo_bhavcopy(csv_text, ...)` is
-  split out and pure so it's unit-tested against an inline fixture
-  (`tests/test_nse_fo_provider.py`) with no network.
+- `src/data_providers/udiff_bhavcopy.py` — the shared `FOBhavcopy`
+  dataclass and `parse_udiff_bhavcopy(...)`, the one CSV-to-model parser
+  both exchange providers call (see "Two exchanges, one parser" above).
+- `src/data_providers/nse_fo_provider.py` / `bse_fo_provider.py` — each
+  has its own `fetch_fo_bhavcopy(trade_date, universe)` (download + parse)
+  and thin `parse_fo_bhavcopy(csv_text, ...)` wrapper around the shared
+  parser above, unit-tested against inline fixtures with no network
+  (`tests/test_nse_fo_provider.py`, `tests/test_bse_fo_provider.py`).
 - `src/data_providers/mock_provider.py::MockFOProvider` — synthetic
   futures (3 monthly expiries) + option chains (strikes stepped around a
   spot), shaped as the same `FOBhavcopy` object, so the ingest path,
@@ -514,32 +552,44 @@ log line is `F&O ingest complete: ...`) before assuming it's a data bug.
   reads spot from `latest_screener_view` + open option legs from
   `latest_option_chain_view`, calls it, and upserts the whole table. See
   "Dashboard cache" below for why this exists and every path that calls it.
-- `scripts/fetch_fo_data.py` — service-role backfill (`--days 60` default,
-  `--date`, `--mock`), run by the operator (like the other seed scripts);
+- `scripts/fetch_fo_data.py` — service-role backfill, `--exchange nse`
+  (default) or `--exchange bse` selects `nse_fo_provider`/`bse_fo_provider`
+  from a small `_PROVIDERS` dict (`--days 60` default, `--date`, `--mock`
+  -- `--mock` ignores `--exchange`, `MockFOProvider` is exchange-agnostic
+  synthetic data), run by the operator (like the other seed scripts);
   processes oldest→newest then calls `refresh_open_flags(today)`.
   `scripts/seed_mock_data.py` also seeds ~30 mock F&O days for local dev.
   Its `universe` (which symbols the bhavcopy parse keeps) starts as the
-  current Nifty50 constituents, then widens with every distinct resolved
-  symbol across all users' `portfolio_holdings` -- same pattern
-  `scripts/run_refresh.py` already uses for cash-market data (registering
-  a minimal `companies` row for any not seen before), applied here too so
-  a portfolio-only stock like Hindustan Zinc actually gets its
-  futures/options ingested, not just its equity LTP. Tolerant of
-  `portfolio_holdings` not existing yet (migration `0012`).
+  current Nifty50 constituents, adds every `companies` row with
+  `company_type = 'Index'` (migrations `0018`/`0019`), then widens with
+  every distinct resolved symbol across all users' `portfolio_holdings` --
+  same pattern `scripts/run_refresh.py` already uses for cash-market data
+  (registering a minimal `companies` row for any not seen before), applied
+  here too so a portfolio-only stock like Hindustan Zinc actually gets its
+  futures/options ingested, not just its equity LTP. The same merged
+  universe is passed to whichever exchange's provider was selected,
+  unfiltered -- each exchange's own bhavcopy naturally only contains the
+  symbols actually listed there, so there's no need to split the set by
+  exchange. Tolerant of `portfolio_holdings` not existing yet (migration
+  `0012`).
 
-**On-demand refresh**: the Dashboard's "📊 F&O Data Refresh" button hits a
-second Edge Function, `supabase/functions/fo-refresh/` (see the Edge
-Functions section below) — a TypeScript port of the same bhavcopy
-fetch+parse, but only for the single most recent day and only if NSE has
-actually published something newer than what's already loaded (checked via
-`max(trade_date)` in `futures_daily_prices`), so a click when nothing's
-new is a cheap read-only no-op rather than a silent re-fetch. It has no
-external zip-library dependency — see the Edge Functions section for why.
-Its `universe` set gets the identical portfolio-symbol widening as
+**On-demand refresh**: the **📊 NSE F&O Data Refresh** / **📊 BSE F&O Data
+Refresh** buttons both hit the *same* second Edge Function,
+`supabase/functions/fo-refresh/` (see the Edge Functions section below),
+parameterized by a POST body `{"exchange": "NSE" | "BSE"}` — a TypeScript
+port of the same bhavcopy fetch+parse, but only for the single most
+recent day and only if that exchange has actually published something
+newer than what's already loaded for it (checked via `max(trade_date)`
+in `futures_daily_prices`, scoped by a `source` prefix -- see the Edge
+Functions section for why this scoping was necessary, not optional), so
+a click when nothing's new is a cheap read-only no-op rather than a
+silent re-fetch. NSE has no external zip-library dependency — see the
+Edge Functions section for why; BSE needs no zip handling at all. Its
+`universe` set gets the identical Index-row + portfolio-symbol widening as
 `fetch_fo_data.py` above (mirrored in TypeScript via the same
 `resolveTrackedSymbols`/`portfolioSymbols.ts` helper `manual-refresh`
 already uses), so a symbol newly tracked from a portfolio upload starts
-getting its F&O data via this button too, not just a manual backfill run.
+getting its F&O data via either button too, not just a manual backfill run.
 
 **Dashboard cache (`dashboard_fo_metrics`, migration `0011`)**: the
 Dashboard used to compute its "5% CSP"/"5% CC" columns live, on every
@@ -681,7 +731,7 @@ page's own `st.set_page_config(page_title=..., page_icon=...)` call
 (browser-tab metadata) is unaffected too -- it's independent of `st.Page`'s
 `title=` (sidebar label).
 
-- **`1_Dashboard.py`** — loads `latest_screener_view` via `snapshot_repo.get_latest_screener()`, applies the signed-in user's thresholds via `threshold_override.apply_user_thresholds()`, renders metric cards (also usable as quick filters, wired through `st.session_state["status_filter"]`), sidebar filters, and the screener table. The Status sidebar filter is a `st.multiselect` over `ALL_STATUSES = ["Green", "Amber", "Red", "Unavailable"]` — `status_filter` is always a *list* (any combination, not one-or-all), and the final row filter is a single `df["status"].isin([...])`, so selecting all four is equivalent to no filter at all. Saved filter presets normalize old single-string `"status"` values (from before this was a multiselect) into a list on load for backward compatibility. The "Minimum dividend yield" / "Minimum PEG" sidebar filters default to `0.0`, **not** `user_settings.dividend_yield_threshold`/`peg_threshold` — they're a separate display filter from the criterion A/C pass/fail thresholds, and defaulting them to the threshold value silently hid every stock below it on first load (a real bug, since fixed). Keep these two concepts distinct if you touch this page: the Settings-page thresholds decide Green/Amber/Red/Unavailable; these sidebar inputs just additionally hide rows below a value the user dials in themselves, and should default to "show everything." The header has two on-demand refresh buttons, each hitting its own Edge Function (see [Edge Functions](#edge-functions-supabasefunctions) below): "🔄 Stock Data Refresh" (cash market, `manual-refresh`) and "📊 F&O Data Refresh" (futures/options, `fo-refresh` — a no-op with an "already up to date" message if NSE hasn't published anything newer than what's loaded). Below the title, a "Data sources" caption reads `get_settings().market_data_provider`/`fundamentals_provider` directly (e.g. "Stock prices: `yfinance`") and states the options/F&O source as a fixed string, "NSE Bhavcopy (end-of-day)" — there's no configurable F&O provider setting to read (`src/config.py` has no such field; F&O ingestion is always the NSE bhavcopy). The header's "Data freshness" column also gets a second line, "Latest Bhavcopy: <date>", from a new `fo_repo.get_latest_fo_trade_date()` — the most recent `trade_date` actually present in `futures_daily_prices`, deliberately **not** `last_fo_fetch_at` (`fetch_log_repo`'s "when did the ingestion job last run" timestamp): a bhavcopy is published for a specific trading day and a run on a non-trading day finds nothing new, so the job can run successfully today while the loaded data is still from a prior session — this line surfaces that distinction, `last_fo_fetch_at` doesn't. Wrapped in the same `except APIError: None` degrade as the rest of this page's optional F&O reads, for a deployment that hasn't applied migration `0007` yet.
+- **`1_Dashboard.py`** — loads `latest_screener_view` via `snapshot_repo.get_latest_screener()`, applies the signed-in user's thresholds via `threshold_override.apply_user_thresholds()`, renders metric cards (also usable as quick filters, wired through `st.session_state["status_filter"]`), sidebar filters, and the screener table. The Status sidebar filter is a `st.multiselect` over `ALL_STATUSES = ["Green", "Amber", "Red", "Unavailable"]` — `status_filter` is always a *list* (any combination, not one-or-all), and the final row filter is a single `df["status"].isin([...])`, so selecting all four is equivalent to no filter at all. Saved filter presets normalize old single-string `"status"` values (from before this was a multiselect) into a list on load for backward compatibility. The "Minimum dividend yield" / "Minimum PEG" sidebar filters default to `0.0`, **not** `user_settings.dividend_yield_threshold`/`peg_threshold` — they're a separate display filter from the criterion A/C pass/fail thresholds, and defaulting them to the threshold value silently hid every stock below it on first load (a real bug, since fixed). Keep these two concepts distinct if you touch this page: the Settings-page thresholds decide Green/Amber/Red/Unavailable; these sidebar inputs just additionally hide rows below a value the user dials in themselves, and should default to "show everything." Right after the title/disclaimer, `render_global_refresh_bar(client)` (`src/utils/refresh_bar.py`, see the Utils section below) renders the three on-demand refresh buttons — this used to be two Dashboard-only buttons hand-rolled in this file, now a shared component called identically from every page (Dashboard, Stock Detail, Options, My Portfolio, Settings), so refreshing data never requires navigating back here specifically. Below the title, a "Data sources" caption reads `get_settings().market_data_provider`/`fundamentals_provider` directly (e.g. "Stock prices: `yfinance`") and states the options/F&O source as a fixed string, "NSE + BSE Bhavcopy (end-of-day)" — there's no configurable F&O provider setting to read (`src/config.py` has no such field; F&O ingestion always means these two bhavcopy sources, see the Futures & Options section). The header's "Data freshness" line covers stock refresh only now (`last_fetch_at`, still needed for `get_market_state()`'s staleness check); the per-exchange F&O refresh timestamps live in the shared refresh bar's own captions instead of a Dashboard-only line. "Latest Bhavcopy: <date>" is still Dashboard-specific, from `fo_repo.get_latest_fo_trade_date()` — the most recent `trade_date` actually present in `futures_daily_prices` across *either* exchange, deliberately **not** either exchange's own last-successful-fetch timestamp: a bhavcopy is published for a specific trading day and a run on a non-trading day finds nothing new, so a refresh can succeed today while the loaded data is still from a prior session — this line surfaces that distinction. Wrapped in the same `except APIError: None` degrade as the rest of this page's optional F&O reads, for a deployment that hasn't applied migration `0007` yet.
 
   **Metric cards**: seven buttons in a row (`st.columns(7)`) — `Total stocks`, `🟢 Green`/`🟠 Amber`/`🔴 Red` (each sets the status filter to just that one status), and `Yield > threshold`/`All momentum +ve`/`PEG ≤ threshold` (each sets `criterion_filter` instead). There is deliberately no `Unavailable` button — the status itself is still fully selectable via the sidebar's Status multiselect and still counts toward `ALL_STATUSES`, but it wasn't considered a useful one-click quick filter and was dropped to declutter the row (a purely cosmetic trim, not a behavior change to filtering).
 
@@ -1364,6 +1414,7 @@ every page re-injects with the user's actual `Theme` setting once loaded
 - **`session.py`** — all Supabase Auth + `st.session_state` handling: `sign_in`/`sign_up`/`sign_out`, `request_password_reset`/`verify_recovery_code`/`set_new_password`, `require_login()` (the gate every page calls), `get_user_client_cached()`.
 - **`formatting.py`** — Indian-numbering-system currency formatting (`format_inr`, lakh/crore grouping), `format_pct`, `direction_arrow`, `pass_fail_badge` (✅ Pass/❌ Fail/N/A, with text), `pass_fail_icon` (✅/❌/—, symbol only — used throughout the Dashboard table's Momentum/Dividend yield/PEG/Fundamentals columns; `pass_fail_badge` is kept for spots that still want the text, e.g. Stock Detail's scorecard). `alert_type_label()`/`summarize_alert_config()` — pure functions turning an `AlertType` + its raw `config` dict into human-readable text (e.g. "Price crosses above ₹1,000.00"), replacing what used to be a literal `f"config={a.config}"` Python-dict dump shown on both Stock Detail and the Alerts screen (now folded into Settings); the exact `config` keys each branch reads (`level`/`direction`, `period`/`direction`, `threshold`/`direction`, `entry_price`, `target_price`/`stop_loss`) must stay in sync with whatever keys the alert-creation forms in `2_Stock_Detail.py`/`4_Settings.py` actually write. **A real bug found here**: `format_inr`/`format_crores`/`format_pct`/`direction_arrow` all checked `value is None`, but `pages/1_Dashboard.py`'s `pd.DataFrame([r.model_dump() for r in rows])` silently converts a Pydantic model's correct `None` into `float('nan')` for any column that has real float values elsewhere in the same column (confirmed directly: a mixed-value column comes back `float64` dtype with `None` cells as `nan`, `nan is None` is `False`) — a genuinely-missing `return_1d` rendered as the literal string `"nan%"` on screen instead of `"—"`. All four formatters now route through a shared `_is_missing(value)` helper that also checks `math.isnan()`.
 - **`timezones.py`** — `now_ist()`/`to_ist()`/`format_ist()`, thin wrappers around `pytz`.
+- **`refresh_bar.py`** — `render_global_refresh_bar(client)`, the 3-button "Stock Data Refresh" / "NSE F&O Data Refresh" / "BSE F&O Data Refresh" bar called at the same spot (right after the title/disclaimer) on every page (see the Pages section's `1_Dashboard.py` bullet for what it replaced there). Reads `st.session_state["sb_access_token"]` itself rather than taking it as a parameter, since every caller has already gone through `require_login()`. Each button's result is stashed in `st.session_state` and rendered on the next script run (the same "can't render across an `st.rerun()`" pattern the old Dashboard-only buttons used), and every click ends with a blanket `st.cache_data.clear()` -- not a page-local cache-bust counter -- specifically so a refresh triggered from, say, the Options page also invalidates the Dashboard's cached screener rows for whenever the user navigates there next. `_universe_breakdown()` is the same "(X stocks, Y ETFs/funds)" stock-refresh message logic that used to live in `pages/1_Dashboard.py` as `_load_universe_counts`, moved here so the message stays identical regardless of which page triggered the refresh.
 - **`ui.py`** — shared fragments: `status_badge()` (colored HTML span with text, e.g. Stock Detail's header), `market_state_label()`, `buy_sell_label()` (Green→"Model Buy Watch" etc., per the spec's no-guarantee wording), `render_disclaimer()`, `plotly_template()`, `inject_tailwind()`, plus the design-system layer described below: `ACCENT` (the "Classic Institutional" slate/navy palette constants), `inject_global_styles()`/`inject_design_system()`, `_surface_classes()`, `render_card()`, `render_pill()`, `render_stat_tile()`/`render_stat_grid()`, `render_alert_row()`.
 - **`logging.py`** — `get_logger(name)`, configures `logging.basicConfig` once from `Settings.log_level`.
 
@@ -1486,18 +1537,28 @@ project's Edge Functions from this development environment directly, so
 `deno test`/`deno check` are as far as verification goes without the
 user actually deploying and clicking the button themselves.
 
-`fo-refresh/` backs the Dashboard's "📊 F&O Data Refresh" button, same
-reasoning and runtime as `manual-refresh/` above (real writes need the
-service-role key, must run server-side). Structurally it's a check-then-
-maybe-ingest, not an unconditional refresh:
+`fo-refresh/` backs the **📊 NSE F&O Data Refresh** / **📊 BSE F&O Data
+Refresh** buttons -- one Edge Function, not two, selected via the POST
+body's `exchange` field -- same reasoning and runtime as `manual-refresh/`
+above (real writes need the service-role key, must run server-side).
+Structurally it's a check-then-maybe-ingest, not an unconditional refresh:
 
-- **`bhavcopy.ts`** — `bhavcopyUrl(isoDate)`, `fetchBhavcopyText(isoDate)`
-  (null on 404, mirroring the Python provider's walk-back-friendly
-  contract), `findLatestAvailableBhavcopy(onOrBefore, maxLookback=7)`, and
-  `parseFoBhavcopy(csvText, universe)` — a TypeScript port of
-  `src/data_providers/nse_fo_provider.py`'s parsing (same column mapping,
-  same STF/STO instrument-type filter, same universe filter). **The zip
-  extraction is hand-rolled**, not via a library: Deno's Edge Runtime has
+- **`bhavcopy.ts`** — `bhavcopyUrl(isoDate, exchange)`,
+  `fetchBhavcopyText(isoDate, exchange)` (null on 404, mirroring the
+  Python providers' walk-back-friendly contract; BSE skips the zip
+  content-type check and unzip step entirely -- see below),
+  `findLatestAvailableBhavcopy(onOrBefore, maxLookback=7, exchange)`,
+  `sourceName(exchange)` (`"nse_fo_bhavcopy_edge"` / `"bse_fo_bhavcopy_edge"`),
+  and `parseFoBhavcopy(csvText, universe, source)` — a TypeScript port of
+  `src/data_providers/udiff_bhavcopy.py`'s shared parsing (same column
+  mapping, same STF/STO/IDO instrument-type filter, same universe
+  filter) -- `source` is an explicit argument here rather than a module
+  constant, precisely so one function can serve both exchanges without a
+  stale hardcoded tag leaking onto the wrong exchange's rows (a bug this
+  file used to be structurally exposed to, before the multi-exchange
+  parameterization). **The zip extraction is hand-rolled**, not via a
+  library (NSE only -- BSE's bhavcopy is a plain CSV, no zip at all):
+  Deno's Edge Runtime has
   no zip module built in, and the bhavcopy is always a single-entry
   archive, so `extractFirstZipEntry()` reads the ZIP's End-Of-Central-
   Directory + Central-Directory records (robust regardless of whether the
@@ -1569,26 +1630,45 @@ maybe-ingest, not an unconditional refresh:
   connection would, confirming `fetchBhavcopyText` returns `null` rather
   than throwing, and confirming an `AbortSignal` is actually passed to
   `fetch()`.
-- **`index.ts`** — same auth/cooldown pattern as `manual-refresh/index.ts`
-  (`provider_name = 'fo_edge'`, `fetch_type = 'fo'` — added to
+- **`index.ts`** — reads `exchange` from the request's JSON body
+  (`{"exchange": "NSE"}` / `{"exchange": "BSE"}`; missing/unparseable body
+  defaults to `"NSE"`, so an old caller with no body still works). Same
+  auth/cooldown pattern as `manual-refresh/index.ts`, but `provider_name`
+  is now derived per exchange (`providerName(exchange)` →
+  `'fo_edge_nse'` / `'fo_edge_bse'`, renamed from the pre-multi-exchange
+  `'fo_edge'` -- cooldown history is a rolling 5-minute window, so the
+  reset was harmless), `fetch_type = 'fo'` for both (added to
   `provider_fetch_log`'s CHECK constraint by
   `0008_add_fo_fetch_type.sql`, same pattern as `0005` did for `'all'`).
   The distinguishing step: before doing any work, it reads
-  `max(trade_date)` from `futures_daily_prices` (the "already loaded"
-  watermark) and compares it against `findLatestAvailableBhavcopy()`'s
-  result (the "NSE's latest" watermark) — if NSE has nothing newer, it
-  returns `{updated: false, message, latestAvailable, latestLoaded}`
-  immediately, with zero writes. Only when NSE's date is strictly newer
-  does it parse and upsert into all four F&O tables (chunked at 500 rows,
-  matching `fo_repo.py`'s Python chunk size) and re-derive `is_open` via
-  the same expiry-vs-today logic as `fo_repo.refresh_open_flags`, then
-  returns `{updated: true, tradeDate, futuresRows, optionRows}`.
-- On the Streamlit side, `edge_refresh.py::trigger_fo_refresh()` is the
-  HTTP client (same shape as `trigger_manual_refresh`, reusing
-  `ManualRefreshError` rather than a parallel exception type, since the
-  calling convention — cooldown/4xx/5xx handling — is identical); the
-  Dashboard button shows a distinct message depending on `updated: true`
-  vs `false` vs an error, rather than treating "nothing new" as a failure.
+  `max(trade_date)` from `futures_daily_prices` **filtered by a `source`
+  prefix** (`nse_fo_bhavcopy%` / `bse_fo_bhavcopy%`, via `.like()` --
+  covering both this Edge Function's own `..._edge`-suffixed rows and
+  `scripts/fetch_fo_data.py`'s cron/backfill rows for the same exchange)
+  and compares it against `findLatestAvailableBhavcopy(..., exchange)`'s
+  result (that exchange's latest watermark) — if the exchange has nothing
+  newer, it returns `{exchange, updated: false, message, latestAvailable,
+  latestLoaded}` immediately, with zero writes. **The `source` filter is
+  not optional** — an earlier version of this watermark query had no
+  filter at all (fine when only NSE existed), and adding BSE without
+  scoping it would have meant an NSE refresh today makes a same-day BSE
+  refresh think it's already up to date, since both exchanges publish on
+  the same trading days and would otherwise share one watermark. Only
+  when that exchange's date is strictly newer does it parse (stamping
+  rows with `sourceName(exchange)`) and upsert into all four F&O tables
+  (chunked at 500 rows, matching `fo_repo.py`'s Python chunk size) and
+  re-derive `is_open` via the same expiry-vs-today logic as
+  `fo_repo.refresh_open_flags`, then
+  returns `{exchange, updated: true, tradeDate, futuresRows, optionRows}`.
+- On the Streamlit side, `edge_refresh.py::trigger_fo_refresh(access_token,
+  exchange="NSE")` is the HTTP client (same shape as
+  `trigger_manual_refresh`, reusing `ManualRefreshError` rather than a
+  parallel exception type, since the calling convention —
+  cooldown/4xx/5xx handling — is identical), now sending `json={"exchange":
+  exchange}` in the POST body; `src/utils/refresh_bar.py` calls it once
+  with `"NSE"` and once with `"BSE"` for its two F&O buttons, each
+  showing a distinct message depending on `updated: true` vs `false` vs
+  an error, rather than treating "nothing new" as a failure.
 
 ## Tests (`tests/`)
 

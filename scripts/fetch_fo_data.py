@@ -1,15 +1,18 @@
 #!/usr/bin/env python
-"""Fetch NSE F&O (futures + options) end-of-day data into Supabase.
+"""Fetch NSE or BSE F&O (futures + options) end-of-day data into Supabase.
 
-Source: the NSE F&O UDiFF bhavcopy, one zip per trading day. This is EOD
-data (published ~6pm IST after close), so "latest price" here is the most
-recent close/settlement, not a live quote.
+Source: each exchange's own UDiFF bhavcopy (NSE: one zip per trading day;
+BSE: one plain CSV per trading day -- see src/data_providers/
+nse_fo_provider.py / bse_fo_provider.py for why two separate providers).
+This is EOD data (published after close), so "latest price" here is the
+most recent close/settlement, not a live quote.
 
 Usage:
-    python scripts/fetch_fo_data.py                 # backfill last 60 trading days
-    python scripts/fetch_fo_data.py --days 20       # fewer days
-    python scripts/fetch_fo_data.py --date 2026-07-16   # one specific day
-    python scripts/fetch_fo_data.py --mock          # synthetic data, no network
+    python scripts/fetch_fo_data.py                        # NSE, backfill last 60 trading days
+    python scripts/fetch_fo_data.py --exchange bse          # BSE instead (SENSEX/BANKEX + BSE stock derivatives)
+    python scripts/fetch_fo_data.py --days 20               # fewer days
+    python scripts/fetch_fo_data.py --date 2026-07-16       # one specific day
+    python scripts/fetch_fo_data.py --mock                  # synthetic data, no network
 
 Requires SUPABASE_SERVICE_ROLE_KEY -- writes shared market data (bypasses
 RLS) on behalf of all users, like the other scripts/ jobs.
@@ -26,9 +29,9 @@ from postgrest.exceptions import APIError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.data_providers import nse_fo_provider  # noqa: E402
+from src.data_providers import bse_fo_provider, nse_fo_provider  # noqa: E402
 from src.data_providers.mock_provider import MockFOProvider  # noqa: E402
-from src.data_providers.nse_fo_provider import FOBhavcopy  # noqa: E402
+from src.data_providers.udiff_bhavcopy import FOBhavcopy  # noqa: E402
 from src.data_providers.yfinance_provider import fetch_display_name  # noqa: E402
 from src.models.enums import CompanyType  # noqa: E402
 from src.repositories import companies_repo, fo_repo  # noqa: E402
@@ -40,6 +43,8 @@ from src.utils.logging import get_logger  # noqa: E402
 logger = get_logger(__name__)
 
 DEFAULT_DAYS = 60
+
+_PROVIDERS = {"nse": nse_fo_provider, "bse": bse_fo_provider}
 
 
 def _mock_books(universe: set[str], days: int, end: date) -> list[FOBhavcopy]:
@@ -53,14 +58,14 @@ def _mock_books(universe: set[str], days: int, end: date) -> list[FOBhavcopy]:
     return sorted(books, key=lambda b: b.trade_date)
 
 
-def _live_books(universe: set[str], days: int, end: date) -> list[FOBhavcopy]:
+def _live_books(provider, universe: set[str], days: int, end: date) -> list[FOBhavcopy]:
     session = requests.Session()
     books: list[FOBhavcopy] = []
     d = end
     # Walk back generously (holidays + weekends) until we collect `days` files.
     horizon = d - timedelta(days=days * 3 + 15)
     while len(books) < days and d >= horizon:
-        book = nse_fo_provider.fetch_fo_bhavcopy(d, universe=universe, session=session)
+        book = provider.fetch_fo_bhavcopy(d, universe=universe, session=session)
         if book is not None and not book.is_empty:
             books.append(book)
             logger.info(
@@ -72,11 +77,13 @@ def _live_books(universe: set[str], days: int, end: date) -> list[FOBhavcopy]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Fetch NSE F&O EOD data into Supabase")
+    parser = argparse.ArgumentParser(description="Fetch NSE/BSE F&O EOD data into Supabase")
+    parser.add_argument("--exchange", choices=["nse", "bse"], default="nse", help="which exchange's bhavcopy to fetch (default nse)")
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS, help="trading days to backfill (default 60)")
     parser.add_argument("--date", type=str, help="a single trading day YYYY-MM-DD")
     parser.add_argument("--mock", action="store_true", help="use synthetic data, no network")
     args = parser.parse_args()
+    provider = _PROVIDERS[args.exchange]
 
     client = get_service_client()
     universe = {c.symbol for c in companies_repo.list_current_constituents(client)}
@@ -84,11 +91,12 @@ def main() -> None:
         logger.warning("No constituents found -- apply supabase/seed.sql first")
         return
 
-    # Index rows (NIFTY, BANKNIFTY, SENSEX -- migration 0018) so index
-    # options actually get ingested, not just stock options. nse_fo_provider
-    # only keeps IDO (index option) rows for symbols in this universe --
-    # SENSEX is seeded too but is BSE-listed, so it will never actually
-    # match a row in NSE's bhavcopy.
+    # Index rows (NIFTY, BANKNIFTY -- migration 0018; SENSEX, BANKEX --
+    # 0018/0019) so index options actually get ingested, not just stock
+    # options. The same merged universe is passed to either exchange's
+    # provider unfiltered -- each one's bhavcopy will only ever contain
+    # the symbols actually listed there (NSE: NIFTY/BANKNIFTY, BSE:
+    # SENSEX/BANKEX), so there's no need to split this set by exchange.
     index_symbols = {c.symbol for c in companies_repo.list_all_companies(client) if c.company_type == CompanyType.INDEX}
     universe |= index_symbols
 
@@ -131,10 +139,10 @@ def main() -> None:
     if args.mock:
         books = _mock_books(universe, days, end)
     elif args.date:
-        book = nse_fo_provider.fetch_fo_bhavcopy(end, universe=universe)
+        book = provider.fetch_fo_bhavcopy(end, universe=universe)
         books = [book] if book and not book.is_empty else []
     else:
-        books = _live_books(universe, days, end)
+        books = _live_books(provider, universe, days, end)
 
     if not books:
         logger.warning("No F&O bhavcopy data found for the requested range")
@@ -152,8 +160,8 @@ def main() -> None:
     fo_repo.refresh_open_flags(client, date.today())
 
     logger.info(
-        "F&O ingest complete: %d days, %d futures + %d option daily rows for %d symbols",
-        len(books), totals["futures_prices"], totals["option_prices"], len(universe),
+        "F&O ingest complete (%s): %d days, %d futures + %d option daily rows for %d symbols",
+        args.exchange.upper(), len(books), totals["futures_prices"], totals["option_prices"], len(universe),
     )
 
     # Option data just changed, which feeds the Dashboard's precomputed 5%

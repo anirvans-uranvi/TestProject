@@ -24,6 +24,7 @@ from src.repositories import (
 from src.services.explanation import explain_classification
 from src.services.threshold_override import recompute_with_user_thresholds
 from src.utils.formatting import alert_type_label, format_crores, format_inr, format_pct, pass_fail_badge, summarize_alert_config
+from src.utils.refresh_bar import render_global_refresh_bar
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.timezones import format_ist, now_ist
 from src.utils.ui import buy_sell_label, inject_global_styles, plotly_template, render_alert_row, render_disclaimer, render_stat_grid, status_badge
@@ -37,6 +38,8 @@ user_settings = settings_repo.get_user_settings(client, user_id)
 inject_global_styles(user_settings.theme)  # re-inject with the user's actual theme -- a later <style> tag wins
 
 st.title("🔍 Stock Detail")
+render_disclaimer()
+render_global_refresh_bar(client)
 
 companies = companies_repo.list_current_constituents(client)
 # Union with this user's own resolved portfolio symbols (ETFs, non-Nifty50
@@ -78,8 +81,6 @@ with col2:
 with col3:
     st.metric("Latest price", format_inr(row.latest_price))
     st.caption(f"As of {format_ist(now_ist())} · snapshot {row.snapshot_date}")
-
-render_disclaimer()
 
 if st.button("📊 View F&O / options for this stock"):
     st.session_state["fo_symbol"] = symbol

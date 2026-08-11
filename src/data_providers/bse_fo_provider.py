@@ -1,0 +1,124 @@
+"""BSE F&O data provider: the daily UDiFF bhavcopy -- same SEBI-mandated
+format as src/data_providers/nse_fo_provider.py's NSE source, confirmed
+live: identical column schema, identical FinInstrmTp codes, downloadable
+with just a browser User-Agent from BSE's own site:
+
+    https://www.bseindia.com/download/Bhavcopy/Derivative/BhavCopy_BSE_FO_0_0_0_YYYYMMDD_F_0000.CSV
+
+Unlike NSE's file, **this one is a plain CSV, not a zip** -- confirmed
+live, no zipfile handling needed here. Built specifically so SENSEX and
+BANKEX index options (both BSE-listed -- NSE's own bhavcopy never
+contains them) have a real F&O data source: before this, a Dhan-synced
+SENSEX/BANKEX position could only ever show LTP as N/A (see migration
+0018's Index company_type rows and pages/6_Portfolio.py's Dhan LTP
+fallback). BSE's bhavcopy also carries STF/STO rows for many of the same
+stock underlyings NSE does (liquidity there is negligible in practice,
+but this app's `universe` filter already scopes ingestion to symbols it
+tracks, so there's no reason to special-case them out).
+
+The CSV parsing itself is shared with nse_fo_provider.py via
+src/data_providers/udiff_bhavcopy.py; this module only owns BSE-specific
+URL/download mechanics.
+"""
+from __future__ import annotations
+
+from datetime import date, timedelta
+
+import requests
+
+from src.data_providers.udiff_bhavcopy import FOBhavcopy, parse_udiff_bhavcopy
+
+SOURCE_NAME = "bse_fo_bhavcopy"
+
+BHAVCOPY_URL_TEMPLATE = (
+    "https://www.bseindia.com/download/Bhavcopy/Derivative/"
+    "BhavCopy_BSE_FO_0_0_0_{yyyymmdd}_F_0000.CSV"
+)
+
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+# Same allow-list as nse_fo_provider.py -- see that module's docstring for
+# why index futures (IDF) stay out of scope.
+_FUTURES_TYPES = {"STF"}
+_OPTION_TYPES = {"STO", "IDO"}
+
+
+def bhavcopy_url(trade_date: date) -> str:
+    return BHAVCOPY_URL_TEMPLATE.format(yyyymmdd=trade_date.strftime("%Y%m%d"))
+
+
+def parse_fo_bhavcopy(
+    csv_text: str,
+    trade_date: date | None = None,
+    universe: set[str] | None = None,
+) -> FOBhavcopy:
+    """Parse BSE bhavcopy CSV text into the four F&O table shapes -- same
+    rules as nse_fo_provider.parse_fo_bhavcopy (identical UDiFF schema),
+    just stamped with this module's own `source_name` for traceability."""
+    return parse_udiff_bhavcopy(
+        csv_text,
+        source_name=SOURCE_NAME,
+        futures_types=_FUTURES_TYPES,
+        option_types=_OPTION_TYPES,
+        trade_date=trade_date,
+        universe=universe,
+    )
+
+
+def download_bhavcopy_csv(
+    trade_date: date, session: requests.Session | None = None, timeout: int = 30
+) -> str | None:
+    """Download one day's F&O bhavcopy, returning its CSV text directly --
+    no unzip step (unlike NSE), BSE serves this as a plain CSV.
+
+    Returns None on a 404 (weekend / holiday / not-yet-published), so
+    callers can walk backwards to the previous trading day.
+    """
+    sess = session or requests.Session()
+    resp = sess.get(bhavcopy_url(trade_date), headers=_BROWSER_HEADERS, timeout=timeout)
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    # A real bhavcopy has a header row plus many data rows; guard against
+    # BSE occasionally serving just a header (or a small HTML/PDF error
+    # body) with a 200, same reasoning as NSE's zip-size guard.
+    if len(resp.content) < 500:
+        return None
+    return resp.content.decode("utf-8", errors="replace")
+
+
+def fetch_fo_bhavcopy(
+    trade_date: date,
+    universe: set[str] | None = None,
+    session: requests.Session | None = None,
+) -> FOBhavcopy | None:
+    """Download + parse one day's bhavcopy. None if that day has no file."""
+    csv_text = download_bhavcopy_csv(trade_date, session=session)
+    if csv_text is None:
+        return None
+    return parse_fo_bhavcopy(csv_text, trade_date=trade_date, universe=universe)
+
+
+def latest_available_bhavcopy(
+    universe: set[str] | None = None,
+    on_or_before: date | None = None,
+    max_lookback: int = 7,
+    session: requests.Session | None = None,
+) -> FOBhavcopy | None:
+    """Walk back from `on_or_before` (default today) up to `max_lookback` days
+    to the most recent published F&O bhavcopy, skipping weekends/holidays."""
+    sess = session or requests.Session()
+    d = on_or_before or date.today()
+    for _ in range(max_lookback):
+        parsed = fetch_fo_bhavcopy(d, universe=universe, session=sess)
+        if parsed is not None and not parsed.is_empty:
+            return parsed
+        d -= timedelta(days=1)
+    return None

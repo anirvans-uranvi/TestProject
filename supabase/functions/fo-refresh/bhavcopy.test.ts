@@ -1,7 +1,9 @@
 // Tests for bhavcopy.ts's zip reader + CSV parser. Run with:
 //   deno test supabase/functions/fo-refresh/bhavcopy.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { bhavcopyUrl, extractFirstZipEntry, fetchBhavcopyText, looksLikeZipContentType, parseFoBhavcopy } from "./bhavcopy.ts";
+import { bhavcopyUrl, extractFirstZipEntry, fetchBhavcopyText, looksLikeZipContentType, parseFoBhavcopy, sourceName } from "./bhavcopy.ts";
+
+const NSE_SOURCE = sourceName("NSE");
 
 // --- zip reader --------------------------------------------------------
 
@@ -179,9 +181,19 @@ Deno.test("fetchBhavcopyText - passes a bounded AbortSignal to fetch (so a hang 
 
 // --- URL building --------------------------------------------------------
 
-Deno.test("bhavcopyUrl - formats YYYYMMDD and uses the nsearchives host", () => {
+Deno.test("bhavcopyUrl - formats YYYYMMDD and uses the nsearchives host for NSE (default)", () => {
   const url = bhavcopyUrl("2026-07-16");
   assertEquals(url, "https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_20260716_F_0000.csv.zip");
+});
+
+Deno.test("bhavcopyUrl - formats YYYYMMDD and uses the bseindia host for BSE", () => {
+  const url = bhavcopyUrl("2026-07-16", "BSE");
+  assertEquals(url, "https://www.bseindia.com/download/Bhavcopy/Derivative/BhavCopy_BSE_FO_0_0_0_20260716_F_0000.CSV");
+});
+
+Deno.test("sourceName - distinct per exchange, both suffixed _edge", () => {
+  assertEquals(sourceName("NSE"), "nse_fo_bhavcopy_edge");
+  assertEquals(sourceName("BSE"), "bse_fo_bhavcopy_edge");
 });
 
 // --- CSV parsing (mirrors tests/test_nse_fo_provider.py's fixture) -------
@@ -221,7 +233,7 @@ const ROWS = [
 const SAMPLE_CSV = HEADER + "\n" + ROWS.join("\n") + "\n";
 
 Deno.test("parseFoBhavcopy - splits futures and options, ignores index futures but keeps index options", () => {
-  const book = parseFoBhavcopy(SAMPLE_CSV, new Set(["RELIANCE", "TCS", "NIFTY"]));
+  const book = parseFoBhavcopy(SAMPLE_CSV, new Set(["RELIANCE", "TCS", "NIFTY"]), NSE_SOURCE);
   assertEquals(book.futuresPrices.length, 2);
   assertEquals(book.optionPrices.length, 3);
   assertEquals(new Set(book.futuresPrices.map((p) => p.symbol)), new Set(["RELIANCE", "TCS"]));
@@ -229,13 +241,13 @@ Deno.test("parseFoBhavcopy - splits futures and options, ignores index futures b
 });
 
 Deno.test("parseFoBhavcopy - universe filter excludes symbols outside it", () => {
-  const book = parseFoBhavcopy(SAMPLE_CSV, new Set(["RELIANCE"]));
+  const book = parseFoBhavcopy(SAMPLE_CSV, new Set(["RELIANCE"]), NSE_SOURCE);
   assertEquals(book.futuresPrices.length, 1);
   assertEquals(book.futuresPrices[0].symbol, "RELIANCE");
 });
 
 Deno.test("parseFoBhavcopy - futures field mapping", () => {
-  const book = parseFoBhavcopy(SAMPLE_CSV, new Set(["RELIANCE"]));
+  const book = parseFoBhavcopy(SAMPLE_CSV, new Set(["RELIANCE"]), NSE_SOURCE);
   const fut = book.futuresPrices[0];
   assertEquals(fut.expiry_date, "2026-07-28");
   assertEquals(fut.trade_date, "2026-07-16");
@@ -252,7 +264,7 @@ Deno.test("parseFoBhavcopy - futures field mapping", () => {
 });
 
 Deno.test("parseFoBhavcopy - option field mapping (CE and PE)", () => {
-  const book = parseFoBhavcopy(SAMPLE_CSV, new Set(["RELIANCE"]));
+  const book = parseFoBhavcopy(SAMPLE_CSV, new Set(["RELIANCE"]), NSE_SOURCE);
   const ce = book.optionPrices.find((p) => p.option_type === "CE")!;
   const pe = book.optionPrices.find((p) => p.option_type === "PE")!;
   assertEquals(ce.strike_price, 1300.0);
@@ -268,7 +280,7 @@ Deno.test("parseFoBhavcopy - empty/missing numeric cells parse to null, not a cr
   const csv = HEADER + "\n" +
     "2026-07-16,2026-07-16,FO,NSE,STO,140006,,RELIANCE,,2026-07-28,2026-07-28,1400.00,CE," +
     "RELIANCE26JUL1400CE,,,,,,,,,,,,,,F1,,,,,,\n";
-  const book = parseFoBhavcopy(csv, new Set(["RELIANCE"]));
+  const book = parseFoBhavcopy(csv, new Set(["RELIANCE"]), NSE_SOURCE);
   assertEquals(book.optionPrices.length, 1);
   const opt = book.optionPrices[0];
   assertEquals(opt.last_price, null);
@@ -277,6 +289,15 @@ Deno.test("parseFoBhavcopy - empty/missing numeric cells parse to null, not a cr
 });
 
 Deno.test("parseFoBhavcopy - tradeDate is the first row's trade date", () => {
-  const book = parseFoBhavcopy(SAMPLE_CSV, new Set(["RELIANCE", "TCS"]));
+  const book = parseFoBhavcopy(SAMPLE_CSV, new Set(["RELIANCE", "TCS"]), NSE_SOURCE);
   assertEquals(book.tradeDate, "2026-07-16");
+});
+
+Deno.test("parseFoBhavcopy - stamps the given source onto every price row, distinct per exchange", () => {
+  const nseBook = parseFoBhavcopy(SAMPLE_CSV, new Set(["RELIANCE"]), sourceName("NSE"));
+  const bseBook = parseFoBhavcopy(SAMPLE_CSV, new Set(["RELIANCE"]), sourceName("BSE"));
+  assertEquals(nseBook.futuresPrices[0].source, "nse_fo_bhavcopy_edge");
+  assertEquals(nseBook.optionPrices[0].source, "nse_fo_bhavcopy_edge");
+  assertEquals(bseBook.futuresPrices[0].source, "bse_fo_bhavcopy_edge");
+  assertEquals(bseBook.optionPrices[0].source, "bse_fo_bhavcopy_edge");
 });
