@@ -437,6 +437,29 @@ another exchange's scope is narrowed the same way, repeat this cleanup**
 -- the code has no automatic mechanism to purge rows an exchange is no
 longer allowed to write, only to stop writing new ones.
 
+**The contract dimension tables need the same cleanup, separately.**
+`futures_contracts`/`option_contracts` have no `source` column at all --
+they just record that a contract (symbol + expiry[, strike, type])
+exists, independent of which exchange's bhavcopy last mentioned it. BSE
+had, in some cases, listed an expiry date NSE never uses for that symbol
+at all (observed live: BSE carried a spurious `2026-08-27` expiry for
+HDFCBANK and 19 other symbols, and `2026-09-24`/`2026-10-29` for a
+handful more, none of which NSE's own bhavcopy has ever listed). Deleting
+the stale *price* rows (above) left these *contract* rows behind as
+orphans -- zero price history, but still a real row, so `fo_repo.
+list_option_expiries` (and the Options page's near/next/far expiry
+picker) kept listing that phantom date with every column showing N/A.
+Fixed the same way: for each symbol touched by the price cleanup above,
+diff its contract-table expiry dates against its price-table expiry
+dates and delete whichever `(symbol, expiry_date)` combination in
+`option_contracts`/`futures_contracts` has zero matching rows in
+`option_daily_prices`/`futures_daily_prices` (36 + 20 rows respectively,
+the exact 20/18-symbol scope as the price-row cleanup). **Whenever the
+price-row cleanup above is repeated, repeat this contract-row check too**
+-- the two tables can drift out of sync independently, and deleting only
+the prices leaves a silently-broken phantom expiry behind rather than
+just making the symbol's chain look normal again.
+
 **Greeks / implied volatility are intentionally NOT stored** — not in the
 bhavcopy (or any free source), and computing them was scoped out. The
 tables can gain those columns + a `greeks.py` later without reshaping.
