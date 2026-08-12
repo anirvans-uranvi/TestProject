@@ -412,6 +412,31 @@ constant), deriving its allow-list per call via
 module-level `Set`s it originally had -- those two functions encode the
 identical NSE/BSE split as the two Python providers.
 
+**Gotcha: narrowing an exchange's allow-list doesn't retroactively clean
+up rows it already wrote.** `futures_daily_prices`/`option_daily_prices`
+are keyed by `(symbol, expiry_date[, strike_price, option_type],
+trade_date)` (migration `0007`) -- **no exchange/source column in the
+key** -- and `latest_futures_view`/`latest_option_chain_view` pick
+`distinct on (contract) order by trade_date desc`, i.e. whichever
+exchange wrote the newest `trade_date` for that exact contract wins,
+regardless of which exchange it was. When `bse_fo_provider.py` was
+narrowed to index-options-only, that only stopped *future* BSE writes --
+rows BSE had already written for stock contracts stayed in place, and for
+any contract where NSE's bhavcopy hadn't listed that exact strike again
+since (routine for a less-active strike, since NSE's file only includes
+contracts that actually traded that session), the old BSE row kept
+winning "latest" indefinitely. Confirmed live: 36 option contracts across
+20 symbols (including HDFCBANK's 680 CE/PE and 820 PE) and 20 futures
+contracts across 18 symbols were still showing stale BSE prices days
+after the restriction shipped. Fixed with a one-time manual cleanup
+(deleting `option_daily_prices`/`futures_daily_prices` rows where
+`source LIKE 'bse_fo_bhavcopy%'` and, for options, the symbol isn't
+SENSEX/BANKEX) rather than a code change -- the ingestion code itself was
+already correct going forward. **If this restriction is ever loosened or
+another exchange's scope is narrowed the same way, repeat this cleanup**
+-- the code has no automatic mechanism to purge rows an exchange is no
+longer allowed to write, only to stop writing new ones.
+
 **Greeks / implied volatility are intentionally NOT stored** — not in the
 bhavcopy (or any free source), and computing them was scoped out. The
 tables can gain those columns + a `greeks.py` later without reshaping.
