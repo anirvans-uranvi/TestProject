@@ -114,10 +114,16 @@ def get_latest_fo_trade_date(client: Client, source_prefix: str | None = None) -
     from `fetch_log_repo`'s `finished_at` (when the ingestion job last
     *ran*), since a bhavcopy is published for a specific trading day that
     can lag the run itself (e.g. a run on a non-trading day finds nothing
-    new and reuses the prior session's file). Futures and options are
-    always ingested together from the same bhavcopy file, so either
-    table's max trade_date is equivalent -- futures_daily_prices is
-    smaller and queried here for that reason.
+    new and reuses the prior session's file).
+
+    Checks both `futures_daily_prices` and `option_daily_prices` and
+    returns the newer of the two. They used to always move together (same
+    bhavcopy file, same run) so either table's max trade_date was
+    equivalent -- that stopped being true once BSE was restricted to
+    index options only (`bse_fo_provider.py`'s `_FUTURES_TYPES = set()`):
+    a BSE run never writes a `futures_daily_prices` row anymore, so a
+    futures-only query would freeze on BSE's last pre-restriction futures
+    date forever, even as new BSE option data keeps landing.
 
     `source_prefix` narrows to one exchange (`"nse_fo_bhavcopy"` /
     `"bse_fo_bhavcopy"`, matching both that exchange's cron/backfill rows
@@ -127,15 +133,20 @@ def get_latest_fo_trade_date(client: Client, source_prefix: str | None = None) -
     the same trading days, so an unscoped query can't tell you which
     exchange's file is actually the most recent, only the newest of
     either."""
-    query = client.table("futures_daily_prices").select("trade_date")
-    if source_prefix is not None:
-        query = query.like("source", f"{source_prefix}%")
-    resp = query.order("trade_date", desc=True).limit(1).execute()
-    rows = resp.data or []
-    if not rows:
-        return None
-    trade_date = rows[0]["trade_date"]
-    return date.fromisoformat(trade_date) if isinstance(trade_date, str) else trade_date
+    latest: date | None = None
+    for table in ("futures_daily_prices", "option_daily_prices"):
+        query = client.table(table).select("trade_date")
+        if source_prefix is not None:
+            query = query.like("source", f"{source_prefix}%")
+        resp = query.order("trade_date", desc=True).limit(1).execute()
+        rows = resp.data or []
+        if not rows:
+            continue
+        trade_date = rows[0]["trade_date"]
+        trade_date = date.fromisoformat(trade_date) if isinstance(trade_date, str) else trade_date
+        if latest is None or trade_date > latest:
+            latest = trade_date
+    return latest
 
 
 def get_open_futures(client: Client, symbol: str) -> list[dict]:

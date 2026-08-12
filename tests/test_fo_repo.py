@@ -97,11 +97,17 @@ class _FakeLatestDateTable:
 
 
 class _FakeLatestDateClient:
-    def __init__(self, rows: list[dict]):
+    """`rows` is either a flat list (same rows for every table -- what most
+    tests need) or a dict of table name -> rows, for tests that need the
+    two tables to disagree (the BSE-index-options-only bug: no
+    futures_daily_prices rows, but option_daily_prices keeps moving)."""
+
+    def __init__(self, rows: list[dict] | dict[str, list[dict]]):
         self.rows = rows
 
     def table(self, name):
-        return _FakeLatestDateTable(self.rows)
+        table_rows = self.rows[name] if isinstance(self.rows, dict) else self.rows
+        return _FakeLatestDateTable(list(table_rows))
 
 
 class TestGetLatestFoTradeDate:
@@ -143,3 +149,26 @@ class TestGetLatestFoTradeDate:
     def test_no_source_prefix_ignores_source_entirely(self):
         client = _FakeLatestDateClient([{"trade_date": "2026-08-11", "source": "bse_fo_bhavcopy_edge"}])
         assert fo_repo.get_latest_fo_trade_date(client) == date(2026, 8, 11)
+
+    def test_falls_back_to_option_daily_prices_when_futures_has_no_rows_for_this_exchange(self):
+        # Real bug this guards against: BSE was restricted to index options
+        # only (bse_fo_provider.py's _FUTURES_TYPES = set()), so a BSE run
+        # never writes a futures_daily_prices row anymore. A futures-only
+        # query would freeze on BSE's last pre-restriction futures date
+        # forever, even as new BSE option data keeps landing -- this is
+        # what made the Dashboard's "Latest BSE Bhavcopy" stick on a stale
+        # date after a successful BSE refresh.
+        client = _FakeLatestDateClient({
+            "futures_daily_prices": [{"trade_date": "2026-08-05", "source": "bse_fo_bhavcopy"}],
+            "option_daily_prices": [{"trade_date": "2026-08-12", "source": "bse_fo_bhavcopy_edge"}],
+        })
+        result = fo_repo.get_latest_fo_trade_date(client, source_prefix="bse_fo_bhavcopy")
+        assert result == date(2026, 8, 12)
+
+    def test_uses_futures_date_when_it_is_the_newer_of_the_two_tables(self):
+        client = _FakeLatestDateClient({
+            "futures_daily_prices": [{"trade_date": "2026-08-12", "source": "nse_fo_bhavcopy_edge"}],
+            "option_daily_prices": [{"trade_date": "2026-08-11", "source": "nse_fo_bhavcopy_edge"}],
+        })
+        result = fo_repo.get_latest_fo_trade_date(client, source_prefix="nse_fo_bhavcopy")
+        assert result == date(2026, 8, 12)

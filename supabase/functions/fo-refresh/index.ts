@@ -230,22 +230,32 @@ Deno.serve(async (req: Request) => {
   }
 
   // "Already loaded" watermark: newest trade_date across this exchange's
-  // own futures rows (options are always ingested in the same run, so
-  // they share this watermark). Scoped by a `source` prefix rather than
-  // an exact match so it covers both this Edge Function's own rows
+  // own futures + option rows, scoped by a `source` prefix rather than an
+  // exact match so it covers both this Edge Function's own rows
   // (`..._edge`) and scripts/fetch_fo_data.py's cron/backfill rows for
   // the same exchange -- without this scoping, an NSE refresh today would
   // make a same-day BSE refresh (or vice versa) wrongly think it's
   // already up to date, since both exchanges publish on the same trading
   // days and previously shared one exchange-agnostic watermark query.
+  //
+  // Checks both tables (not just futures_daily_prices) because BSE is
+  // restricted to index options only -- a BSE run never writes a
+  // futures_daily_prices row, so a futures-only watermark would freeze on
+  // BSE's last pre-restriction futures date and never advance again.
   const sourcePrefix = exchange === "BSE" ? "bse_fo_bhavcopy" : "nse_fo_bhavcopy";
-  const { data: latestLoadedRows } = await serviceClient
-    .from("futures_daily_prices")
-    .select("trade_date")
-    .like("source", `${sourcePrefix}%`)
-    .order("trade_date", { ascending: false })
-    .limit(1);
-  const latestLoaded: string | null = latestLoadedRows?.[0]?.trade_date ?? null;
+  let latestLoaded: string | null = null;
+  for (const table of ["futures_daily_prices", "option_daily_prices"]) {
+    const { data: rows } = await serviceClient
+      .from(table)
+      .select("trade_date")
+      .like("source", `${sourcePrefix}%`)
+      .order("trade_date", { ascending: false })
+      .limit(1);
+    const rowDate: string | null = rows?.[0]?.trade_date ?? null;
+    if (rowDate !== null && (latestLoaded === null || rowDate > latestLoaded)) {
+      latestLoaded = rowDate;
+    }
+  }
 
   let found;
   try {

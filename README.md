@@ -448,8 +448,9 @@ POST body of `{"exchange": "NSE"}` or `{"exchange": "BSE"}`
 (`src/services/edge_refresh.py::trigger_fo_refresh(access_token, exchange)`;
 omitting the body defaults to `"NSE"`, so any old caller keeps working).
 Each checks whether that exchange has published a newer F&O bhavcopy than
-what's already in Supabase for it (`max(trade_date)` in
-`futures_daily_prices`, scoped by a `source` prefix -- see below for why)
+what's already in Supabase for it (the greater of `max(trade_date)` in
+`futures_daily_prices` and `option_daily_prices`, scoped by a `source`
+prefix -- see below for why both tables are checked, not just futures)
 and, only if so, downloads + ingests that one day -- so clicking either
 when nothing new is available is cheap (a handful of HTTP requests, no
 writes) and returns "Already up to date" instead of silently doing
@@ -498,6 +499,17 @@ rows for that exchange) -- **a real bug this fixed**: an exchange-agnostic
 watermark (comparing the newest `trade_date` across *any* source) would
 make a same-day BSE refresh think it's already up to date the moment an
 NSE refresh ran, since both exchanges publish on the same trading days.
+
+**A second real bug, caused by the index-options-only restriction above**:
+the watermark originally only checked `futures_daily_prices`. Once BSE
+stopped writing futures rows entirely, that query froze on BSE's last
+pre-restriction futures date forever -- every later BSE refresh kept
+reaching the exchange and "succeeding," but the comparison itself never
+advanced, so a manual click could report cooldown against a stale timestamp
+and the Dashboard's "Latest BSE Bhavcopy" (`fo_repo.get_latest_fo_trade_date`,
+same bug) stuck on that date even after new index-option rows landed in
+`option_daily_prices`. Fixed by checking both tables and taking the newer
+date, everywhere this watermark is read.
 
 Also recomputes `dashboard_fo_metrics` as its last step whenever it
 actually ingests a newer bhavcopy (skipped on the "already up to date"

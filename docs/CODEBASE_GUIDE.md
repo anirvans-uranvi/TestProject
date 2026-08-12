@@ -597,11 +597,12 @@ Refresh** buttons both hit the *same* second Edge Function,
 parameterized by a POST body `{"exchange": "NSE" | "BSE"}` — a TypeScript
 port of the same bhavcopy fetch+parse, but only for the single most
 recent day and only if that exchange has actually published something
-newer than what's already loaded for it (checked via `max(trade_date)`
-in `futures_daily_prices`, scoped by a `source` prefix -- see the Edge
-Functions section for why this scoping was necessary, not optional), so
-a click when nothing's new is a cheap read-only no-op rather than a
-silent re-fetch. NSE has no external zip-library dependency — see the
+newer than what's already loaded for it (checked via the greater of
+`max(trade_date)` in `futures_daily_prices` and `option_daily_prices`,
+scoped by a `source` prefix -- see the Edge Functions section for why
+this scoping was necessary, not optional, and why both tables must be
+checked), so a click when nothing's new is a cheap read-only no-op
+rather than a silent re-fetch. NSE has no external zip-library dependency — see the
 Edge Functions section for why; BSE needs no zip handling at all. Its
 `universe` set gets the identical Index-row + portfolio-symbol widening as
 `fetch_fo_data.py` above (mirrored in TypeScript via the same
@@ -1743,11 +1744,12 @@ Structurally it's a check-then-maybe-ingest, not an unconditional refresh:
   `provider_fetch_log`'s CHECK constraint by
   `0008_add_fo_fetch_type.sql`, same pattern as `0005` did for `'all'`).
   The distinguishing step: before doing any work, it reads
-  `max(trade_date)` from `futures_daily_prices` **filtered by a `source`
-  prefix** (`nse_fo_bhavcopy%` / `bse_fo_bhavcopy%`, via `.like()` --
-  covering both this Edge Function's own `..._edge`-suffixed rows and
-  `scripts/fetch_fo_data.py`'s cron/backfill rows for the same exchange)
-  and compares it against `findLatestAvailableBhavcopy(..., exchange)`'s
+  `max(trade_date)` from **both** `futures_daily_prices` and
+  `option_daily_prices`, **filtered by a `source` prefix** (`nse_fo_bhavcopy%`
+  / `bse_fo_bhavcopy%`, via `.like()` -- covering both this Edge Function's
+  own `..._edge`-suffixed rows and `scripts/fetch_fo_data.py`'s cron/backfill
+  rows for the same exchange), and takes the newer of the two dates before
+  comparing it against `findLatestAvailableBhavcopy(..., exchange)`'s
   result (that exchange's latest watermark) — if the exchange has nothing
   newer, it returns `{exchange, updated: false, message, latestAvailable,
   latestLoaded}` immediately, with zero writes. **The `source` filter is
@@ -1755,7 +1757,16 @@ Structurally it's a check-then-maybe-ingest, not an unconditional refresh:
   filter at all (fine when only NSE existed), and adding BSE without
   scoping it would have meant an NSE refresh today makes a same-day BSE
   refresh think it's already up to date, since both exchanges publish on
-  the same trading days and would otherwise share one watermark. Only
+  the same trading days and would otherwise share one watermark. **Checking
+  both tables is also not optional** — once BSE was restricted to index
+  options only (`_FUTURES_TYPES = set()` in `bse_fo_provider.py`), a BSE
+  run stopped writing any `futures_daily_prices` row at all, so a
+  futures-only watermark froze on BSE's last pre-restriction futures date
+  forever: every later BSE refresh kept "succeeding" against the exchange
+  but comparing against that stale date, and the Dashboard's "Latest BSE
+  Bhavcopy" (`fo_repo.get_latest_fo_trade_date`, same futures-only bug,
+  fixed the same way) stuck on that date too even though new index-option
+  rows were landing in `option_daily_prices`. Only
   when that exchange's date is strictly newer does it parse (stamping
   rows with `sourceName(exchange)`) and upsert into all four F&O tables
   (chunked at 500 rows, matching `fo_repo.py`'s Python chunk size) and
