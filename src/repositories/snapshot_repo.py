@@ -48,6 +48,37 @@ def get_latest_prices(client: Client, symbols: list[str]) -> dict[str, float]:
     return prices
 
 
+def get_latest_returns_and_pe(client: Client, symbols: list[str]) -> dict[str, dict]:
+    """Latest return_1d/return_5d/return_20d/pe_ratio per symbol, queried
+    directly against daily_screener_snapshots for the same reason as
+    get_latest_prices above (latest_screener_view's inner join on
+    nifty50_constituents.is_current would silently drop portfolio-only
+    ETFs/funds). Each symbol's dict is taken from its single most recent
+    snapshot row as-is (no cross-row carry-forward for a field that's null
+    in that row) -- same convention Stock Detail's PE display already
+    uses via get_latest_screener_row."""
+    if not symbols:
+        return {}
+    resp = (
+        client.table("daily_screener_snapshots")
+        .select("symbol, snapshot_date, return_1d, return_5d, return_20d, pe_ratio")
+        .in_("symbol", symbols)
+        .order("snapshot_date", desc=True)
+        .execute()
+    )
+    result: dict[str, dict] = {}
+    for row in resp.data or []:
+        symbol = row["symbol"]
+        if symbol not in result:
+            result[symbol] = {
+                "return_1d": row.get("return_1d"),
+                "return_5d": row.get("return_5d"),
+                "return_20d": row.get("return_20d"),
+                "pe_ratio": row.get("pe_ratio"),
+            }
+    return result
+
+
 def get_previous_snapshot(client: Client, symbol: str, before_date: date) -> DailyScreenerSnapshot | None:
     resp = (
         client.table("daily_screener_snapshots")

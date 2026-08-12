@@ -8,6 +8,7 @@ import streamlit as st
 from postgrest.exceptions import APIError
 from pydantic import ValidationError
 
+from src.calculations.returns import value_change_from_pct
 from src.data_providers.base import ProviderError
 from src.data_providers.dhan_provider import DhanAuthError, DhanProvider
 from src.models.enums import CompanyType
@@ -63,6 +64,11 @@ def _load_all_companies(_client, _cache_bust: int):
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_latest_prices(_client, symbols: tuple[str, ...], _cache_bust: int):
     return snapshot_repo.get_latest_prices(_client, list(symbols))
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_returns_and_pe(_client, symbols: tuple[str, ...], _cache_bust: int):
+    return snapshot_repo.get_latest_returns_and_pe(_client, list(symbols))
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -501,8 +507,24 @@ def _load_covered_calls(symbols: tuple[str, ...], expiry_iso: str | None) -> dic
     return chains
 
 
+def _fmt_value_change(change: float | None, pct: float | None) -> str:
+    """"₹+12,345.67 (+2.34%)" -- absolute rupee change for the period with
+    its percentage in parentheses, or an em dash when either half is
+    missing (no snapshot far enough back yet, e.g. a fund newly added to
+    the portfolio)."""
+    if change is None or pct is None:
+        return "—"
+    return f"₹{change:+,.2f} ({pct:+.2f}%)"
+
+
 def _render_holdings_table(
-    *, title: str, rows: list[dict], portfolio_name: str, key_suffix: str, cc_by_symbol: dict
+    *,
+    title: str,
+    rows: list[dict],
+    portfolio_name: str,
+    key_suffix: str,
+    cc_by_symbol: dict,
+    returns_pe_by_symbol: dict | None = None,
 ) -> None:
     """Renders one Holdings table -- either the "ETFs & Mutual Funds" or
     "Stocks" split (see _render_portfolio_tab) -- plus the single-row-
@@ -516,7 +538,16 @@ def _render_holdings_table(
     currently sorted, which a *pre-sort*-indexed button column can't
     guarantee. Columns are kept as real numbers, formatted for display via
     column_config, so a header-click sort compares the underlying value
-    (not a "₹10,81,452.10"-style string, which would sort alphabetically)."""
+    (not a "₹10,81,452.10"-style string, which would sort alphabetically).
+
+    `returns_pe_by_symbol` (keyed by symbol, each value a dict with
+    return_1d/return_5d/return_20d/pe_ratio from
+    snapshot_repo.get_latest_returns_and_pe) is optional -- only the
+    ETFs & Mutual Funds call site passes it, adding the 1D/5D/20D value-
+    change and TTM PE columns; the Stocks table stays as before. The
+    period returns are percentages (daily_screener_snapshots has no stored
+    historical price), so the rupee change is derived via
+    value_change_from_pct(cur_val, return_pct) rather than read directly."""
     st.markdown(f"**{title}**")
     if not rows:
         st.caption("None.")
@@ -526,20 +557,43 @@ def _render_holdings_table(
     for r in rows:
         stock = r["symbol"] or f'{r["raw_name"]} (unmatched)'
         cc = cc_by_symbol.get(r["symbol"]) if r["symbol"] else None
-        table_rows.append(
-            {
-                "Stock": stock,
-                "Qty": r["qty"],
-                "Avg Price": r["avg_price"],
-                "LTP": r["ltp"],
-                "Investment": r["investment"],
-                "Cur Val": r["cur_val"],
-                "P&L": r["pnl"],
-                "P&L %": r["pnl_pct"],
-                "CC ROI": cc["cc_roi_pct"] if cc and cc["cc_roi_pct"] is not None else None,
-                "CC Assignment ROI": cc["assignment_roi_pct"] if cc and cc["assignment_roi_pct"] is not None else None,
-            }
-        )
+        row_out = {
+            "Stock": stock,
+            "Qty": r["qty"],
+            "Avg Price": r["avg_price"],
+            "LTP": r["ltp"],
+            "Investment": r["investment"],
+            "Cur Val": r["cur_val"],
+            "P&L": r["pnl"],
+            "P&L %": r["pnl_pct"],
+            "CC ROI": cc["cc_roi_pct"] if cc and cc["cc_roi_pct"] is not None else None,
+            "CC Assignment ROI": cc["assignment_roi_pct"] if cc and cc["assignment_roi_pct"] is not None else None,
+        }
+        if returns_pe_by_symbol is not None:
+            rp = returns_pe_by_symbol.get(r["symbol"]) if r["symbol"] else None
+            cur_val = r["cur_val"]
+            return_1d = rp["return_1d"] if rp else None
+            return_5d = rp["return_5d"] if rp else None
+            return_20d = rp["return_20d"] if rp else None
+            row_out["1D Change"] = _fmt_value_change(value_change_from_pct(cur_val, return_1d), return_1d)
+            row_out["5D Change"] = _fmt_value_change(value_change_from_pct(cur_val, return_5d), return_5d)
+            row_out["20D Change"] = _fmt_value_change(value_change_from_pct(cur_val, return_20d), return_20d)
+            row_out["TTM PE"] = rp["pe_ratio"] if rp else None
+        table_rows.append(row_out)
+
+    column_config = {
+        "Qty": st.column_config.NumberColumn(format="%,.0f"),
+        "Avg Price": st.column_config.NumberColumn(format="₹%,.2f"),
+        "LTP": st.column_config.NumberColumn(format="₹%,.2f"),
+        "Investment": st.column_config.NumberColumn(format="₹%,.2f"),
+        "Cur Val": st.column_config.NumberColumn(format="₹%,.2f"),
+        "P&L": st.column_config.NumberColumn(format="₹%,.2f"),
+        "P&L %": st.column_config.NumberColumn(format="%+.2f%%"),
+        "CC ROI": st.column_config.NumberColumn(format="%.2f%%"),
+        "CC Assignment ROI": st.column_config.NumberColumn(format="%+.2f%%"),
+    }
+    if returns_pe_by_symbol is not None:
+        column_config["TTM PE"] = st.column_config.NumberColumn(format="%.2f")
 
     event = st.dataframe(
         pd.DataFrame(table_rows),
@@ -548,17 +602,7 @@ def _render_holdings_table(
         on_select="rerun",
         selection_mode="single-row",
         key=f"portfolio_table_{key_suffix}_{_slug(portfolio_name)}",
-        column_config={
-            "Qty": st.column_config.NumberColumn(format="%,.0f"),
-            "Avg Price": st.column_config.NumberColumn(format="₹%,.2f"),
-            "LTP": st.column_config.NumberColumn(format="₹%,.2f"),
-            "Investment": st.column_config.NumberColumn(format="₹%,.2f"),
-            "Cur Val": st.column_config.NumberColumn(format="₹%,.2f"),
-            "P&L": st.column_config.NumberColumn(format="₹%,.2f"),
-            "P&L %": st.column_config.NumberColumn(format="%+.2f%%"),
-            "CC ROI": st.column_config.NumberColumn(format="%.2f%%"),
-            "CC Assignment ROI": st.column_config.NumberColumn(format="%+.2f%%"),
-        },
+        column_config=column_config,
     )
     selected_rows = event.selection.rows if event and event.selection else []
     if selected_rows:
@@ -661,12 +705,16 @@ def _render_portfolio_tab(
     etf_fund_rows = [r for r in rows if _is_etf_or_fund(r["symbol"])]
     stock_rows = [r for r in rows if not _is_etf_or_fund(r["symbol"])]
 
+    etf_symbols = tuple(sorted({r["symbol"] for r in etf_fund_rows if r["symbol"]}))
+    returns_pe_by_symbol = _load_returns_and_pe(client, etf_symbols, st.session_state["portfolio_cache_bust"])
+
     _render_holdings_table(
         title="ETFs & Mutual Funds",
         rows=etf_fund_rows,
         portfolio_name=portfolio_name,
         key_suffix="etf",
         cc_by_symbol=cc_by_symbol,
+        returns_pe_by_symbol=returns_pe_by_symbol,
     )
     _render_holdings_table(
         title="Stocks", rows=stock_rows, portfolio_name=portfolio_name, key_suffix="stock", cc_by_symbol=cc_by_symbol

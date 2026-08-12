@@ -1402,6 +1402,48 @@ to "Stocks". The Total Investment/Cur Val/P&L/P&L% stat grid above both
 tables is untouched -- it still aggregates across every holding regardless
 of which table it lands in.
 
+**ETFs & Mutual Funds table only: 1D/5D/20D Change + TTM PE** —
+`_render_holdings_table` takes an optional `returns_pe_by_symbol` dict
+(keyed by symbol; only the ETF/MF call site passes one, the Stocks call
+site doesn't, so those four columns exist on one table only). Sourced by
+a new bulk repo function, `snapshot_repo.get_latest_returns_and_pe`,
+modeled directly on the existing `get_latest_prices` right above it in
+the same file: queries `daily_screener_snapshots` directly (not
+`latest_screener_view`, whose inner join on `nifty50_constituents.
+is_current` would silently drop every portfolio-only ETF), takes each
+symbol's single most recent row (`order by snapshot_date desc`, first
+row per symbol wins, no cross-row carry-forward for a field that's null
+in that latest row -- same simple convention Stock Detail's own PE
+display already uses via `get_latest_screener_row`), and returns
+`{symbol: {return_1d, return_5d, return_20d, pe_ratio}}`.
+
+`daily_screener_snapshots` only stores *percentage* returns, not
+historical closes, so the "1D/5D/20D Change" columns' rupee amounts are
+derived, not read: `src/calculations/returns.py::value_change_from_pct
+(current_value, return_pct)` is the algebraic inverse of the same file's
+`pct_return` (`base = current/(1+pct/100)`, `change = current - base`,
+which simplifies to `current * pct/(100+pct)`). Passing `cur_val`
+(`qty * ltp`, the holding's *total* current value) rather than `ltp`
+alone gives the position's whole-holding rupee change, matching how the
+existing P&L column is already a rupee amount over the position, not a
+per-share one -- the formula is linear in `current_value` so either
+works, this just matches the table's existing convention. Formatted as
+one combined string per cell (`_fmt_value_change`, e.g.
+`"₹+588.24 (+2.00%)"`, or `"—"` when either half is missing), not split
+across separate amount/percent columns like P&L/P&L% -- deliberately
+different from that existing pair, since three periods as six columns
+would be repetitive.
+
+`pe_ratio` here is yfinance's `trailingPE` (TTM, not forward --
+`YFinanceFundamentalsProvider.get_fundamentals` in
+`src/data_providers/yfinance_provider.py`), the same field Stock Detail's
+"PE ratio" row already shows for the Nifty50 universe. Expect it blank
+for most ETFs/funds in practice — yfinance commonly returns no PE for
+them, a gap the refresh pipeline already tolerates elsewhere via
+`DataQuality.missing_pe`/`is_stale` rather than treating it as an error;
+this column shows that same absence as a blank cell, not a crash or a
+misleading zero.
+
 **Trades (`portfolio_trade_groups`, migration `0020`)** — F&O positions
 are grouped into "Trades" rather than listed as one flat table. The
 default grouping needs no stored state at all: `portfolio_service.

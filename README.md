@@ -609,10 +609,24 @@ Nifty50 screener universe. Each portfolio tab has two sections:
   market data, split into two tables by `companies.company_type`
   (migration `0018`): **ETFs & Mutual Funds** (`ETF`/`Fund`) first, then
   **Stocks** (`Equity`/`Index`, and any still-unresolved holding, since
-  there's no better signal for those). Each table has the same columns:
-  Stock, Qty, Avg Price, LTP, Investment, Cur Val, P&L, P&L%, plus two
+  there's no better signal for those). Both tables share the base columns
+  -- Stock, Qty, Avg Price, LTP, Investment, Cur Val, P&L, P&L%, plus two
   covered-call columns (see below); the Total Investment/Cur Val/P&L/P&L%
-  stat grid above both tables still aggregates across everything.
+  stat grid above both tables still aggregates across everything. **The
+  ETFs & Mutual Funds table only** additionally shows **1D/5D/20D Change**
+  (the holding's rupee value change over that period, `%` in parentheses
+  -- e.g. `₹+588.24 (+2.00%)`) and **TTM PE** (trailing PE, blank for most
+  ETFs/funds -- yfinance rarely returns one for them, same documented gap
+  the refresh pipeline already tolerates elsewhere). Sourced from
+  `daily_screener_snapshots` via `snapshot_repo.get_latest_returns_and_pe`
+  (`return_1d`/`return_5d`/`return_20d`/`pe_ratio`, the same fields
+  Dashboard/Stock Detail already read for the Nifty50 universe) -- that
+  table stores only *percentage* returns, not historical closes, so the
+  rupee change is derived via `src/calculations/returns.py::
+  value_change_from_pct(cur_val, return_pct)`, the algebraic inverse of
+  `pct_return`. Not shown on the Stocks table -- the user only asked for
+  it on ETFs/funds, where a quick freshness/valuation check across a
+  handful of large index positions is the actual use case.
 - **My Positions** -- open F&O (options) positions decoded from the same
   broker exports, grouped into **Trades** (see below): Trade ID, Symbol,
   Expiry, Strike, Type, Qty (signed -- negative is short), Avg Price, LTP,

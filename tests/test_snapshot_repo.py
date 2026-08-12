@@ -1,0 +1,98 @@
+"""Tests for snapshot_repo's bulk-fetch helpers."""
+import types
+
+from src.repositories import snapshot_repo
+
+
+class _FakeSnapshotTable:
+    """Mimics .select().in_(...).order(...).execute() -- just enough for
+    get_latest_returns_and_pe, which doesn't paginate. `.in_()` actually
+    filters (unlike `.order()`, a no-op here) so tests can confirm the
+    symbol filter works, not just that the call doesn't crash."""
+
+    def __init__(self, rows: list[dict]):
+        self.rows = rows
+
+    def select(self, *args, **kwargs):
+        return self
+
+    def in_(self, column: str, values: list[str]):
+        wanted = set(values)
+        self.rows = [r for r in self.rows if r.get(column) in wanted]
+        return self
+
+    def order(self, *args, **kwargs):
+        return self
+
+    def execute(self):
+        return types.SimpleNamespace(data=self.rows)
+
+
+class _FakeSnapshotClient:
+    def __init__(self, rows: list[dict]):
+        self.rows = rows
+
+    def table(self, name):
+        return _FakeSnapshotTable(list(self.rows))
+
+
+class TestGetLatestReturnsAndPe:
+    def test_empty_symbols_returns_empty_dict_without_querying(self):
+        client = _FakeSnapshotClient([{"symbol": "NIFTYBEES", "return_1d": 1.0}])
+        assert snapshot_repo.get_latest_returns_and_pe(client, []) == {}
+
+    def test_returns_fields_from_the_single_most_recent_row_per_symbol(self):
+        # Rows must already come back newest-first from the query (mirrors
+        # the real .order("snapshot_date", desc=True)) -- this fake doesn't
+        # re-sort, it just proves the "first row wins per symbol" dedup.
+        client = _FakeSnapshotClient(
+            [
+                {
+                    "symbol": "NIFTYBEES",
+                    "snapshot_date": "2026-08-12",
+                    "return_1d": 0.5,
+                    "return_5d": 1.2,
+                    "return_20d": 3.4,
+                    "pe_ratio": None,
+                },
+                {
+                    "symbol": "NIFTYBEES",
+                    "snapshot_date": "2026-08-11",
+                    "return_1d": 9.9,
+                    "return_5d": 9.9,
+                    "return_20d": 9.9,
+                    "pe_ratio": 22.1,
+                },
+            ]
+        )
+        result = snapshot_repo.get_latest_returns_and_pe(client, ["NIFTYBEES"])
+        assert result == {
+            "NIFTYBEES": {"return_1d": 0.5, "return_5d": 1.2, "return_20d": 3.4, "pe_ratio": None}
+        }
+
+    def test_does_not_carry_forward_a_null_field_from_an_older_row(self):
+        # Real behavior to lock in: unlike fundamentals_repo's carry-forward,
+        # this takes the latest row's fields as-is -- a null PE in the
+        # newest snapshot stays null even if an older snapshot had a value.
+        client = _FakeSnapshotClient(
+            [
+                {"symbol": "GOLDBEES", "snapshot_date": "2026-08-12", "pe_ratio": None},
+                {"symbol": "GOLDBEES", "snapshot_date": "2026-08-11", "pe_ratio": 15.0},
+            ]
+        )
+        result = snapshot_repo.get_latest_returns_and_pe(client, ["GOLDBEES"])
+        assert result["GOLDBEES"]["pe_ratio"] is None
+
+    def test_filters_to_only_the_requested_symbols(self):
+        client = _FakeSnapshotClient(
+            [
+                {"symbol": "NIFTYBEES", "snapshot_date": "2026-08-12", "pe_ratio": 1.0},
+                {"symbol": "GOLDBEES", "snapshot_date": "2026-08-12", "pe_ratio": 2.0},
+            ]
+        )
+        result = snapshot_repo.get_latest_returns_and_pe(client, ["NIFTYBEES"])
+        assert set(result.keys()) == {"NIFTYBEES"}
+
+    def test_no_rows_returns_empty_dict(self):
+        client = _FakeSnapshotClient([])
+        assert snapshot_repo.get_latest_returns_and_pe(client, ["NIFTYBEES"]) == {}
