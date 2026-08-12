@@ -1450,11 +1450,27 @@ to "Stocks". The Total Investment/Cur Val/P&L/P&L% stat grid above both
 tables is untouched -- it still aggregates across every holding regardless
 of which table it lands in.
 
-**ETFs & Mutual Funds table only: 1D/5D/20D Change + TTM PE** —
-`_render_holdings_table` takes an optional `returns_pe_by_symbol` dict
-(keyed by symbol; only the ETF/MF call site passes one, the Stocks call
-site doesn't, so those four columns exist on one table only). Sourced by
-a new bulk repo function, `snapshot_repo.get_latest_returns_and_pe`,
+**The two Holdings tables no longer share identical columns.**
+`_render_holdings_table` gates its extra columns with two independent
+knobs: `include_cc: bool = True` (CC ROI/CC Assignment ROI) and an
+optional `returns_pe_by_symbol` dict (1D/5D/20D Change). The Stocks call
+site keeps `include_cc` at its default `True` and passes no
+`returns_pe_by_symbol`; the ETFs & Mutual Funds call site does the
+opposite -- `include_cc=False`, `returns_pe_by_symbol=` the bulk-fetched
+dict -- so CC ROI/CC Assignment ROI now exist on Stocks only, and
+1D/5D/20D Change exist on ETFs & Mutual Funds only. Both knobs were user
+requests, not a coupled design: the split-by-`company_type` structure
+(above) just made each table cheap to customize independently once the
+columns list moved into a per-table-purpose decision rather than shared
+literal code. **A TTM PE column existed here briefly** (sourced from the
+same `returns_pe_by_symbol` dict's `pe_ratio` field, yfinance's
+`trailingPE`) but was removed by user request along with the CC columns
+-- `snapshot_repo.get_latest_returns_and_pe` still fetches `pe_ratio`
+(no reason to special-case it out of one already-batched query for a
+field that costs nothing extra to fetch), it's just never read by the
+page anymore.
+
+Sourced by a bulk repo function, `snapshot_repo.get_latest_returns_and_pe`,
 modeled directly on the existing `get_latest_prices` right above it in
 the same file: queries `daily_screener_snapshots` directly (not
 `latest_screener_view`, whose inner join on `nifty50_constituents.
@@ -1481,16 +1497,6 @@ one combined string per cell (`_fmt_value_change`, e.g.
 across separate amount/percent columns like P&L/P&L% -- deliberately
 different from that existing pair, since three periods as six columns
 would be repetitive.
-
-`pe_ratio` here is yfinance's `trailingPE` (TTM, not forward --
-`YFinanceFundamentalsProvider.get_fundamentals` in
-`src/data_providers/yfinance_provider.py`), the same field Stock Detail's
-"PE ratio" row already shows for the Nifty50 universe. Expect it blank
-for most ETFs/funds in practice — yfinance commonly returns no PE for
-them, a gap the refresh pipeline already tolerates elsewhere via
-`DataQuality.missing_pe`/`is_stale` rather than treating it as an error;
-this column shows that same absence as a blank cell, not a crash or a
-misleading zero.
 
 **Trades (`portfolio_trade_groups`, migration `0020`)** — F&O positions
 are grouped into "Trades" rather than listed as one flat table. The

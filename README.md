@@ -610,23 +610,23 @@ Nifty50 screener universe. Each portfolio tab has two sections:
   (migration `0018`): **ETFs & Mutual Funds** (`ETF`/`Fund`) first, then
   **Stocks** (`Equity`/`Index`, and any still-unresolved holding, since
   there's no better signal for those). Both tables share the base columns
-  -- Stock, Qty, Avg Price, LTP, Investment, Cur Val, P&L, P&L%, plus two
-  covered-call columns (see below); the Total Investment/Cur Val/P&L/P&L%
-  stat grid above both tables still aggregates across everything. **The
-  ETFs & Mutual Funds table only** additionally shows **1D/5D/20D Change**
-  (the holding's rupee value change over that period, `%` in parentheses
-  -- e.g. `₹+588.24 (+2.00%)`) and **TTM PE** (trailing PE, blank for most
-  ETFs/funds -- yfinance rarely returns one for them, same documented gap
-  the refresh pipeline already tolerates elsewhere). Sourced from
+  -- Stock, Qty, Avg Price, LTP, Investment, Cur Val, P&L, P&L%; the Total
+  Investment/Cur Val/P&L/P&L% stat grid above both tables still aggregates
+  across everything. **The Stocks table only** additionally shows **CC
+  ROI** / **CC Assignment ROI** (see below) -- removed from the ETFs &
+  Mutual Funds table per user request, along with a TTM PE column that
+  used to sit alongside it there. **The ETFs & Mutual Funds table only**
+  shows **1D/5D/20D Change** (the holding's rupee value change over that
+  period, `%` in parentheses -- e.g. `₹+588.24 (+2.00%)`). Sourced from
   `daily_screener_snapshots` via `snapshot_repo.get_latest_returns_and_pe`
-  (`return_1d`/`return_5d`/`return_20d`/`pe_ratio`, the same fields
-  Dashboard/Stock Detail already read for the Nifty50 universe) -- that
-  table stores only *percentage* returns, not historical closes, so the
-  rupee change is derived via `src/calculations/returns.py::
-  value_change_from_pct(cur_val, return_pct)`, the algebraic inverse of
-  `pct_return`. Not shown on the Stocks table -- the user only asked for
-  it on ETFs/funds, where a quick freshness/valuation check across a
-  handful of large index positions is the actual use case.
+  (`return_1d`/`return_5d`/`return_20d`, the same fields Dashboard/Stock
+  Detail already read for the Nifty50 universe) -- that table stores only
+  *percentage* returns, not historical closes, so the rupee change is
+  derived via `src/calculations/returns.py::value_change_from_pct
+  (cur_val, return_pct)`, the algebraic inverse of `pct_return`. Not shown
+  on the Stocks table -- the user only asked for it on ETFs/funds, where a
+  quick freshness/valuation check across a handful of large index
+  positions is the actual use case.
 - **My Positions** -- open F&O (options) positions decoded from the same
   broker exports, grouped into **Trades** (see below): Trade ID, Symbol,
   Expiry, Strike, Type, Qty (signed -- negative is short), Avg Price, LTP,
@@ -823,9 +823,11 @@ return if the whole position were closed out at that strike (plus that
 lot's premium), relative to your original cost basis. Both are measured
 against the stock's total invested amount, not just the margin, on the
 assumption that the stock is pledged and the pledge is used as margin.
-Both show "N/A" for a holding with no listed options (ETFs/funds, or a
-non-Nifty50 stock with no derivatives) or no contract for the selected
-expiry date.
+Both show "N/A" for a holding with no listed options (a non-Nifty50 stock
+with no derivatives) or no contract for the selected expiry date. Shown
+on the Stocks table only -- the ETFs & Mutual Funds table has no CC
+ROI/CC Assignment ROI columns at all, since covered-call suggestions
+never applied there anyway (ETFs/funds have no listed options).
 
 Both My Holdings tables' column headers are clickable/sortable, same as
 the Options screen's Futures table -- click a row in either one to select

@@ -524,6 +524,7 @@ def _render_holdings_table(
     portfolio_name: str,
     key_suffix: str,
     cc_by_symbol: dict,
+    include_cc: bool = True,
     returns_pe_by_symbol: dict | None = None,
 ) -> None:
     """Renders one Holdings table -- either the "ETFs & Mutual Funds" or
@@ -540,14 +541,17 @@ def _render_holdings_table(
     column_config, so a header-click sort compares the underlying value
     (not a "₹10,81,452.10"-style string, which would sort alphabetically).
 
-    `returns_pe_by_symbol` (keyed by symbol, each value a dict with
-    return_1d/return_5d/return_20d/pe_ratio from
-    snapshot_repo.get_latest_returns_and_pe) is optional -- only the
+    `include_cc` gates the CC ROI/CC Assignment ROI columns -- the ETFs &
+    Mutual Funds call site turns them off (covered-call suggestions there
+    weren't useful enough to keep). `returns_pe_by_symbol` (keyed by
+    symbol, each value a dict with return_1d/return_5d/return_20d/pe_ratio
+    from snapshot_repo.get_latest_returns_and_pe) is optional -- only the
     ETFs & Mutual Funds call site passes it, adding the 1D/5D/20D value-
-    change and TTM PE columns; the Stocks table stays as before. The
-    period returns are percentages (daily_screener_snapshots has no stored
-    historical price), so the rupee change is derived via
-    value_change_from_pct(cur_val, return_pct) rather than read directly."""
+    change columns; the Stocks table stays as before. The period returns
+    are percentages (daily_screener_snapshots has no stored historical
+    price), so the rupee change is derived via value_change_from_pct
+    (cur_val, return_pct) rather than read directly. `pe_ratio` is fetched
+    by the same call but no longer displayed (removed per user request)."""
     st.markdown(f"**{title}**")
     if not rows:
         st.caption("None.")
@@ -556,7 +560,6 @@ def _render_holdings_table(
     table_rows = []
     for r in rows:
         stock = r["symbol"] or f'{r["raw_name"]} (unmatched)'
-        cc = cc_by_symbol.get(r["symbol"]) if r["symbol"] else None
         row_out = {
             "Stock": stock,
             "Qty": r["qty"],
@@ -566,9 +569,11 @@ def _render_holdings_table(
             "Cur Val": r["cur_val"],
             "P&L": r["pnl"],
             "P&L %": r["pnl_pct"],
-            "CC ROI": cc["cc_roi_pct"] if cc and cc["cc_roi_pct"] is not None else None,
-            "CC Assignment ROI": cc["assignment_roi_pct"] if cc and cc["assignment_roi_pct"] is not None else None,
         }
+        if include_cc:
+            cc = cc_by_symbol.get(r["symbol"]) if r["symbol"] else None
+            row_out["CC ROI"] = cc["cc_roi_pct"] if cc and cc["cc_roi_pct"] is not None else None
+            row_out["CC Assignment ROI"] = cc["assignment_roi_pct"] if cc and cc["assignment_roi_pct"] is not None else None
         if returns_pe_by_symbol is not None:
             rp = returns_pe_by_symbol.get(r["symbol"]) if r["symbol"] else None
             cur_val = r["cur_val"]
@@ -578,7 +583,6 @@ def _render_holdings_table(
             row_out["1D Change"] = _fmt_value_change(value_change_from_pct(cur_val, return_1d), return_1d)
             row_out["5D Change"] = _fmt_value_change(value_change_from_pct(cur_val, return_5d), return_5d)
             row_out["20D Change"] = _fmt_value_change(value_change_from_pct(cur_val, return_20d), return_20d)
-            row_out["TTM PE"] = rp["pe_ratio"] if rp else None
         table_rows.append(row_out)
 
     column_config = {
@@ -589,11 +593,10 @@ def _render_holdings_table(
         "Cur Val": st.column_config.NumberColumn(format="₹%,.2f"),
         "P&L": st.column_config.NumberColumn(format="₹%,.2f"),
         "P&L %": st.column_config.NumberColumn(format="%+.2f%%"),
-        "CC ROI": st.column_config.NumberColumn(format="%.2f%%"),
-        "CC Assignment ROI": st.column_config.NumberColumn(format="%+.2f%%"),
     }
-    if returns_pe_by_symbol is not None:
-        column_config["TTM PE"] = st.column_config.NumberColumn(format="%.2f")
+    if include_cc:
+        column_config["CC ROI"] = st.column_config.NumberColumn(format="%.2f%%")
+        column_config["CC Assignment ROI"] = st.column_config.NumberColumn(format="%+.2f%%")
 
     event = st.dataframe(
         pd.DataFrame(table_rows),
@@ -714,6 +717,7 @@ def _render_portfolio_tab(
         portfolio_name=portfolio_name,
         key_suffix="etf",
         cc_by_symbol=cc_by_symbol,
+        include_cc=False,
         returns_pe_by_symbol=returns_pe_by_symbol,
     )
     _render_holdings_table(
