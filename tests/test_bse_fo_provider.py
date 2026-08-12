@@ -7,11 +7,14 @@ from src.data_providers.base import ProviderError
 from src.models.enums import OptionType
 
 # Same UDiFF schema as NSE's bhavcopy (tests/test_nse_fo_provider.py exercises
-# the shared parsing logic -- STF/STO/IDF/IDO filtering, field mapping,
-# empty-cell handling -- thoroughly via that module's identical wiring).
-# This fixture only needs to prove BSE's own wiring: its own URL, its own
-# `source` tag, and that SENSEX/BANKEX (confirmed live -- see
-# bse_fo_provider.py's file header) come through as index options.
+# the shared parsing logic -- field mapping, empty-cell handling --
+# thoroughly via that module's identical wiring). This fixture only needs
+# to prove BSE's own wiring: its own URL, its own `source` tag, that
+# SENSEX/BANKEX (confirmed live -- see bse_fo_provider.py's file header)
+# come through as index options, and that BSE's own stock futures/options
+# rows are excluded entirely (BSE's stock-level F&O liquidity is
+# negligible -- NSE is the sole stock F&O source; see _OPTION_TYPES'
+# comment in bse_fo_provider.py).
 HEADER = (
     "TradDt,BizDt,Sgmt,Src,FinInstrmTp,FinInstrmId,ISIN,TckrSymb,SctySrs,XpryDt,"
     "FininstrmActlXpryDt,StrkPric,OptnTp,FinInstrmNm,OpnPric,HghPric,LwPric,ClsPric,"
@@ -25,10 +28,14 @@ ROWS = [
     # BANKEX 65100 CE (IDO)
     "2026-08-07,2026-08-07,FO,BSE,IDO,828071,,BANKEX,,2026-08-27,2026-08-27,65100.00,CE,"
     "BANKEX26AUG65100CE,0.00,0.00,0.00,1120.05,0.00,1198.50,65492.23,1598.46,990,0,0,0.00,0,F1,30,,,,,",
-    # RELIANCE future (STF) -- BSE also carries stock derivatives
+    # RELIANCE future (STF) -- BSE carries these rows, but they're
+    # deliberately excluded (illiquid) -- must NOT appear in futures_prices.
     "2026-08-07,2026-08-07,FO,BSE,STF,140001,,RELIANCE,,2026-08-27,2026-08-27,,,"
     "RELIANCE26AUGFUT,1300.00,1313.50,1296.00,1299.10,1299.10,1305.00,1296.00,1299.10,"
     "105054000,-756000,20697,1000000.00,15000,F1,500,,,,,",
+    # RELIANCE 1300 CE (STO) -- same story: BSE carries it, must be dropped.
+    "2026-08-07,2026-08-07,FO,BSE,STO,140002,,RELIANCE,,2026-08-27,2026-08-27,1300.00,CE,"
+    "RELIANCE26AUG1300CE,0.00,0.00,0.00,25.00,0.00,30.00,1299.10,28.50,150,0,0,0.00,0,F1,500,,,,,",
     # SENSEX index future (IDF) -- must be ignored, same as NSE
     "2026-08-07,2026-08-07,FO,BSE,IDF,140004,,SENSEX,,2026-08-27,2026-08-27,,,"
     "SENSEX26AUGFUT,78000.00,78500.00,77500.00,78200.00,78200.00,78000.00,78499.17,78200.00,"
@@ -44,10 +51,11 @@ class TestBhavcopyUrl:
 
 
 class TestParseFoBhavcopy:
-    def test_keeps_index_options_and_stock_futures_ignores_index_futures(self):
+    def test_keeps_only_index_options_drops_stock_futures_and_options_and_index_futures(self):
         book = bse_fo_provider.parse_fo_bhavcopy(SAMPLE_CSV)
         assert {p.symbol for p in book.option_prices} == {"SENSEX", "BANKEX"}
-        assert {p.symbol for p in book.futures_prices} == {"RELIANCE"}
+        assert book.futures_prices == []
+        assert book.futures_contracts == []
 
     def test_stamps_its_own_source_name(self):
         book = bse_fo_provider.parse_fo_bhavcopy(SAMPLE_CSV)

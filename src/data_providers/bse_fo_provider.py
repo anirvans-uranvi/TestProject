@@ -11,10 +11,17 @@ BANKEX index options (both BSE-listed -- NSE's own bhavcopy never
 contains them) have a real F&O data source: before this, a Dhan-synced
 SENSEX/BANKEX position could only ever show LTP as N/A (see migration
 0018's Index company_type rows and pages/6_Portfolio.py's Dhan LTP
-fallback). BSE's bhavcopy also carries STF/STO rows for many of the same
-stock underlyings NSE does (liquidity there is negligible in practice,
-but this app's `universe` filter already scopes ingestion to symbols it
-tracks, so there's no reason to special-case them out).
+fallback).
+
+**BSE ingestion is index-options-only (`IDO`) -- no stock futures/options
+(`STF`/`STO`) at all**, even though BSE's bhavcopy carries rows for many
+of the same stock underlyings NSE does: BSE's own stock-level F&O
+liquidity is negligible in practice (real trading activity for individual
+stocks on BSE derivatives is effectively NSE's, not BSE's), so ingesting
+it would just add noisy, unreliable prices for symbols this app already
+gets a liquid NSE quote for. NSE stays the sole source for every stock
+future/option; BSE is only ever consulted for index options that
+genuinely trade there and nowhere else (SENSEX, BANKEX).
 
 The CSV parsing itself is shared with nse_fo_provider.py via
 src/data_providers/udiff_bhavcopy.py; this module only owns BSE-specific
@@ -45,10 +52,14 @@ _BROWSER_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# Same allow-list as nse_fo_provider.py -- see that module's docstring for
-# why index futures (IDF) stay out of scope.
-_FUTURES_TYPES = {"STF"}
-_OPTION_TYPES = {"STO", "IDO"}
+# Deliberately NARROWER than nse_fo_provider.py's allow-list: BSE's own
+# stock-level F&O liquidity is negligible, so STF (stock future) and STO
+# (stock option) are excluded entirely here -- NSE is the sole stock F&O
+# source. Only IDO (index option -- SENSEX, BANKEX) is kept; IDF (index
+# future) stays out of scope on both exchanges, see nse_fo_provider.py's
+# docstring for why.
+_FUTURES_TYPES: set[str] = set()
+_OPTION_TYPES = {"IDO"}
 
 
 def bhavcopy_url(trade_date: date) -> str:

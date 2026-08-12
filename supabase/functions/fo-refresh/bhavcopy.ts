@@ -242,13 +242,19 @@ export async function findLatestAvailableBhavcopy(
 
 // --- CSV parsing -----------------------------------------------------
 
-// Mirrors src/data_providers/udiff_bhavcopy.py's shared allow-list (used
-// by both nse_fo_provider.py and bse_fo_provider.py) -- IDO (index
-// option) is included so NIFTY/BANKNIFTY/SENSEX/BANKEX (migration
-// 0018/0019's Index company_type rows) get ingested; IDF (index future)
-// stays out of scope, see nse_fo_provider.py's file header.
-const FUTURES_TYPES = new Set(["STF"]);
-const OPTION_TYPES = new Set(["STO", "IDO"]);
+// Mirrors src/data_providers/nse_fo_provider.py's and bse_fo_provider.py's
+// (deliberately different) allow-lists. NSE: STF (stock future) + STO
+// (stock option) + IDO (index option -- NIFTY/BANKNIFTY). BSE: IDO only
+// (SENSEX/BANKEX) -- BSE's own stock-level F&O liquidity is negligible,
+// so its STF/STO rows are never ingested; NSE is the sole stock F&O
+// source. IDF (index future) stays out of scope on both exchanges, see
+// nse_fo_provider.py's file header.
+function futuresTypesFor(exchange: Exchange): Set<string> {
+  return exchange === "BSE" ? new Set() : new Set(["STF"]);
+}
+function optionTypesFor(exchange: Exchange): Set<string> {
+  return exchange === "BSE" ? new Set(["IDO"]) : new Set(["STO", "IDO"]);
+}
 
 export interface FuturesContractRow {
   symbol: string;
@@ -314,15 +320,24 @@ function parseIntField(v: string | undefined): number | null {
 
 /** Parses bhavcopy CSV text into the four F&O table shapes. Keeps stock
  * futures (STF), stock options (STO), and index options (IDO) for symbols
- * in `universe`; ignores index futures (IDF) and everything outside the
- * universe. No quoted/embedded-comma fields in this file format, so a
- * plain split is sufficient (mirrors csv.DictReader's simplicity in the
- * Python port). `source` is stamped onto every price row -- pass
- * `sourceName(exchange)` so ingested rows stay traceable to which
- * exchange produced them (see that function's docstring for why this
- * also determines the "already loaded" watermark scoping in index.ts).
+ * in `universe` on NSE; BSE keeps only index options (IDO) -- see
+ * futuresTypesFor/optionTypesFor above for why. Ignores index futures
+ * (IDF) on both, and everything outside the universe. No quoted/embedded-
+ * comma fields in this file format, so a plain split is sufficient
+ * (mirrors csv.DictReader's simplicity in the Python port). `source` is
+ * stamped onto every price row -- pass `sourceName(exchange)` so ingested
+ * rows stay traceable to which exchange produced them (see that
+ * function's docstring for why this also determines the "already loaded"
+ * watermark scoping in index.ts).
  */
-export function parseFoBhavcopy(csvText: string, universe: Set<string>, source: string): ParsedBhavcopy {
+export function parseFoBhavcopy(
+  csvText: string,
+  universe: Set<string>,
+  source: string,
+  exchange: Exchange = "NSE",
+): ParsedBhavcopy {
+  const FUTURES_TYPES = futuresTypesFor(exchange);
+  const OPTION_TYPES = optionTypesFor(exchange);
   const lines = csvText.split(/\r?\n/).filter((l) => l.length > 0);
   if (lines.length === 0) {
     throw new Error("Empty bhavcopy CSV");

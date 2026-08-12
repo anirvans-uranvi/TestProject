@@ -79,12 +79,14 @@ def parse_udiff_bhavcopy(
 ) -> FOBhavcopy:
     """Parse one exchange's UDiFF bhavcopy CSV text into the four F&O table
     shapes. `futures_types`/`option_types` are that exchange's own
-    FinInstrmTp allow-list (e.g. NSE/BSE both currently use `{"STF"}` /
-    `{"STO", "IDO"}` -- see each provider module for why `IDF` stays out
-    of scope). If `universe` is given, keeps only those underlying
-    symbols. `trade_date` defaults to each row's own TradDt. `source_name`
-    is stamped onto every price row so ingested data stays traceable to
-    which exchange/path produced it."""
+    FinInstrmTp allow-list -- NSE uses `{"STF"}` / `{"STO", "IDO"}`; BSE
+    uses `set()` / `{"IDO"}` (BSE's stock-level futures/options are
+    excluded entirely -- see bse_fo_provider.py's file header for why, and
+    each provider module for why `IDF` stays out of scope on both). If
+    `universe` is given, keeps only those underlying symbols. `trade_date`
+    defaults to each row's own TradDt. `source_name` is stamped onto every
+    price row so ingested data stays traceable to which exchange/path
+    produced it."""
     reader = csv.DictReader(io.StringIO(csv_text))
     rows = list(reader)
 

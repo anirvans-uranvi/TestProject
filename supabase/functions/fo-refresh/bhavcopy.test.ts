@@ -343,11 +343,24 @@ Deno.test("parseFoBhavcopy - tradeDate is the first row's trade date", () => {
   assertEquals(book.tradeDate, "2026-07-16");
 });
 
-Deno.test("parseFoBhavcopy - stamps the given source onto every price row, distinct per exchange", () => {
+Deno.test("parseFoBhavcopy - stamps the given source onto every NSE price row", () => {
   const nseBook = parseFoBhavcopy(SAMPLE_CSV, new Set(["RELIANCE"]), sourceName("NSE"));
-  const bseBook = parseFoBhavcopy(SAMPLE_CSV, new Set(["RELIANCE"]), sourceName("BSE"));
   assertEquals(nseBook.futuresPrices[0].source, "nse_fo_bhavcopy_edge");
   assertEquals(nseBook.optionPrices[0].source, "nse_fo_bhavcopy_edge");
-  assertEquals(bseBook.futuresPrices[0].source, "bse_fo_bhavcopy_edge");
+});
+
+// BSE's own stock-level F&O liquidity is negligible -- NSE is the sole
+// stock F&O source -- so the `exchange` param (not just the universe
+// filter) must keep BSE parsing to index options (IDO) only, dropping
+// stock futures (STF) and stock options (STO) even when they're present
+// in the CSV and their symbol is in `universe`. Reuses the same
+// NSE-shaped SAMPLE_CSV (it already has a NIFTY IDO row alongside the
+// RELIANCE/TCS STF/STO rows) rather than a separate fixture, to prove
+// this is the `exchange` argument doing the filtering, not the input data.
+Deno.test("parseFoBhavcopy - BSE exchange keeps only index options, drops stock futures/options", () => {
+  const bseBook = parseFoBhavcopy(SAMPLE_CSV, new Set(["RELIANCE", "TCS", "NIFTY"]), sourceName("BSE"), "BSE");
+  assertEquals(bseBook.futuresPrices.length, 0);
+  assertEquals(bseBook.futuresContracts.length, 0);
+  assertEquals(new Set(bseBook.optionPrices.map((p) => p.symbol)), new Set(["NIFTY"]));
   assertEquals(bseBook.optionPrices[0].source, "bse_fo_bhavcopy_edge");
 });

@@ -276,7 +276,7 @@ Deno.serve(async (req: Request) => {
 
   let book: ParsedBhavcopy;
   try {
-    book = parseFoBhavcopy(found.csvText, universe, sourceForRun);
+    book = parseFoBhavcopy(found.csvText, universe, sourceForRun, exchange);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await logFetch(serviceClient, providerNameForRun, startedAt, new Date(), "failure", `parse: ${message}`);

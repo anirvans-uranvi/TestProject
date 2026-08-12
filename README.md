@@ -476,6 +476,16 @@ verified against real, live bhavcopy data (not just synthetic test
 fixtures) before this was considered done; run `deno test
 supabase/functions/fo-refresh/bhavcopy.test.ts` to check it.
 
+**BSE ingestion is index-options-only.** NSE is the sole source for every
+stock future/option (`STF`/`STO`) -- BSE's own stock-level F&O liquidity
+is negligible in practice, so those rows are dropped even though BSE's
+bhavcopy carries them for many of the same underlyings NSE does. BSE is
+only ever used for index options (`IDO`) that genuinely trade there --
+SENSEX, BANKEX. This is a per-exchange allow-list, not a universe filter:
+`src/data_providers/bse_fo_provider.py`'s `_FUTURES_TYPES`/`_OPTION_TYPES`
+and `bhavcopy.ts`'s `futuresTypesFor`/`optionTypesFor` narrow to `set()` /
+`{"IDO"}` for BSE specifically, vs NSE's `{"STF"}` / `{"STO", "IDO"}`.
+
 Same 5-minute cooldown as `manual-refresh`, but scoped **per exchange** --
 `provider_fetch_log`, `provider_name = 'fo_edge_nse'` or `'fo_edge_bse'`
 (renamed from the pre-multi-exchange `'fo_edge'`), `fetch_type = 'fo'`
@@ -598,11 +608,12 @@ Nifty50 screener universe. Each portfolio tab has two sections:
   trusted from the uploaded file rather than fetched live. For a
   Dhan-synced position missing LTP (see "Connect Dhan account" below),
   `portfolio_service.apply_fallback_option_ltp` fills the gap from this
-  app's own F&O data -- which now includes index options (NIFTY,
-  BANKNIFTY; migration `0018`, see `src/data_providers/nse_fo_provider.py`'s
-  STF/STO/IDO filter), not just stock options. SENSEX is BSE-listed, so
-  it stays unsupported (no BSE data source), and index *futures* remain
-  out of scope. P&L/P&L% are still recomputed from qty/avg price/LTP
+  app's own F&O data -- which now includes index options (NIFTY, BANKNIFTY
+  via NSE; SENSEX, BANKEX via BSE -- migrations `0018`/`0019`), not just
+  stock options. BSE is index-options-only, though (see the F&O Data
+  Refresh buttons section below) -- a *stock* option position always
+  falls back to NSE's own chain, never BSE's. Index *futures* remain out
+  of scope on both exchanges. P&L/P&L% are still recomputed from qty/avg price/LTP
   rather than trusted from the file, since Zerodha's and Dhan's own P&L%
   columns turned out to mean different things (Dhan's is direction-aware,
   Zerodha's is a raw price change) -- see `portfolio_service.compute_positions_view`.
@@ -665,9 +676,12 @@ omits), `portfolio_service.apply_fallback_option_ltp` fills the gap from
 this app's own F&O data (`option_daily_prices` via
 `latest_option_chain_view`) for any symbol/expiry/strike this app tracks --
 the previous trading day's close, not a live tick, but still enough to show
-P&L instead of N/A. This now covers NIFTY/BANKNIFTY index options too
-(migration `0018`); only SENSEX (BSE-listed -- no BSE data source) and a
-strike/expiry genuinely outside the tracked chain stay N/A.
+P&L instead of N/A. This now covers NIFTY/BANKNIFTY index options (via
+NSE, migration `0018`) and SENSEX/BANKEX index options (via BSE, migration
+`0019`) alike; only a strike/expiry genuinely outside the tracked chain
+stays N/A. A *stock* option position, though, only ever falls back to
+NSE's chain -- BSE is index-options-only (see the F&O Data Refresh
+buttons section above).
 **Security trade-off:** the access token can also place trades (Dhan
 has no read-only scope for individual accounts), and it's stored as
 entered, protected only by the same row-level security every other
@@ -948,8 +962,12 @@ docker compose up               # + the APScheduler refresh daemon
   archive still serves). Greeks and IV are **not** in the bhavcopy (or any
   free source) and were intentionally left out -- the option tables are
   shaped to gain those columns later (via a Black-Scholes helper) without a
-  migration reshape. Index *options* (NIFTY/BANKNIFTY, migration `0018`)
-  are ingested alongside the 50 equity underlyings; index *futures* (IDF
-  bhavcopy rows) stay out of scope, and SENSEX (BSE-listed, seeded as a
-  company row anyway) will never actually have F&O rows since this app has
-  no BSE data source.
+  migration reshape. Index *options* are ingested alongside the 50 equity
+  underlyings -- NIFTY/BANKNIFTY via NSE (migration `0018`), SENSEX/BANKEX
+  via BSE (migrations `0018`/`0019`); index *futures* (IDF bhavcopy rows)
+  stay out of scope on both exchanges. **BSE is index-options-only** --
+  its stock-level F&O (`STF`/`STO`) is deliberately never ingested (BSE's
+  own liquidity there is negligible), so NSE remains the sole source for
+  every *stock* future/option; a stock symbol's F&O rows only ever come
+  from NSE, regardless of whether that stock also trades derivatives on
+  BSE.

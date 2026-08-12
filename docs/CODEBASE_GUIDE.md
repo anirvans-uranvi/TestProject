@@ -371,8 +371,14 @@ empirically):
   expiry, strike, CE/PE, lot size. Instrument types: `STF` = stock
   future, `STO` = stock option, `IDO` = index option (NIFTY/BANKNIFTY on
   NSE; SENSEX/BANKEX on BSE -- migrations `0018`/`0019`, see the "Index
-  F&O" paragraph below). `IDF` (index future) is ignored on both
-  exchanges -- no Index position on this app needs a futures LTP today.
+  F&O" paragraph below). All four codes exist in both exchanges' bhavcopy
+  files, but **BSE ingestion only ever keeps `IDO`** -- BSE's own
+  stock-level F&O liquidity is negligible, so its `STF`/`STO` rows are
+  parsed out even though they're present in the file; NSE is the sole
+  source for every stock future/option (see "Two exchanges, one parser"
+  below for exactly where this allow-list lives). `IDF` (index future) is
+  ignored on both exchanges -- no Index position on this app needs a
+  futures LTP today.
   **This is end-of-day data** (published after close) — "latest price"
   means the most recent close/settlement, never an intraday live quote.
   There is no free live/intraday F&O feed for either exchange.
@@ -386,15 +392,25 @@ around it: each owns only its exchange-specific URL template, HTTP fetch
 (NSE unzips a `.csv.zip`; BSE decodes the response body directly, no zip
 library needed), and its own `SOURCE_NAME` (`"nse_fo_bhavcopy"` /
 `"bse_fo_bhavcopy"`, stamped onto every price row for traceability).
-`_FUTURES_TYPES`/`_OPTION_TYPES` are also identical between the two
-(`{"STF"}` / `{"STO", "IDO"}`) but kept as separate module-level constants
-rather than shared, since there's no guarantee the two exchanges'
-in-scope instrument sets stay identical forever. The TypeScript mirror
-(`supabase/functions/fo-refresh/bhavcopy.ts`) takes the same approach in
-one file: `bhavcopyUrl`/`fetchBhavcopyText` branch on an `Exchange =
-"NSE" | "BSE"` parameter (BSE skips the zip-specific content-type check
-and unzip step entirely), and `parseFoBhavcopy` takes an explicit
-`source` argument rather than a module constant.
+`_FUTURES_TYPES`/`_OPTION_TYPES` were originally identical between the
+two (`{"STF"}` / `{"STO", "IDO"}`), kept as separate module-level
+constants rather than shared specifically because "there's no guarantee
+the two exchanges' in-scope instrument sets stay identical forever" --
+and they since have diverged: BSE's own stock-level F&O liquidity turned
+out to be negligible in practice, so `bse_fo_provider.py` now uses
+`_FUTURES_TYPES = set()` / `_OPTION_TYPES = {"IDO"}` (index options only
+-- SENSEX, BANKEX), while `nse_fo_provider.py` keeps the original
+`{"STF"}` / `{"STO", "IDO"}` and remains the sole source for every stock
+future/option. The TypeScript mirror (`supabase/functions/fo-refresh/bhavcopy.ts`)
+takes the same approach in one file: `bhavcopyUrl`/`fetchBhavcopyText`
+branch on an `Exchange = "NSE" | "BSE"` parameter (BSE skips the
+zip-specific content-type check and unzip step entirely), and
+`parseFoBhavcopy` now also takes that same `exchange` parameter (in
+addition to an explicit `source` argument rather than a module
+constant), deriving its allow-list per call via
+`futuresTypesFor`/`optionTypesFor` instead of the single pair of
+module-level `Set`s it originally had -- those two functions encode the
+identical NSE/BSE split as the two Python providers.
 
 **Greeks / implied volatility are intentionally NOT stored** — not in the
 bhavcopy (or any free source), and computing them was scoped out. The
@@ -1211,13 +1227,14 @@ symbol-override form here, since a position's contract identity (unlike
 a holding's free-text company name) is either decodable from the string
 or it isn't; there's nothing for the user to correct. `qty` keeps its
 broker-reported sign (negative = short). Deliberately no FK to
-`option_contracts` — even with `0018`'s Index-option widening
-(`src/data_providers/nse_fo_provider.py`'s `_FUTURES_TYPES`/`_OPTION_TYPES`
-now keep `STF`/`STO`/`IDO`, still skipping index futures `IDF`), SENSEX
-(BSE-listed -- no BSE data source), a strike/expiry this app hasn't
-ingested yet, or a plain CSV-parsing gap can all leave a decoded
-position's contract missing from that table, so a hard FK would be too
-strict. `pages/6_Portfolio.py` degrades gracefully (an `st.info`
+`option_contracts` — even with `0018`/`0019`'s Index-option widening
+(NSE's `_FUTURES_TYPES`/`_OPTION_TYPES` keep `STF`/`STO`/`IDO`; BSE's
+narrow to `IDO`-only, see "Two exchanges, one parser" above), a stock
+option whose underlying only trades on BSE (never true for a Nifty50
+constituent, but possible for a portfolio-only stock), a strike/expiry
+this app hasn't ingested yet, or a plain CSV-parsing gap can all leave a
+decoded position's contract missing from that table, so a hard FK would
+be too strict. `pages/6_Portfolio.py` degrades gracefully (an `st.info`
 pointing at the migration, no `st.stop()`) if `portfolio_positions`
 doesn't exist yet — Holdings keeps working either way, unlike the
 holdings-table load itself, which does `st.stop()` if `0012`/`0014`
@@ -1605,13 +1622,16 @@ Structurally it's a check-then-maybe-ingest, not an unconditional refresh:
   content-type check and unzip step entirely -- see below),
   `findLatestAvailableBhavcopy(onOrBefore, maxLookback=7, exchange)`,
   `sourceName(exchange)` (`"nse_fo_bhavcopy_edge"` / `"bse_fo_bhavcopy_edge"`),
-  and `parseFoBhavcopy(csvText, universe, source)` — a TypeScript port of
-  `src/data_providers/udiff_bhavcopy.py`'s shared parsing (same column
-  mapping, same STF/STO/IDO instrument-type filter, same universe
-  filter) -- `source` is an explicit argument here rather than a module
-  constant, precisely so one function can serve both exchanges without a
-  stale hardcoded tag leaking onto the wrong exchange's rows (a bug this
-  file used to be structurally exposed to, before the multi-exchange
+  and `parseFoBhavcopy(csvText, universe, source, exchange)` — a
+  TypeScript port of `src/data_providers/udiff_bhavcopy.py`'s shared
+  parsing (same column mapping, same universe filter, same *per-exchange*
+  instrument-type allow-list -- `futuresTypesFor`/`optionTypesFor` mirror
+  `nse_fo_provider.py`'s `{"STF"}`/`{"STO", "IDO"}` vs
+  `bse_fo_provider.py`'s `set()`/`{"IDO"}`) -- both `source` and `exchange`
+  are explicit arguments here rather than module constants, precisely so
+  one function can serve both exchanges without a stale hardcoded tag (or
+  allow-list) leaking onto the wrong exchange's rows (a bug this file used
+  to be structurally exposed to, before the multi-exchange
   parameterization). **The zip extraction is hand-rolled**, not via a
   library (NSE only -- BSE's bhavcopy is a plain CSV, no zip at all):
   Deno's Edge Runtime has
