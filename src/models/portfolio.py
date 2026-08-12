@@ -51,6 +51,26 @@ class PortfolioPosition(BaseModel):
     uploaded_at: datetime | None = None
 
 
+class PortfolioTradeGroup(BaseModel):
+    """Manual override of which "Trade" one F&O position leg belongs to
+    (see pages/6_Portfolio.py's Positions section) -- keyed by the leg's
+    own (portfolio_name, broker, raw_name), the same natural identity a
+    broker's export already gives each contract, not any database row id.
+    Only legs the user has manually combined/split away from the default
+    grouping (one Trade per underlying symbol) get a row here -- see
+    supabase/migrations/0020_portfolio_trade_groups.sql for why that makes
+    this survive replace_broker_positions's delete+reinsert full sync."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    user_id: str
+    portfolio_name: str
+    broker: str
+    raw_name: str
+    trade_id: str
+    updated_at: datetime | None = None
+
+
 class BrokerConnection(BaseModel):
     """Saved API credentials letting one portfolio pull holdings/positions
     directly from a broker's API (see src/data_providers/dhan_provider.py

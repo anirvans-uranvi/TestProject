@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from src.data_providers.base import ProviderError
 from src.data_providers.dhan_provider import DhanAuthError, DhanProvider
+from src.models.enums import CompanyType
 from src.models.portfolio import BrokerConnection
 from src.repositories import companies_repo, fo_repo, portfolio_repo, settings_repo, snapshot_repo
 from src.services import fo_service, portfolio_service
@@ -47,6 +48,11 @@ def _load_positions(_client, _user_id: str, _cache_bust: int):
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_broker_connection(_client, _user_id: str, portfolio_name: str, broker: str, _cache_bust: int):
     return portfolio_repo.get_broker_connection(_client, _user_id, portfolio_name, broker)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_trade_groups(_client, _user_id: str, _cache_bust: int):
+    return portfolio_repo.list_trade_groups(_client, _user_id)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -96,6 +102,14 @@ except APIError:
     # even if Positions isn't migrated yet.
     saved_positions = []
     positions_available = False
+
+try:
+    saved_trade_groups = _load_trade_groups(client, user_id, st.session_state["portfolio_cache_bust"])
+except APIError:
+    # portfolio_trade_groups doesn't exist yet (migration 0020) -- degrade
+    # to "no manual Trade groupings saved yet" (every leg falls back to its
+    # default per-symbol Trade ID) rather than st.stop().
+    saved_trade_groups = []
 
 
 def _fmt_qty(value: float) -> str:
@@ -487,8 +501,98 @@ def _load_covered_calls(symbols: tuple[str, ...], expiry_iso: str | None) -> dic
     return chains
 
 
+def _render_holdings_table(
+    *, title: str, rows: list[dict], portfolio_name: str, key_suffix: str, cc_by_symbol: dict
+) -> None:
+    """Renders one Holdings table -- either the "ETFs & Mutual Funds" or
+    "Stocks" split (see _render_portfolio_tab) -- plus the single-row-
+    selection "Open in Stock Detail"/"Open in Options" buttons underneath.
+    `key_suffix` keeps the two tables' widget keys distinct within the
+    same portfolio tab.
+
+    A plain st.dataframe with on_select="rerun" (not the hand-rendered
+    render_screener_table, and not a per-row st.button column) -- native
+    header-click sort stays correct regardless of how the table is
+    currently sorted, which a *pre-sort*-indexed button column can't
+    guarantee. Columns are kept as real numbers, formatted for display via
+    column_config, so a header-click sort compares the underlying value
+    (not a "₹10,81,452.10"-style string, which would sort alphabetically)."""
+    st.markdown(f"**{title}**")
+    if not rows:
+        st.caption("None.")
+        return
+
+    table_rows = []
+    for r in rows:
+        stock = r["symbol"] or f'{r["raw_name"]} (unmatched)'
+        cc = cc_by_symbol.get(r["symbol"]) if r["symbol"] else None
+        table_rows.append(
+            {
+                "Stock": stock,
+                "Qty": r["qty"],
+                "Avg Price": r["avg_price"],
+                "LTP": r["ltp"],
+                "Investment": r["investment"],
+                "Cur Val": r["cur_val"],
+                "P&L": r["pnl"],
+                "P&L %": r["pnl_pct"],
+                "CC ROI": cc["cc_roi_pct"] if cc and cc["cc_roi_pct"] is not None else None,
+                "CC Assignment ROI": cc["assignment_roi_pct"] if cc and cc["assignment_roi_pct"] is not None else None,
+            }
+        )
+
+    event = st.dataframe(
+        pd.DataFrame(table_rows),
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"portfolio_table_{key_suffix}_{_slug(portfolio_name)}",
+        column_config={
+            "Qty": st.column_config.NumberColumn(format="%,.0f"),
+            "Avg Price": st.column_config.NumberColumn(format="₹%,.2f"),
+            "LTP": st.column_config.NumberColumn(format="₹%,.2f"),
+            "Investment": st.column_config.NumberColumn(format="₹%,.2f"),
+            "Cur Val": st.column_config.NumberColumn(format="₹%,.2f"),
+            "P&L": st.column_config.NumberColumn(format="₹%,.2f"),
+            "P&L %": st.column_config.NumberColumn(format="%+.2f%%"),
+            "CC ROI": st.column_config.NumberColumn(format="%.2f%%"),
+            "CC Assignment ROI": st.column_config.NumberColumn(format="%+.2f%%"),
+        },
+    )
+    selected_rows = event.selection.rows if event and event.selection else []
+    if selected_rows:
+        selected_symbol = rows[selected_rows[0]]["symbol"]
+        if selected_symbol:
+            # Every resolved symbol here is, by definition, one of this
+            # signed-in user's own portfolio symbols -- and both Stock
+            # Detail's and Options' own symbol pickers now union in
+            # exactly that set (pages/2_Stock_Detail.py, pages/5_Options.py),
+            # so any resolved row is always viewable on either page.
+            detail_col, options_col = st.columns(2)
+            with detail_col:
+                if st.button(
+                    f"Open {selected_symbol} in Stock Detail",
+                    key=f"portfolio_open_detail_{key_suffix}_{portfolio_name}",
+                ):
+                    st.session_state["selected_symbol"] = selected_symbol
+                    st.switch_page("pages/2_Stock_Detail.py")
+            with options_col:
+                if st.button(
+                    f"Open {selected_symbol} in Options", key=f"portfolio_open_options_{key_suffix}_{portfolio_name}"
+                ):
+                    st.session_state["fo_symbol"] = selected_symbol
+                    st.switch_page("pages/5_Options.py")
+        else:
+            st.caption("This holding has no resolved symbol yet, so there's no Stock Detail or Options page for it.")
+
+
 def _render_portfolio_tab(
-    portfolio_name: str, holdings_for_portfolio: list, positions_for_portfolio: list, cc_expiry_iso: str | None
+    portfolio_name: str,
+    holdings_for_portfolio: list,
+    positions_for_portfolio: list,
+    trade_groups_for_portfolio: list,
+    cc_expiry_iso: str | None,
 ) -> None:
     """My Holdings table, My Positions table (both merged across brokers
     within this one portfolio), plus this portfolio's own upload section
@@ -536,25 +640,6 @@ def _render_portfolio_tab(
             "(shown as N/A below -- they'll be picked up by the next data refresh)."
         )
 
-    table_rows = []
-    for r in rows:
-        stock = r["symbol"] or f'{r["raw_name"]} (unmatched)'
-        cc = cc_by_symbol.get(r["symbol"]) if r["symbol"] else None
-        table_rows.append(
-            {
-                "Stock": stock,
-                "Qty": r["qty"],
-                "Avg Price": r["avg_price"],
-                "LTP": r["ltp"],
-                "Investment": r["investment"],
-                "Cur Val": r["cur_val"],
-                "P&L": r["pnl"],
-                "P&L %": r["pnl_pct"],
-                "CC ROI": cc["cc_roi_pct"] if cc and cc["cc_roi_pct"] is not None else None,
-                "CC Assignment ROI": cc["assignment_roi_pct"] if cc and cc["assignment_roi_pct"] is not None else None,
-            }
-        )
-
     st.caption(
         "CC ROI is the ROI when the call expires OTM. CC Assignment ROI is the ROI if the stock gets "
         "called away. In both cases the ROI is considered against the total invested amount of the "
@@ -562,74 +647,30 @@ def _render_portfolio_tab(
         "as margin."
     )
 
-    # A plain st.dataframe (same as the Futures table on the Options page)
-    # instead of the hand-rendered render_screener_table -- its column
-    # headers are natively clickable/sortable in the browser, which the
-    # HTML table can't do without a JS bridge back to Python (a real
-    # <a href> sort link would force a browser navigation, and this app
-    # keeps the Supabase session only in st.session_state -- see
-    # session.py's docstring -- so that would log the user out).
-    #
-    # That native client-side sort is exactly why the old per-row "open
-    # detail" button column (one st.button beside each table row) had to
-    # go: those buttons are positioned by their *pre-sort* Python index, so
-    # clicking a header to reorder the table in the browser would leave
-    # them pointing at the wrong row. Row selection (on_select="rerun")
-    # sidesteps this -- Streamlit maps a click back to the correct row in
-    # the original data regardless of how the table is currently sorted --
-    # so a pair of buttons below the table replaces the whole column.
-    #
-    # Columns are kept as real numbers (not format_inr()/format_pct()
-    # strings) and formatted for display via column_config instead: a
-    # native header-click sort compares the *underlying* cell value, so a
-    # column of currency strings like "₹10,81,452.10"/"₹9,80,135.00" sorts
-    # alphabetically ("1" < "9") rather than by amount -- exactly the bug
-    # this replaced. NumberColumn's printf-style format has no Indian
-    # lakh/crore grouping, so amounts show Western 3-digit comma grouping
-    # here (e.g. "₹1,081,452.10") instead of format_inr's "₹10,81,452.10".
-    event = st.dataframe(
-        pd.DataFrame(table_rows),
-        use_container_width=True,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        key=f"portfolio_table_{_slug(portfolio_name)}",
-        column_config={
-            "Qty": st.column_config.NumberColumn(format="%,.0f"),
-            "Avg Price": st.column_config.NumberColumn(format="₹%,.2f"),
-            "LTP": st.column_config.NumberColumn(format="₹%,.2f"),
-            "Investment": st.column_config.NumberColumn(format="₹%,.2f"),
-            "Cur Val": st.column_config.NumberColumn(format="₹%,.2f"),
-            "P&L": st.column_config.NumberColumn(format="₹%,.2f"),
-            "P&L %": st.column_config.NumberColumn(format="%+.2f%%"),
-            "CC ROI": st.column_config.NumberColumn(format="%.2f%%"),
-            "CC Assignment ROI": st.column_config.NumberColumn(format="%+.2f%%"),
-        },
+    # Split into two tables by companies.company_type (migration 0018) --
+    # ETF/Fund vs everything else. A holding with no resolved symbol has no
+    # company_type to check, so it defaults into "Stocks" (there's no
+    # better signal for it -- see _render_holdings_table's "(unmatched)"
+    # label for that case).
+    all_companies = _load_all_companies(client, st.session_state["portfolio_cache_bust"])
+    company_type_by_symbol = {c.symbol: c.company_type for c in all_companies}
+
+    def _is_etf_or_fund(symbol: str | None) -> bool:
+        return symbol is not None and company_type_by_symbol.get(symbol) in (CompanyType.ETF, CompanyType.FUND)
+
+    etf_fund_rows = [r for r in rows if _is_etf_or_fund(r["symbol"])]
+    stock_rows = [r for r in rows if not _is_etf_or_fund(r["symbol"])]
+
+    _render_holdings_table(
+        title="ETFs & Mutual Funds",
+        rows=etf_fund_rows,
+        portfolio_name=portfolio_name,
+        key_suffix="etf",
+        cc_by_symbol=cc_by_symbol,
     )
-    selected_rows = event.selection.rows if event and event.selection else []
-    if selected_rows:
-        selected_symbol = rows[selected_rows[0]]["symbol"]
-        if selected_symbol:
-            # Every resolved symbol here is, by definition, one of this
-            # signed-in user's own portfolio symbols -- and both Stock
-            # Detail's and Options' own symbol pickers now union in
-            # exactly that set (pages/2_Stock_Detail.py, pages/5_Options.py),
-            # so any resolved row is always viewable on either page.
-            detail_col, options_col = st.columns(2)
-            with detail_col:
-                if st.button(
-                    f"Open {selected_symbol} in Stock Detail", key=f"portfolio_open_detail_{portfolio_name}"
-                ):
-                    st.session_state["selected_symbol"] = selected_symbol
-                    st.switch_page("pages/2_Stock_Detail.py")
-            with options_col:
-                if st.button(
-                    f"Open {selected_symbol} in Options", key=f"portfolio_open_options_{portfolio_name}"
-                ):
-                    st.session_state["fo_symbol"] = selected_symbol
-                    st.switch_page("pages/5_Options.py")
-        else:
-            st.caption("This holding has no resolved symbol yet, so there's no Stock Detail or Options page for it.")
+    _render_holdings_table(
+        title="Stocks", rows=stock_rows, portfolio_name=portfolio_name, key_suffix="stock", cc_by_symbol=cc_by_symbol
+    )
 
     st.divider()
     st.subheader("My Positions")
@@ -645,6 +686,7 @@ def _render_portfolio_tab(
         position_rows = [
             {
                 "raw_name": p.raw_name,
+                "broker": p.broker,
                 "symbol": p.symbol,
                 "expiry_date": p.expiry_date,
                 "strike_price": p.strike_price,
@@ -655,8 +697,19 @@ def _render_portfolio_tab(
             }
             for p in positions_for_portfolio
         ]
+        # Default Trade grouping is one Trade per underlying symbol (or
+        # raw_name for a still-undecoded leg); a manual override --
+        # combined/split via the positions table below -- wins. Overrides
+        # are keyed by (broker, raw_name), the same natural leg identity
+        # portfolio_trade_groups persists them under, so they survive the
+        # next refresh/re-upload/re-sync (see migration
+        # 0020_portfolio_trade_groups.sql).
+        overrides_by_leg = {(g.broker, g.raw_name): g.trade_id for g in trade_groups_for_portfolio}
+        position_rows = portfolio_service.assign_trade_ids(position_rows, overrides_by_leg)
         computed_positions = portfolio_service.compute_positions_view(position_rows)
-        computed_positions.sort(key=lambda p: (p["symbol"] or p["raw_name"], p["expiry_date"] or date.max))
+        computed_positions.sort(
+            key=lambda p: (p["trade_id"], p["symbol"] or p["raw_name"], p["expiry_date"] or date.max)
+        )
 
         priced = [p for p in computed_positions if p["pnl"] is not None]
         st.markdown(
@@ -678,8 +731,33 @@ def _render_portfolio_tab(
             "market data."
         )
 
+        trades: dict[str, list[dict]] = {}
+        for p in computed_positions:
+            trades.setdefault(p["trade_id"], []).append(p)
+        trade_summary_rows = []
+        for trade_id, legs in trades.items():
+            leg_priced = [leg for leg in legs if leg["pnl"] is not None]
+            trade_summary_rows.append(
+                {
+                    "Trade ID": trade_id,
+                    "Legs": len(legs),
+                    "Symbols": ", ".join(sorted({leg["symbol"] or leg["raw_name"] for leg in legs})),
+                    "Total P&L": sum(leg["pnl"] for leg in leg_priced) if leg_priced else None,
+                }
+            )
+        trade_summary_rows.sort(key=lambda r: r["Trade ID"])
+        st.markdown("**Trades**")
+        st.dataframe(
+            pd.DataFrame(trade_summary_rows),
+            use_container_width=True,
+            hide_index=True,
+            key=f"portfolio_trades_summary_{_slug(portfolio_name)}",
+            column_config={"Total P&L": st.column_config.NumberColumn(format="₹%,.2f")},
+        )
+
         position_table_rows = [
             {
+                "Trade ID": p["trade_id"],
                 "Symbol": p["symbol"] or f'{p["raw_name"]} (undecoded)',
                 "Expiry": p["expiry_date"].strftime("%d %b %Y") if p["expiry_date"] else None,
                 "Strike": p["strike_price"],
@@ -692,10 +770,13 @@ def _render_portfolio_tab(
             }
             for p in computed_positions
         ]
-        st.dataframe(
+        st.caption("Select one or more legs below to combine them into a Trade, or split them back out to their own.")
+        positions_event = st.dataframe(
             pd.DataFrame(position_table_rows),
             use_container_width=True,
             hide_index=True,
+            on_select="rerun",
+            selection_mode="multi-row",
             key=f"portfolio_positions_table_{_slug(portfolio_name)}",
             column_config={
                 "Qty": st.column_config.NumberColumn(format="%+,.0f"),
@@ -705,6 +786,46 @@ def _render_portfolio_tab(
                 "P&L %": st.column_config.NumberColumn(format="%+.2f%%"),
             },
         )
+
+        selected_leg_rows = positions_event.selection.rows if positions_event and positions_event.selection else []
+        if selected_leg_rows:
+            selected_legs = [computed_positions[i] for i in selected_leg_rows]
+            selected_leg_keys = [(leg["broker"], leg["raw_name"]) for leg in selected_legs]
+            st.caption(f"{len(selected_legs)} leg(s) selected.")
+            existing_trade_ids = sorted(trades.keys())
+            combine_col, split_col = st.columns(2)
+            with combine_col:
+                trade_choice = st.selectbox(
+                    "Combine into Trade ID",
+                    ["+ New Trade ID"] + existing_trade_ids,
+                    key=f"portfolio_trade_choice_{_slug(portfolio_name)}",
+                )
+                if trade_choice == "+ New Trade ID":
+                    default_name = " + ".join(sorted({leg["symbol"] or leg["raw_name"] for leg in selected_legs}))
+                    target_trade_id = st.text_input(
+                        "New Trade ID", value=default_name, key=f"portfolio_trade_new_id_{_slug(portfolio_name)}"
+                    ).strip()
+                else:
+                    target_trade_id = trade_choice
+                if st.button(
+                    "Combine selected into this Trade",
+                    key=f"portfolio_trade_combine_{_slug(portfolio_name)}",
+                    disabled=not target_trade_id,
+                ):
+                    portfolio_repo.set_trade_group(client, user_id, portfolio_name, selected_leg_keys, target_trade_id)
+                    st.session_state["portfolio_cache_bust"] += 1
+                    st.cache_data.clear()
+                    st.success(f'Combined {len(selected_legs)} leg(s) into Trade "{target_trade_id}".')
+                    st.rerun()
+            with split_col:
+                if st.button(
+                    "Split selected back to individual Trades", key=f"portfolio_trade_split_{_slug(portfolio_name)}"
+                ):
+                    portfolio_repo.clear_trade_group_overrides(client, user_id, portfolio_name, selected_leg_keys)
+                    st.session_state["portfolio_cache_bust"] += 1
+                    st.cache_data.clear()
+                    st.success(f"Split {len(selected_legs)} leg(s) back to their default per-symbol Trade.")
+                    st.rerun()
 
     st.divider()
     st.subheader("Upload")
@@ -831,6 +952,7 @@ else:
                 name,
                 [h for h in saved_holdings if h.portfolio_name == name],
                 [p for p in saved_positions if p.portfolio_name == name],
+                [g for g in saved_trade_groups if g.portfolio_name == name],
                 cc_expiry_iso,
             )
     with tabs[-1]:

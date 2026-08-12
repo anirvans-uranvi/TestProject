@@ -395,6 +395,23 @@ def apply_fallback_option_ltp(
     return filled
 
 
+def assign_trade_ids(positions: list[dict], overrides: dict[tuple[str, str], str]) -> list[dict]:
+    """Adds a `trade_id` to each position -- the manual "Trade" grouping
+    shown in "My Positions" (pages/6_Portfolio.py). Default is one Trade
+    per underlying symbol (or raw_name, for a still-undecoded contract
+    with no resolved symbol); `overrides` -- keyed by (broker, raw_name),
+    from portfolio_repo.list_trade_groups -- wins when the user has
+    manually combined this leg into, or split it out of, a Trade. Each
+    position dict must include a `broker` key (positions_to_records/
+    dhan_positions_from_api-shaped rows already do)."""
+    result = []
+    for p in positions:
+        default_trade_id = p["symbol"] or p["raw_name"]
+        trade_id = overrides.get((p["broker"], p["raw_name"]), default_trade_id)
+        result.append({**p, "trade_id": trade_id})
+    return result
+
+
 def compute_positions_view(positions: list[dict]) -> list[dict]:
     """Adds pnl/pnl_pct to each position, recomputed from qty/avg_price/
     ltp rather than trusted from the file (the two sample broker exports

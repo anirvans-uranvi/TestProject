@@ -298,6 +298,48 @@ class TestComputePositionsView:
         assert computed[0]["pnl_pct"] is None
 
 
+class TestAssignTradeIds:
+    def test_default_trade_id_is_the_underlying_symbol(self):
+        positions = [
+            {"raw_name": "NIFTY 11 AUG 24200 CALL", "broker": "Zerodha", "symbol": "NIFTY"},
+            {"raw_name": "ONGC 25 AUG 230 PUT", "broker": "Zerodha", "symbol": "ONGC"},
+        ]
+        result = portfolio_service.assign_trade_ids(positions, overrides={})
+        assert {p["trade_id"] for p in result} == {"NIFTY", "ONGC"}
+
+    def test_undecoded_leg_with_no_symbol_falls_back_to_raw_name(self):
+        positions = [{"raw_name": "WEIRD FORMAT 123", "broker": "Zerodha", "symbol": None}]
+        result = portfolio_service.assign_trade_ids(positions, overrides={})
+        assert result[0]["trade_id"] == "WEIRD FORMAT 123"
+
+    def test_override_wins_over_the_default_per_symbol_grouping(self):
+        positions = [{"raw_name": "NIFTY 11 AUG 24200 CALL", "broker": "Zerodha", "symbol": "NIFTY"}]
+        overrides = {("Zerodha", "NIFTY 11 AUG 24200 CALL"): "My Custom Trade"}
+        result = portfolio_service.assign_trade_ids(positions, overrides)
+        assert result[0]["trade_id"] == "My Custom Trade"
+
+    def test_override_can_merge_two_different_underlyings_into_one_trade(self):
+        positions = [
+            {"raw_name": "NIFTY LEG", "broker": "Zerodha", "symbol": "NIFTY"},
+            {"raw_name": "BANKNIFTY LEG", "broker": "Zerodha", "symbol": "BANKNIFTY"},
+        ]
+        overrides = {("Zerodha", "NIFTY LEG"): "Pairs Trade", ("Zerodha", "BANKNIFTY LEG"): "Pairs Trade"}
+        result = portfolio_service.assign_trade_ids(positions, overrides)
+        assert {p["trade_id"] for p in result} == {"Pairs Trade"}
+
+    def test_override_is_scoped_by_broker_not_just_raw_name(self):
+        positions = [
+            {"raw_name": "SAME NAME", "broker": "Zerodha", "symbol": "X"},
+            {"raw_name": "SAME NAME", "broker": "Dhan", "symbol": "X"},
+        ]
+        overrides = {("Zerodha", "SAME NAME"): "Only Zerodha's Trade"}
+        result = portfolio_service.assign_trade_ids(positions, overrides)
+        zerodha_leg = next(p for p in result if p["broker"] == "Zerodha")
+        dhan_leg = next(p for p in result if p["broker"] == "Dhan")
+        assert zerodha_leg["trade_id"] == "Only Zerodha's Trade"
+        assert dhan_leg["trade_id"] == "X"
+
+
 class TestPositionsToRecords:
     def test_builds_portfolio_position_models(self):
         positions = [

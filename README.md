@@ -584,11 +584,17 @@ holdings and F&O positions -- uploaded from broker CSV exports, not the
 Nifty50 screener universe. Each portfolio tab has two sections:
 
 - **My Holdings** -- equity holdings valued live against the app's own
-  market data: Stock, Qty, Avg Price, LTP, Investment, Cur Val, P&L,
-  P&L%, plus two covered-call columns (see below).
+  market data, split into two tables by `companies.company_type`
+  (migration `0018`): **ETFs & Mutual Funds** (`ETF`/`Fund`) first, then
+  **Stocks** (`Equity`/`Index`, and any still-unresolved holding, since
+  there's no better signal for those). Each table has the same columns:
+  Stock, Qty, Avg Price, LTP, Investment, Cur Val, P&L, P&L%, plus two
+  covered-call columns (see below); the Total Investment/Cur Val/P&L/P&L%
+  stat grid above both tables still aggregates across everything.
 - **My Positions** -- open F&O (options) positions decoded from the same
-  broker exports: Symbol, Expiry, Strike, Type, Qty (signed -- negative
-  is short), Avg Price, LTP, P&L, P&L%. Unlike holdings, LTP here is
+  broker exports, grouped into **Trades** (see below): Trade ID, Symbol,
+  Expiry, Strike, Type, Qty (signed -- negative is short), Avg Price, LTP,
+  P&L, P&L%. Unlike holdings, LTP here is
   trusted from the uploaded file rather than fetched live. For a
   Dhan-synced position missing LTP (see "Connect Dhan account" below),
   `portfolio_service.apply_fallback_option_ltp` fills the gap from this
@@ -671,7 +677,8 @@ removes the saved credentials only; previously synced holdings/positions
 are left as-is, same as switching away from CSV upload.
 
 Both holdings and positions are saved per-user (`portfolio_holdings`,
-migrations `0012`/`0014`; `portfolio_positions`, migration `0016`), and
+migrations `0012`/`0014`; `portfolio_positions`, migration `0016`;
+manual Trade groupings, `portfolio_trade_groups`, migration `0020`), and
 **you can maintain multiple, independently-named portfolios that all
 coexist** -- each one shown as its own tab (e.g. "Personal", "Family",
 "Retirement"), right below the disclaimer; a portfolio's tab exists as
@@ -780,12 +787,36 @@ Both show "N/A" for a holding with no listed options (ETFs/funds, or a
 non-Nifty50 stock with no derivatives) or no contract for the selected
 expiry date.
 
-The My Holdings table's column headers are clickable/sortable, same as
-the Options screen's Futures table -- click a row to select it (the
-checkbox on the left) and two buttons appear below the table: "Open in
-Stock Detail" and "Open in Options" for that stock. My Positions is a
-plain (non-selectable) sortable table -- there's no per-position "open in"
-action.
+Both My Holdings tables' column headers are clickable/sortable, same as
+the Options screen's Futures table -- click a row in either one to select
+it (the checkbox on the left) and two buttons appear below that table:
+"Open in Stock Detail" and "Open in Options" for that stock.
+
+**Trades (My Positions grouping).** Every position leg belongs to exactly
+one Trade, shown as a "Trade ID" column and summarized in a small **Trades**
+table above the detailed positions table (leg count, symbols involved,
+summed P&L). By default, one Trade per underlying symbol (Trade ID = the
+symbol itself, or the raw instrument string for a still-undecoded leg) --
+`portfolio_service.assign_trade_ids`. You can select two or more legs in
+the positions table (multi-row selection, same checkboxes as the holdings
+tables) and either **combine** them into a new or existing named Trade
+(e.g. "NIFTY Aug Iron Condor" spanning legs from different underlyings) or
+**split** selected legs back out to their own default per-symbol Trade.
+This manual grouping is stored in `portfolio_trade_groups` (migration
+`0020`), keyed by each leg's own `(portfolio_name, broker, raw_name)` --
+the exact instrument string a broker's export already gives one specific
+contract -- rather than any `portfolio_positions` row id. That's
+deliberate: `replace_broker_positions` fully deletes and reinserts a
+broker's positions on every upload/sync, so a grouping keyed to an
+ephemeral row id would be wiped on the very next refresh; keyed to
+`raw_name` instead, it survives every future refresh, re-upload, or Dhan
+"Sync now" the same way a saved `broker_connections` row already survives
+a holdings re-upload. One caveat: if a broker ever changes how it formats
+`raw_name` for the same contract (or the same portfolio/broker pair is
+later synced from a different source), a previously grouped leg's override
+simply stops matching anything and silently falls back to its default
+per-symbol Trade -- nothing breaks, but the grouping needs to be redone for
+that leg.
 
 ## Docker
 

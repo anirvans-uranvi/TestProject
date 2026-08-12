@@ -147,7 +147,8 @@ a column to `companies` (`is_etf`) + redefines `latest_screener_view`
 again, no new table; `0016` adds `portfolio_positions`; `0017` adds
 `broker_connections`; `0018` replaces `is_etf` with `company_type`, seeds
 three `Index` rows, and redefines `latest_screener_view` a third time;
-`0019` seeds a fourth `Index` row (BANKEX) -- neither adds a new table):
+`0019` seeds a fourth `Index` row (BANKEX) -- neither adds a new table;
+`0020` adds `portfolio_trade_groups`):
 
 **Reference data** (written by `scripts/fetch_nifty50_constituents.py` /
 `seed.sql`, read-only to the app):
@@ -172,6 +173,7 @@ three `Index` rows, and redefines `latest_screener_view` a third time;
 - `portfolio_holdings` — broker-CSV-uploaded holdings (migration `0012`, `portfolio_name` added in `0014`), keyed `(user_id, portfolio_name, broker, raw_name)` -- a user can maintain multiple independently-named portfolios that all coexist. `symbol` is nullable and deliberately **not** FK'd to `companies` -- a resolved symbol may not exist there yet (an ETF/fund or non-Nifty50 stock the screener doesn't otherwise track); see the My Portfolio section below for how it gets registered.
 - `portfolio_positions` — broker-CSV-uploaded F&O positions (migration `0016`), same keying/RLS shape as `portfolio_holdings`. `symbol`/`expiry_date`/`strike_price`/`option_type` are nullable together (an undecoded instrument format), and `qty` keeps its broker-reported sign (negative = short). See the My Portfolio section's Positions subsection.
 - `broker_connections` — saved Dhan API credentials per `(user_id, portfolio_name, broker)` (migration `0017`), letting a portfolio sync holdings/positions directly from Dhan's API instead of a CSV upload. `access_token` is stored as entered, protected only by this table's own RLS policy -- no application-level encryption. See the My Portfolio section's "Connect Dhan account" subsection.
+- `portfolio_trade_groups` — manual "Trade" grouping overrides for F&O position legs (migration `0020`), keyed `(user_id, portfolio_name, broker, raw_name)` -- the leg's own natural identity, not a `portfolio_positions` row id, so it survives that table's delete-then-insert replace semantics. See the My Portfolio section's "Trades" subsection.
 
 Two generated helpers, defined in `0003_views_functions.sql` (and patched
 in `0004`):
@@ -1365,6 +1367,60 @@ hours (a Dhan platform limit, not a choice made here), so there is no
 background/scheduled sync in this version — `token_saved_at` only tracks
 when credentials were last saved, purely so the page can warn once it's
 old enough to likely be expired.
+
+**Holdings split by `company_type` (ETFs & Mutual Funds vs Stocks)** — the
+old single "My Holdings" table became two, `_render_holdings_table` (a
+small helper factored out of what was previously an inline block in
+`_render_portfolio_tab`, so both tables share the exact same columns,
+`column_config`, and single-row-selection "Open in Stock Detail"/"Open in
+Options" behavior, just keyed with a different `key_suffix` so their
+widgets don't collide). The split itself is a pure filter over
+`companies.company_type` (loaded via the already-cached
+`_load_all_companies`, the same loader the Dhan CSV upload path already
+used for name-matching): `ETF`/`Fund` symbols go to "ETFs & Mutual Funds",
+everything else (`Equity`, `Index`, and any holding with no resolved
+symbol at all -- there's no company_type to check for one of those) goes
+to "Stocks". The Total Investment/Cur Val/P&L/P&L% stat grid above both
+tables is untouched -- it still aggregates across every holding regardless
+of which table it lands in.
+
+**Trades (`portfolio_trade_groups`, migration `0020`)** — F&O positions
+are grouped into "Trades" rather than listed as one flat table. The
+default grouping needs no stored state at all: `portfolio_service.
+assign_trade_ids` sets `trade_id = symbol or raw_name` for every leg with
+no override. A manual override — the user selecting two or more legs in
+the positions table (`selection_mode="multi-row"`, the same mechanism the
+holdings tables use for single-row selection) and clicking "Combine
+selected into this Trade" (a new or existing Trade ID) or "Split selected
+back to individual Trades" — is what actually needs persisting, and that's
+the one design decision worth explaining: **it's keyed by the leg's own
+`(portfolio_name, broker, raw_name)`, not by any `portfolio_positions` row
+id.** `replace_broker_positions` does a full delete-then-insert on every
+upload/sync (same as `replace_broker_holdings` always has), so a row id
+never survives a refresh — but `raw_name` is the exact instrument string a
+broker's export already gives one specific contract (Zerodha's
+tradingsymbol, Dhan's `Name`/`tradingSymbol`), and that string is stable
+across re-uploads of the same broker's data. Keying the override table to
+it instead of a row id means `portfolio_trade_groups` is simply never
+touched by `replace_broker_positions` at all — the exact same trick
+`broker_connections` already relies on to survive a holdings re-upload,
+just applied to a different table. `portfolio_repo.set_trade_group`
+upserts one row per selected leg (`on_conflict="user_id,portfolio_name,
+broker,raw_name"`); `clear_trade_group_overrides` deletes them, reverting
+to the default per-symbol grouping. Both are looped per-leg on the delete
+side rather than batched — selection sizes here are small (a handful of
+option legs, not thousands of rows), so simplicity won over a batched
+`.in_()` call that can't cleanly express a composite-key `OR` anyway.
+
+One sharp edge worth knowing, not a bug: if a broker ever changes how it
+formats `raw_name` for the same contract, or the same `(portfolio_name,
+broker)` pair starts being synced from a different source (e.g. switching
+a Dhan portfolio from CSV upload to "Connect Dhan account", which produces
+`raw_name` from `tradingSymbol` instead of the CSV's own `Name` column), a
+previously-grouped leg's override row simply stops matching any current
+position and that leg silently falls back to its default per-symbol
+Trade. Nothing errors or crashes; the manual grouping for that one leg
+just needs to be redone.
 
 ## Auth: a non-obvious quirk
 

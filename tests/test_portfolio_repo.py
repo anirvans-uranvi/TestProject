@@ -8,7 +8,7 @@ import types
 from datetime import date
 
 from src.models.enums import OptionType
-from src.models.portfolio import BrokerConnection, PortfolioHolding, PortfolioPosition
+from src.models.portfolio import BrokerConnection, PortfolioHolding, PortfolioPosition, PortfolioTradeGroup
 from src.repositories import portfolio_repo
 
 
@@ -234,6 +234,20 @@ class TestDeletePortfolio:
         assert len(remaining) == 1
         assert remaining[0]["portfolio_name"] == "Portfolio 2"
 
+    def test_also_deletes_trade_groups_within_the_named_portfolio_only(self):
+        client = _FakeClient()
+        client.store["portfolio_holdings"] = [_row("Portfolio 1", "Zerodha", "SBIN")]
+        client.store["portfolio_trade_groups"] = [
+            _trade_group_row("Portfolio 1", "Zerodha", "NIFTY2681123000PE", "NIFTY"),
+            _trade_group_row("Portfolio 2", "Zerodha", "KEEP", "NIFTY"),
+        ]
+
+        portfolio_repo.delete_portfolio(client, "u1", "Portfolio 1")
+
+        remaining = client.store["portfolio_trade_groups"]
+        assert len(remaining) == 1
+        assert remaining[0]["raw_name"] == "KEEP"
+
     def test_does_not_touch_other_users_portfolio_of_the_same_name(self):
         client = _FakeClient()
         client.store["portfolio_holdings"] = [
@@ -449,3 +463,73 @@ class TestBrokerConnections:
         remaining = client.store["broker_connections"]
         assert len(remaining) == 2
         assert portfolio_repo.get_broker_connection(client, "u1", "Portfolio 1", "Dhan") is None
+
+
+def _trade_group_row(portfolio_name, broker, raw_name, trade_id, user_id="u1"):
+    return {
+        "user_id": user_id,
+        "portfolio_name": portfolio_name,
+        "broker": broker,
+        "raw_name": raw_name,
+        "trade_id": trade_id,
+        "updated_at": None,
+    }
+
+
+class TestTradeGroups:
+    def test_list_returns_only_the_requested_users_rows_as_models(self):
+        client = _FakeClient()
+        client.store["portfolio_trade_groups"] = [
+            _trade_group_row("Portfolio 1", "Zerodha", "NIFTY2681123000PE", "NIFTY Spread"),
+            {**_trade_group_row("Portfolio 1", "Zerodha", "OTHER", "X"), "user_id": "u2"},
+        ]
+
+        result = portfolio_repo.list_trade_groups(client, "u1")
+
+        assert len(result) == 1
+        assert isinstance(result[0], PortfolioTradeGroup)
+        assert result[0].trade_id == "NIFTY Spread"
+
+    def test_set_trade_group_upserts_one_row_per_leg(self):
+        client = _FakeClient()
+
+        portfolio_repo.set_trade_group(
+            client, "u1", "Portfolio 1", [("Zerodha", "LEG_A"), ("Zerodha", "LEG_B")], "Combined Trade"
+        )
+
+        rows = client.store["portfolio_trade_groups"]
+        assert len(rows) == 2
+        assert {r["raw_name"] for r in rows} == {"LEG_A", "LEG_B"}
+        assert all(r["trade_id"] == "Combined Trade" for r in rows)
+
+    def test_set_trade_group_reassigns_an_already_grouped_leg(self):
+        client = _FakeClient()
+        client.store["portfolio_trade_groups"] = [_trade_group_row("Portfolio 1", "Zerodha", "LEG_A", "Old Trade")]
+
+        portfolio_repo.set_trade_group(client, "u1", "Portfolio 1", [("Zerodha", "LEG_A")], "New Trade")
+
+        rows = client.store["portfolio_trade_groups"]
+        assert len(rows) == 1
+        assert rows[0]["trade_id"] == "New Trade"
+
+    def test_set_trade_group_with_no_legs_is_a_no_op(self):
+        client = _FakeClient()
+
+        portfolio_repo.set_trade_group(client, "u1", "Portfolio 1", [], "Trade")
+
+        assert client.store.get("portfolio_trade_groups", []) == []
+
+    def test_clear_trade_group_overrides_removes_only_the_targeted_legs(self):
+        client = _FakeClient()
+        client.store["portfolio_trade_groups"] = [
+            _trade_group_row("Portfolio 1", "Zerodha", "LEG_A", "Combined Trade"),
+            _trade_group_row("Portfolio 1", "Zerodha", "LEG_B", "Combined Trade"),
+            _trade_group_row("Portfolio 1", "Dhan", "LEG_A", "Unrelated Trade"),
+        ]
+
+        portfolio_repo.clear_trade_group_overrides(client, "u1", "Portfolio 1", [("Zerodha", "LEG_A")])
+
+        remaining = client.store["portfolio_trade_groups"]
+        assert len(remaining) == 2
+        assert not any(r["broker"] == "Zerodha" and r["raw_name"] == "LEG_A" for r in remaining)
+        assert any(r["broker"] == "Dhan" and r["raw_name"] == "LEG_A" for r in remaining)

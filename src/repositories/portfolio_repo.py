@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from supabase import Client
 
-from src.models.portfolio import BrokerConnection, PortfolioHolding, PortfolioPosition
+from src.models.portfolio import BrokerConnection, PortfolioHolding, PortfolioPosition, PortfolioTradeGroup
 
 
 def list_holdings(client: Client, user_id: str) -> list[PortfolioHolding]:
@@ -57,12 +57,13 @@ def replace_broker_holdings(
 
 def delete_portfolio(client: Client, user_id: str, portfolio_name: str) -> None:
     """Permanently deletes every row for (user_id, portfolio_name) --
-    every broker's holdings, positions, AND saved API connection within it.
-    Used by the Portfolio page's "Delete this portfolio" control; every
-    other portfolio is untouched."""
+    every broker's holdings, positions, saved API connection, and manual
+    Trade grouping within it. Used by the Portfolio page's "Delete this
+    portfolio" control; every other portfolio is untouched."""
     client.table("portfolio_holdings").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
     client.table("portfolio_positions").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
     client.table("broker_connections").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
+    client.table("portfolio_trade_groups").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
 
 
 def list_positions(client: Client, user_id: str) -> list[PortfolioPosition]:
@@ -134,3 +135,50 @@ def delete_broker_connection(client: Client, user_id: str, portfolio_name: str, 
         .eq("broker", broker)
         .execute()
     )
+
+
+def list_trade_groups(client: Client, user_id: str) -> list[PortfolioTradeGroup]:
+    """Every manual "Trade" grouping override across every one of the
+    user's portfolios -- same shape as list_holdings/list_positions,
+    grouped by portfolio_name on the page side. Legs with no override row
+    here default to being grouped by their own underlying symbol -- see
+    src.services.portfolio_service.assign_trade_ids."""
+    resp = client.table("portfolio_trade_groups").select("*").eq("user_id", user_id).execute()
+    return [PortfolioTradeGroup.model_validate(r) for r in (resp.data or [])]
+
+
+def set_trade_group(
+    client: Client, user_id: str, portfolio_name: str, legs: list[tuple[str, str]], trade_id: str
+) -> None:
+    """Manually assigns every (broker, raw_name) leg in `legs` to
+    `trade_id` -- the "combine" action in the Positions section. Upserts
+    one row per leg; a leg already grouped elsewhere is simply
+    reassigned."""
+    if not legs:
+        return
+    payload = [
+        {
+            "user_id": user_id,
+            "portfolio_name": portfolio_name,
+            "broker": broker,
+            "raw_name": raw_name,
+            "trade_id": trade_id,
+        }
+        for broker, raw_name in legs
+    ]
+    client.table("portfolio_trade_groups").upsert(payload, on_conflict="user_id,portfolio_name,broker,raw_name").execute()
+
+
+def clear_trade_group_overrides(client: Client, user_id: str, portfolio_name: str, legs: list[tuple[str, str]]) -> None:
+    """Reverts every (broker, raw_name) leg in `legs` back to the default
+    per-underlying-symbol Trade grouping -- the "split" action."""
+    for broker, raw_name in legs:
+        (
+            client.table("portfolio_trade_groups")
+            .delete()
+            .eq("user_id", user_id)
+            .eq("portfolio_name", portfolio_name)
+            .eq("broker", broker)
+            .eq("raw_name", raw_name)
+            .execute()
+        )
