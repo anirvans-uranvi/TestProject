@@ -258,12 +258,12 @@ else:
 # ---------------------------------------------------------------------
 # Portfolio CC -- only shown when the signed-in user actually holds this
 # stock in at least one of their own saved portfolios (silently absent
-# otherwise, unlike 5% CSP/CC above which always render). Mirrors
-# fo_service.covered_call_for_holding -- the same per-holding formula
-# behind the Portfolio page's own "CC ROI"/"CC Assignment ROI" columns
-# (avg-buy-price-vs-LTP-dependent target, nearest-strike, not the fixed
-# 5%-OTM floor-filtered target 5% CC above uses) -- so the numbers here
-# always agree with that page for this exact stock. Tolerant of
+# otherwise, unlike 5% CSP/CC above which always render). Computed via
+# fo_service.covered_call_for_holding -- the same per-holding formula My
+# Holdings' CC ROI/CC Assignment ROI columns used before they were
+# removed (avg-buy-price-vs-LTP-dependent target, nearest-strike, not the
+# fixed 5%-OTM floor-filtered target 5% CC above uses). This is now the
+# only place in the app showing this per-holding CC figure. Tolerant of
 # portfolio_holdings not existing yet (migration 0012).
 # ---------------------------------------------------------------------
 try:
@@ -276,9 +276,8 @@ if holdings_for_symbol:
     st.divider()
     st.subheader("Portfolio CC")
     st.caption(
-        "The covered-call suggestion from your own Portfolio page's \"CC ROI\" / "
-        "\"CC Assignment ROI\" columns for this stock, broken out by monthly expiry. "
-        "Uses each holding's own avg buy price and quantity, not a fixed 5% OTM "
+        "A covered-call suggestion for this stock, based on your own holding, broken out by "
+        "monthly expiry. Uses each holding's own avg buy price and quantity, not a fixed 5% OTM "
         "target off spot: if avg buy price is above the last traded price, the "
         "strike targeted is ~3% above avg buy price; otherwise it's ~5% above the "
         "last traded price -- picking whichever listed strike is nearest that "

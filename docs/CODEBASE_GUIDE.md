@@ -109,7 +109,7 @@ pages/
   5_Options.py                     F&O: futures term structure + 5% CSP/CC breakdown per stock
   6_My_Broker.py                    Upload/connect Zerodha/Dhan holdings + F&O positions, create/delete portfolios
   7_My_Trades.py                     Holdings + positions grouped by underlying into Stock/Index/Other Trades
-  8_My_Holdings.py                   Equity holdings, ETFs & Mutual Funds / Stocks split, CC ROI columns
+  8_My_Holdings.py                   Equity holdings, ETFs & Mutual Funds / Stocks split, identical columns
   9_My_Positions.py                  Flat per-leg F&O positions table, no grouping
   10_Analyse_Trade.py                 One Trade's legs -- correct underlying/trade type, merge/split (hidden page)
 src/
@@ -846,7 +846,7 @@ page's own `st.set_page_config(page_title=..., page_icon=...)` call
   - **5% CSP** is a **near/next/far month table** (`fo_service.csp_5pct_for_rows`, one call per expiry — the same term-structure shape the Futures section above already uses), columns Term / Expiry / Spot / Strike / Put Premium / **Trade Date** / 5% CSP. The near row reuses the already-fetched `chain_rows` when the expiry selector above happens to be on the near expiry; next/far are fetched separately via `fo_repo.get_option_chain`. The Trade Date column is what actually surfaces a stale quote to the user — see `_freshest_rows`'s docstring above for why a strike's "latest" row can silently be weeks old.
   - **5% CC** is also a **near/next/far month table** (`fo_service.cc_5pct_for_rows`, one call per expiry, mirroring 5% CSP's own loop exactly), columns Term / Expiry / Strike (lowest ≥5% above spot) / Premium / Trade Date / **Net Investment** / 5% CC / **Assignment Profit** (`(strike / net_investment - 1) * 100`, `None`/"N/A" if `net_investment` is zero or negative -- premium ≥ spot). This originally only showed the nearest expiry as a stat-grid breakdown (via `fo_service.cc_5pct_map`, which itself just restricts to the nearest expiry and delegates to `cc_5pct_for_rows`) -- changed on request to match 5% CSP's table shape once a live user actually wanted to see next/far month CC yields too, not just the near month `dashboard_fo_metrics` already caches for the Dashboard. "Net Investment" and "Assignment Profit" only appear here, not on the Dashboard, which only ever caches/displays `cc_pct`.
   Both loops share one `_chain_rows_for(exp)` helper (reuses the already-fetched `chain_rows` when `exp` happens to be the expiry selected above, otherwise fetches that expiry's chain separately) and both use the cash-market spot for every expiry, not just the near one -- so **every** row of both tables, not just the near-month one, matches what the Dashboard would compute for that same expiry. Shaping is done by `fo_service.option_chain_summary`/`futures_term_structure`/`csp_5pct_for_rows`/`cc_5pct_for_rows`, not in the page.
-  - **Portfolio CC** -- a third near/next/far table, shown *only* when the signed-in user actually holds this stock in at least one of their own saved portfolios (`portfolio_repo.list_holdings(client, user_id)`, filtered to this symbol; silently absent otherwise, unlike 5% CSP/CC above which always render). Reuses the exact same per-holding formula behind My Holdings' own "CC ROI"/"CC Assignment ROI" columns (`fo_service.covered_call_for_holding` -- avg-buy-price-vs-LTP-dependent target, nearest-strike, not 5% CC's fixed-5%-OTM floor filter), so the numbers here always agree with that page for this exact stock. If the same portfolio name holds this symbol across multiple brokers, `portfolio_service.merge_holdings` combines them into one row first (same as My Holdings); if the stock is held in more than one *named* portfolio, one table renders per portfolio (each with its own qty/avg price subheading), since different portfolios can have different cost bases and thus different target strikes. Columns: Term / Expiry / Strike / Premium / Trade Date / Invested Amount / CC ROI / CC Assignment ROI.
+  - **Portfolio CC** -- a third near/next/far table, shown *only* when the signed-in user actually holds this stock in at least one of their own saved portfolios (`portfolio_repo.list_holdings(client, user_id)`, filtered to this symbol; silently absent otherwise, unlike 5% CSP/CC above which always render). Computed via `fo_service.covered_call_for_holding` (avg-buy-price-vs-LTP-dependent target, nearest-strike, not 5% CC's fixed-5%-OTM floor filter) -- this used to mirror My Holdings' own "CC ROI"/"CC Assignment ROI" columns, but those were removed by request (see the "Per-holding covered-call suggestion" bullet in the Portfolio pages section below), making this the only place in the app showing this figure now. If the same portfolio name holds this symbol across multiple brokers, `portfolio_service.merge_holdings` combines them into one row first; if the stock is held in more than one *named* portfolio, one table renders per portfolio (each with its own qty/avg price subheading), since different portfolios can have different cost bases and thus different target strikes. Columns: Term / Expiry / Strike / Premium / Trade Date / Invested Amount / CC ROI / CC Assignment ROI.
 
   **A real bug found here, right after this section first shipped**: the CSP/CC breakdown's spot value (CC was still "ITM PMCC" at the time, but the bug and fix applied identically) was initially taken from `option_chain_summary(near_chain_rows)["spot"]` — the F&O bhavcopy's own `underlying_price` column — while the Dashboard's two columns (now the `dashboard_fo_metrics` cache, see above) use the cash-market `latest_price` from `latest_screener_view`. These two prices aren't the same value, so this page's numbers didn't match the Dashboard's for the same stock (confirmed live: ADANIENT showed 5% CSP = 0.54% on the Dashboard but 0.45% here, since a different spot picked a different nearest-5%-below strike, 3040 vs 3020). Fixed by fetching `snapshot_repo.get_latest_screener_row(client, symbol).latest_price` and using that as the spot for both calculations here too, instead of the chain's `underlying_price` — the top-of-page "Spot"/"ATM strike" summary tiles are unaffected and deliberately still use the chain's own `underlying_price` (correct for highlighting the ATM row in the actual option-chain data being displayed there). If you add another F&O-derived calculation to either screen, source spot the same way this one now does — from the screener, not the chain — to keep the two screens' numbers in agreement.
 
@@ -1210,12 +1210,21 @@ caller left at that point, so it was deleted along with
 (genuinely never fetched) still just shows "—", never a dangling "as
 of" with nothing to date.
 
-**Per-holding covered-call suggestion ("CC ROI" / "CC Assignment ROI"
-columns)**: distinct from the Dashboard/Options "5% CC" figure
-(`cc_5pct_for_rows`, always spot-based, fixed 5% OTM, floor-filtered
-strike) -- this one is `fo_service.covered_call_for_holding(ce_rows,
-avg_price, ltp, qty, expiry_date)`, keyed off the *holding's own* avg
-buy price, not just the spot price:
+**Per-holding covered-call suggestion ("CC ROI" / "CC Assignment ROI",
+the Options page's "Portfolio CC" table)**: distinct from the
+Dashboard/Options "5% CC" figure (`cc_5pct_for_rows`, always spot-based,
+fixed 5% OTM, floor-filtered strike) -- this one is
+`fo_service.covered_call_for_holding(ce_rows, avg_price, ltp, qty,
+expiry_date)`, keyed off the *holding's own* avg buy price, not just the
+spot price. **This used to also drive a pair of columns on My Holdings**
+(`_load_covered_calls`, a page-wide "Covered call expiry" selectbox, an
+`include_cc` gate on `_render_holdings_table`) -- all of that was removed
+by request once the Stocks table was made to share the ETFs & Mutual
+Funds table's exact columns; `covered_call_for_holding` itself is
+unchanged and now only ever called from `pages/5_Options.py`'s Portfolio
+CC table, which needs no separate expiry selector at all -- it just
+reuses that page's own already-computed near/next/far expiry list (the
+same one 5% CSP/CC above it uses) for the stock currently being viewed:
 
 - If `avg_price > ltp` (a loss so far), the target is 3% above
   `avg_price` -- writing a call struck near the original cost basis
@@ -1240,24 +1249,6 @@ buy price, not just the spot price:
   against), or there's no priceable CE strike at all (no F&O for that
   symbol -- ETFs/funds, or a non-Nifty50 stock with no listed
   derivatives, like VAML).
-
-`pages/8_My_Holdings.py` renders one shared "Covered call expiry" selectbox
-above the tabs, applying uniformly across every portfolio. Its options
-are real expiry dates, not fixed "Near/Next/Far" labels: it unions
-`fo_repo.list_option_expiries(client, symbol)` across every symbol held
-anywhere in the account, sorts the distinct dates, and keeps the nearest
-3 -- formatted `%b %Y` (e.g. "Jul 2026") the same way the Dashboard's
-"Options month" selectbox already does, so the choices always reflect
-whatever NSE's current monthly contracts actually are instead of drifting
-out of sync as months roll over. The selected date is matched against
-each row's *own* expiry list by actual date (not position index) before
-`fo_repo.get_option_chain(client, symbol, expiry_date)` supplies the CE
-rows `covered_call_for_holding` needs -- a symbol missing a contract for
-that exact date (or with no F&O data at all) just gets "N/A" for that
-row. Both lookups are wrapped in `_load_covered_calls`, cached via
-`st.cache_data` and tolerant of `APIError` (F&O tables not migrated yet
-degrades the whole feature to "N/A" rather than crashing the page) the
-same way every other Portfolio-page query already is.
 
 **The holdings table itself is a plain `st.dataframe`**, same as the
 Dashboard's screener table -- see the Pages section's `1_Dashboard.py`
@@ -1623,25 +1614,23 @@ to "Stocks". The Total Investment/Cur Val/P&L/P&L% stat grid above both
 tables is untouched -- it still aggregates across every holding regardless
 of which table it lands in.
 
-**The two Holdings tables no longer share identical columns.**
-`_render_holdings_table` gates its extra columns with two independent
-knobs: `include_cc: bool = True` (CC ROI/CC Assignment ROI) and an
-optional `returns_pe_by_symbol` dict (1D/5D/20D Change). The Stocks call
-site keeps `include_cc` at its default `True` and passes no
-`returns_pe_by_symbol`; the ETFs & Mutual Funds call site does the
-opposite -- `include_cc=False`, `returns_pe_by_symbol=` the bulk-fetched
-dict -- so CC ROI/CC Assignment ROI now exist on Stocks only, and
-1D/5D/20D Change exist on ETFs & Mutual Funds only. Both knobs were user
-requests, not a coupled design: the split-by-`company_type` structure
-(above) just made each table cheap to customize independently once the
-columns list moved into a per-table-purpose decision rather than shared
-literal code. **A TTM PE column existed here briefly** (sourced from the
-same `returns_pe_by_symbol` dict's `pe_ratio` field, yfinance's
-`trailingPE`) but was removed by user request along with the CC columns
--- `snapshot_repo.get_latest_returns_and_pe` still fetches `pe_ratio`
-(no reason to special-case it out of one already-batched query for a
-field that costs nothing extra to fetch), it's just never read by the
-page anymore.
+**The two Holdings tables' columns have gone back and forth a few times,
+by user request each time -- currently identical again.** Originally
+both tables shared the same base columns; then Stocks gained CC ROI/CC
+Assignment ROI and ETFs & Mutual Funds gained 1D/5D/20D Change (plus a
+TTM PE column that existed only briefly, sourced from the same
+`returns_pe_by_symbol` dict's `pe_ratio` field, yfinance's `trailingPE`
+-- removed along with the first round of CC columns); most recently, CC
+ROI/CC Assignment ROI were dropped from Stocks entirely (see "Per-holding
+covered-call suggestion" above -- that figure now lives only on the
+Options page's Portfolio CC table) and 1D/5D/20D Change was added to
+Stocks too, so `_render_holdings_table` no longer needs an `include_cc`
+knob at all -- `returns_pe_by_symbol` (still sourced from
+`snapshot_repo.get_latest_returns_and_pe`, still fetching `pe_ratio` even
+though nothing displays it -- no reason to special-case it out of one
+already-batched query for a field that costs nothing extra) is now a
+required parameter, computed once per portfolio tab over *every* held
+symbol and passed to both table calls unchanged.
 
 Sourced by a bulk repo function, `snapshot_repo.get_latest_returns_and_pe`,
 modeled directly on the existing `get_latest_prices` right above it in

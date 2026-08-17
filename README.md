@@ -41,7 +41,7 @@ pages/                  Streamlit multipage app (each still its own script,
   5_Options.py              F&O: futures term structure, 5% CSP / 5% CC breakdown
   6_My_Broker.py             Upload/connect Zerodha/Dhan holdings + F&O positions, create/delete portfolios
   7_My_Trades.py              Holdings + positions grouped by underlying into Stock/Index/Other Trades
-  8_My_Holdings.py            Equity holdings, split ETFs & Mutual Funds / Stocks, CC ROI columns
+  8_My_Holdings.py            Equity holdings, split ETFs & Mutual Funds / Stocks, both with 1D/5D/20D Change
   9_My_Positions.py           Flat per-leg F&O positions table (no grouping -- see My Trades for that)
   10_Analyse_Trade.py          One Trade's legs -- correct underlying, rename trade type, merge/split
                               (hidden from the sidebar -- reached only via My Trades' row selection)
@@ -566,10 +566,22 @@ table.
 
 If you hold this stock in one of your own saved portfolios, a third
 **"Portfolio CC"** table appears below 5% CC (silently absent otherwise)
--- the same per-holding covered-call figure as My Holdings' own
-"CC ROI"/"CC Assignment ROI" columns (avg-buy-price-vs-LTP-dependent
-target, nearest strike, not 5% CC's fixed-5%-OTM floor), so the numbers
-always match that page for this exact stock. One table per named
+-- a per-holding covered-call suggestion, and (since My Holdings' own CC
+ROI/CC Assignment ROI columns were removed by request) the only place in
+the app showing this figure. For each holding, the strike targeted
+depends on whether the position is under water: if your average buy
+price is above the current LTP, it targets ~3% above your average buy
+price; otherwise (at or above breakeven) it targets ~5% above LTP --
+picking whichever listed strike is nearest that target (not floor-
+filtered like 5% CC above). **CC ROI** is the ROI when the call expires
+OTM -- the premium from writing 1 lot of that call, as a percentage of
+your full position's investment. **CC Assignment ROI** is the ROI if the
+stock gets called away: the total return if the whole position were
+closed out at that strike (plus that lot's premium), relative to your
+original cost basis. Both are measured against the stock's total
+invested amount, not just the margin, on the assumption that the stock
+is pledged and the pledge is used as margin; both show "N/A" for an
+expiry with no listed strike near the target. One table per named
 portfolio that holds it, each showing its own qty/avg price plus
 Strike/Premium/Trade Date/Invested Amount/CC ROI/CC Assignment ROI for
 the near, next, and far monthly expiries.
@@ -788,23 +800,26 @@ combined into one row for display -- `portfolio_service.merge_holdings`),
 split into two tables by `companies.company_type` (migration `0018`):
 **ETFs & Mutual Funds** (`ETF`/`Fund`) first, then **Stocks**
 (`Equity`/`Index`, and any still-unresolved holding, since there's no
-better signal for those). Both tables share the base columns -- Stock,
-Qty, Avg Price, LTP, Investment, Cur Val, P&L, P&L%; the Total
-Investment/Cur Val/P&L/P&L% stat grid above both tables still aggregates
-across everything. **The Stocks table only** additionally shows **CC
-ROI** / **CC Assignment ROI** (see below). **The ETFs & Mutual Funds
-table only** shows **1D/5D/20D Change** (the holding's rupee value change
-over that period, `%` in parentheses -- e.g. `₹+588.24 (+2.00%)`).
-Sourced from `daily_screener_snapshots` via
+better signal for those). **Both tables share the exact same columns**
+-- Stock, Qty, Avg Price, LTP, Investment, Cur Val, P&L, P&L%, 1D Change,
+5D Change, 20D Change; the Total Investment/Cur Val/P&L/P&L% stat grid
+above both tables still aggregates across everything. 1D/5D/20D Change is
+the holding's rupee value change over that period, `%` in parentheses --
+e.g. `₹+588.24 (+2.00%)` -- sourced from `daily_screener_snapshots` via
 `snapshot_repo.get_latest_returns_and_pe` (`return_1d`/`return_5d`/`return_20d`,
 the same fields Dashboard/Stock Detail already read for the Nifty50
 universe) -- that table stores only *percentage* returns, not historical
 closes, so the rupee change is derived via
 `src/calculations/returns.py::value_change_from_pct(cur_val, return_pct)`,
-the algebraic inverse of `pct_return`. Not shown on the Stocks table --
-the user only asked for it on ETFs/funds, where a quick freshness/
-valuation check across a handful of large index positions is the actual
-use case.
+the algebraic inverse of `pct_return`.
+
+**No CC ROI / CC Assignment ROI columns or "Covered call expiry"
+dropdown here** -- both were removed by request once the Stocks table
+was made to match the ETFs & Mutual Funds table's columns exactly. The
+same per-holding covered-call figure still exists, just relocated: see
+"Portfolio CC" under the Options page (`pages/5_Options.py`) below, which
+computes it live for one stock at a time from your own holdings, with no
+dependency on a page-wide expiry selector.
 
 ### My Positions (`pages/9_My_Positions.py`)
 
@@ -894,29 +909,6 @@ rows are showing a fallback price: it compares each row's
 load's batch, and any row falling short gets a " (as of <date>)" suffix
 appended to its LTP cell -- shown only when a fallback price is actually
 being displayed, never for a symbol with no price at all.
-
-**CC ROI / CC Assignment ROI** (per-holding covered-call suggestion): a
-"Covered call expiry" dropdown sits above the tabs and applies to every
-portfolio. Its choices are the actual nearest 3 monthly expiry dates
-(e.g. "Jul 2026", "Aug 2026", "Sep 2026"), taken live from the system
-rather than a fixed Near/Next/Far label, so they always match whatever
-NSE's current monthly contracts are. For each stock held, the strike
-targeted depends on whether the position is under water: if your average
-buy price is above the current LTP, it targets ~3% above your average
-buy price; otherwise (at or above breakeven) it targets ~5% above LTP --
-picking whichever listed strike is nearest that target. **CC ROI** is the
-ROI when the call expires OTM -- the premium from writing 1 lot of that
-call, as a percentage of your full position's investment. **CC
-Assignment ROI** is the ROI if the stock gets called away: the total
-return if the whole position were closed out at that strike (plus that
-lot's premium), relative to your original cost basis. Both are measured
-against the stock's total invested amount, not just the margin, on the
-assumption that the stock is pledged and the pledge is used as margin.
-Both show "N/A" for a holding with no listed options (a non-Nifty50 stock
-with no derivatives) or no contract for the selected expiry date. Shown
-on the Stocks table only -- the ETFs & Mutual Funds table has no CC
-ROI/CC Assignment ROI columns at all, since covered-call suggestions
-never applied there anyway (ETFs/funds have no listed options).
 
 Both My Holdings tables' column headers are clickable/sortable, same as
 the Options screen's Futures table -- click a row in either one to select
