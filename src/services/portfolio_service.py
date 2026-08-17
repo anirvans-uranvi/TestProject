@@ -371,10 +371,25 @@ def zerodha_holdings_from_api(rows: list[dict]) -> list[dict]:
     of source. `tradingsymbol` is already the exact NSE trading symbol --
     same as the CSV export's own `Instrument` column -- so it's trusted
     directly, no match_symbol() fuzzy matching needed. Skips rows with no
-    quantity (a holding fully sold off today)."""
+    quantity (a holding fully sold off today).
+
+    **A real bug this fixed**: Kite's own `quantity` field is the *free*
+    (non-pledged) quantity only -- confirmed live against a real account
+    with several holdings pledged as margin (GILT5YBEES, LIQUIDCASE,
+    LTGILTCASE, NIFTYBEES): each came back `quantity: 0` (matching Kite's
+    own web UI, which shows "Qty. 0" plus a separate "P: <pledged qty>"
+    badge for these), even though they're still fully owned, still have a
+    real `average_price`, and still show real Invested/Cur. val/P&L in
+    Kite's own UI. Treating `quantity` alone as "the" quantity silently
+    dropped every fully-pledged holding entirely (`qty == 0` -> skipped).
+    Summing `quantity + t1_quantity + collateral_quantity` reconstructs
+    the true total owned quantity -- verified against the same live
+    account: `average_price * (this sum)` matches Kite's own displayed
+    "Invested" amount exactly for a fully-pledged holding (e.g.
+    GILT5YBEES: avg 64.30 * 7500 = 4,82,250.00, matching to the rupee)."""
     holdings = []
     for row in rows:
-        qty = row.get("quantity") or 0
+        qty = (row.get("quantity") or 0) + (row.get("t1_quantity") or 0) + (row.get("collateral_quantity") or 0)
         symbol = str(row.get("tradingsymbol") or "").strip().upper()
         if not qty or not symbol:
             continue

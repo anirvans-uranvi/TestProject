@@ -579,6 +579,37 @@ class TestZerodhaHoldingsFromApi:
         ]
         assert portfolio_service.zerodha_holdings_from_api(rows) == []
 
+    def test_a_fully_pledged_holding_is_not_dropped(self):
+        # Real bug this guards against: a holding pledged entirely as
+        # margin comes back quantity=0 (Kite's own web UI shows "Qty. 0"
+        # too) even though it's still fully owned -- confirmed live
+        # against a real account. The pledged quantity is reported
+        # separately (collateral_quantity here), and average_price is
+        # computed against the *total* owned quantity, not just the free
+        # portion -- these exact figures (GILT5YBEES) are from that real
+        # account: avg 64.30 * 7500 = 4,82,250.00, matching Kite's own
+        # displayed "Invested" to the rupee.
+        rows = [
+            {
+                "tradingsymbol": "GILT5YBEES",
+                "quantity": 0,
+                "t1_quantity": 0,
+                "collateral_quantity": 7500,
+                "average_price": 64.30,
+                "last_price": 66.26,
+            }
+        ]
+        holdings = portfolio_service.zerodha_holdings_from_api(rows)
+        assert holdings == [
+            {"raw_name": "GILT5YBEES", "symbol": "GILT5YBEES", "qty": 7500.0, "avg_price": 64.30, "investment": 482250.0}
+        ]
+
+    def test_partially_pledged_holding_sums_free_and_pledged_quantity(self):
+        rows = [{"tradingsymbol": "PARTIAL", "quantity": 100, "t1_quantity": 0, "collateral_quantity": 400, "average_price": 10.0}]
+        holdings = portfolio_service.zerodha_holdings_from_api(rows)
+        assert holdings[0]["qty"] == 500.0
+        assert holdings[0]["investment"] == 5000.0
+
 
 class TestZerodhaPositionsFromApi:
     def test_translates_short_weekly_index_option_using_ltp_from_the_row(self):

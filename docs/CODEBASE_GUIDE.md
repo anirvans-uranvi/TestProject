@@ -1572,6 +1572,40 @@ credentials-only save and "update the tabs' cached copy of api_key
 without disturbing a still-valid session" for the "Update API Key /
 Secret" form.
 
+**A real bug found right after shipping**: the page showed "Connected --
+session started 1 minute(s) ago" and a working-looking "Sync now" button
+immediately after just saving API Key/Secret -- *before* ever clicking
+"Log in to Zerodha" at all. Cause: `broker_connections.token_saved_at`
+is `not null default now()` (migration `0017`); the credentials-only
+save omits it from the upsert payload (no real session exists yet), but
+since that's a fresh `INSERT` for this `(portfolio_name, broker)`,
+Postgres's own column default stamps it "now()" regardless. The page's
+"is this session still good" check
+(`_zerodha_token_is_fresh(connection.token_saved_at)`) only looked at
+that timestamp's freshness, not whether `access_token` itself was
+actually present -- so a *just-saved-but-never-logged-in* connection
+looked identical to a *freshly-logged-in* one. Fixed by requiring
+`connection.access_token and _zerodha_token_is_fresh(...)` together, not
+freshness alone.
+
+**A second real bug, found against a live account with pledged
+holdings**: several ETF holdings (GILT5YBEES, LIQUIDCASE, LTGILTCASE,
+NIFTYBEES) were missing from My Holdings entirely after a real sync,
+even though they were genuinely held. Cause: Kite's `quantity` field on
+a holdings row is the *free* (non-pledged) quantity only -- confirmed
+live, and visible in Kite's own web UI too (it shows "Qty. 0" plus a
+separate "P: 7500"-style pledged-quantity badge for a fully-pledged
+holding). `zerodha_holdings_from_api`'s `if not qty: continue` guard
+(meant to skip a holding sold off entirely) was silently dropping every
+*fully-pledged* holding too, since Kite reports its free quantity as
+zero. Fixed by summing `quantity + t1_quantity + collateral_quantity` to
+reconstruct the true total owned quantity -- verified against the same
+live account that `average_price * (this sum)` matches Kite's own
+displayed "Invested" figure exactly (GILT5YBEES: 64.30 × 7500 =
+₹4,82,250.00, to the rupee). Zerodha's Positions API has no equivalent
+pledging concept (F&O margin isn't posted via share pledging), so
+`zerodha_positions_from_api` isn't affected by this.
+
 **Holdings split by `company_type` (ETFs & Mutual Funds vs Stocks)** — the
 old single "My Holdings" table became two, `_render_holdings_table` (a
 small helper factored out of what was previously an inline block in
