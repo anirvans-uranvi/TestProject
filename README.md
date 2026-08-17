@@ -43,6 +43,7 @@ pages/                  Streamlit multipage app (each still its own script,
   7_My_Trades.py              Holdings + positions grouped by underlying into Stock/Index/Other Trades
   8_My_Holdings.py            Equity holdings, split ETFs & Mutual Funds / Stocks, both with 1D/5D/20D Change
   9_My_Positions.py           Per-leg F&O positions, split into Stock Options / Index Options / Others (no grouping -- see My Trades for that)
+  11_My_CSP.py                Every position leg from a Trade Type "CSP", with underlying LTP + 1D/5D/20D change
   10_Analyse_Trade.py          One Trade's legs -- correct underlying, rename trade type, merge/split
                               (hidden from the sidebar -- reached only via My Trades' row selection)
 src/
@@ -634,10 +635,10 @@ published yet.
 ## Portfolio pages
 
 Your own holdings and F&O positions -- uploaded from broker CSV exports,
-not the Nifty50 screener universe -- span five pages, only four of which
+not the Nifty50 screener universe -- span six pages, only five of which
 appear in the sidebar (**My Broker**, **My Trades**, **My Holdings**, **My
-Positions**; **Analyse Trade** is reached only by selecting a row on My
-Trades). All five share one loader/formatting module,
+Positions**, **My CSP**; **Analyse Trade** is reached only by selecting a
+row on My Trades). All six share one loader/formatting module,
 `src/utils/portfolio_page.py` (cached data loaders, the cache-bust
 counter, `build_trade_legs`), so a cache hit on one page is a cache hit on
 another -- e.g. switching from My Holdings to My Trades doesn't re-fetch
@@ -1017,6 +1018,29 @@ unused -- no automatic carry-forward, since the target Trade already has
 its own (possibly already-customized) label/type and silently overwriting
 it would be more surprising than a clean "re-enter it if you still want
 it".
+
+### My CSP (`pages/11_My_CSP.py`)
+
+Every open F&O position leg from a Trade whose **Trade Type is "CSP"**
+(case-insensitive, whitespace-trimmed -- `portfolio_service.is_csp_trade_type`)
+-- there's no separate "mark this as a Cash Secured Put" control; you tag
+it the same way you'd rename any Trade Type on Analyse Trade (see My
+Trades above), just using the exact word "CSP". A Trade with no
+position legs (e.g. accidentally renamed on a pure-holding Trade) simply
+contributes nothing here -- Holding legs have no expiry/strike to show
+and are silently skipped. Columns: **Instrument** (the broker's raw
+contract string), **Underlying**, **Expiry**, **Strike**, **Qty**
+(signed -- negative is short), **Avg Price**, **LTP**, **P&L**, **P&L%**,
+then four more that don't appear on My Positions: **LTP Underlying** (the
+underlying stock's own current price, from `daily_screener_snapshots` --
+the same source My Holdings' Current Value already reads), and **1D/5D/20D
+Underlying** (that stock's own 1-day/5-day/20-day percentage return, the
+same `return_1d`/`return_5d`/`return_20d` fields My Holdings' "1D/5D/20D
+Change" columns are derived from -- shown here as a plain percentage,
+not converted to a rupee amount, since there's no "value" of the
+underlying itself to apply it to). Like the other Portfolio pages, one
+tab per portfolio; a portfolio with no "CSP"-tagged Trades shows a plain
+caption rather than an empty table.
 
 ## Docker
 

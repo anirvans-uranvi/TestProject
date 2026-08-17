@@ -365,6 +365,20 @@ class TestClassifyUnderlyingBucket:
         assert portfolio_service.classify_underlying_bucket("SOMENEWCO", {}) == "stock"
 
 
+class TestIsCspTradeType:
+    def test_exact_match(self):
+        assert portfolio_service.is_csp_trade_type("CSP") is True
+
+    def test_case_insensitive_and_trimmed(self):
+        assert portfolio_service.is_csp_trade_type(" csp ") is True
+
+    def test_default_trade_type_is_not_csp(self):
+        assert portfolio_service.is_csp_trade_type("Trade") is False
+
+    def test_other_custom_trade_type_is_not_csp(self):
+        assert portfolio_service.is_csp_trade_type("Covered Call") is False
+
+
 class TestClassifyPositionBucket:
     def test_no_option_type_is_other(self):
         # A plain stock/ETF position or an undecoded F&O row -- symbol is

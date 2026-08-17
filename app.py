@@ -19,6 +19,7 @@ pages = [
     st.Page("pages/7_My_Trades.py", title="My Trades"),
     st.Page("pages/8_My_Holdings.py", title="My Holdings"),
     st.Page("pages/9_My_Positions.py", title="My Positions"),
+    st.Page("pages/11_My_CSP.py", title="My CSP"),
     st.Page("pages/10_Analyse_Trade.py", title="Analyse Trade", visibility="hidden"),
     st.Page("pages/4_Settings.py", title="Settings"),
 ]

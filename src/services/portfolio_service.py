@@ -526,6 +526,17 @@ def classify_underlying_bucket(symbol: str | None, company_type_by_symbol: dict[
     return "stock"
 
 
+def is_csp_trade_type(trade_type: str) -> bool:
+    """Whether a Trade's (free-text, user-editable) `trade_type` marks it
+    as a Cash Secured Put -- the signal `pages/11_My_CSP.py` filters on.
+    Case-insensitive and whitespace-trimmed so "CSP", "csp", " CSP " all
+    match the same way the rest of this app treats free-text user input
+    (e.g. `parse_dhan_position_name`'s uppercasing) -- there's no fixed
+    enum of trade types (see PortfolioTradeMeta), "CSP" is just a
+    convention this page expects the user to type on Analyse Trade."""
+    return trade_type.strip().lower() == "csp"
+
+
 def classify_position_bucket(
     option_type: OptionType | None, symbol: str | None, company_type_by_symbol: dict[str, CompanyType]
 ) -> str:

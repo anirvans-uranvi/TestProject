@@ -111,6 +111,7 @@ pages/
   7_My_Trades.py                     Holdings + positions grouped by underlying into Stock/Index/Other Trades
   8_My_Holdings.py                   Equity holdings, ETFs & Mutual Funds / Stocks split, identical columns
   9_My_Positions.py                  Per-leg F&O positions, split into Stock Options / Index Options / Others
+  11_My_CSP.py                       Every position leg from a "CSP"-tagged Trade, + underlying LTP/1D/5D/20D
   10_Analyse_Trade.py                 One Trade's legs -- correct underlying/trade type, merge/split (hidden page)
 src/
   config.py                       Pydantic Settings, reads .env
@@ -855,25 +856,27 @@ page's own `st.set_page_config(page_title=..., page_icon=...)` call
 
   **A real bug found here, right after this section first shipped**: the CSP/CC breakdown's spot value (CC was still "ITM PMCC" at the time, but the bug and fix applied identically) was initially taken from `option_chain_summary(near_chain_rows)["spot"]` — the F&O bhavcopy's own `underlying_price` column — while the Dashboard's two columns (now the `dashboard_fo_metrics` cache, see above) use the cash-market `latest_price` from `latest_screener_view`. These two prices aren't the same value, so this page's numbers didn't match the Dashboard's for the same stock (confirmed live: ADANIENT showed 5% CSP = 0.54% on the Dashboard but 0.45% here, since a different spot picked a different nearest-5%-below strike, 3040 vs 3020). Fixed by fetching `snapshot_repo.get_latest_screener_row(client, symbol).latest_price` and using that as the spot for both calculations here too, instead of the chain's `underlying_price` — the top-of-page "Spot"/"ATM strike" summary tiles are unaffected and deliberately still use the chain's own `underlying_price` (correct for highlighting the ATM row in the actual option-chain data being displayed there). If you add another F&O-derived calculation to either screen, source spot the same way this one now does — from the screener, not the chain — to keep the two screens' numbers in agreement.
 
-- **`6_My_Broker.py` / `7_My_Trades.py` / `8_My_Holdings.py` / `9_My_Positions.py` / `10_Analyse_Trade.py`** — five pages (`10_Analyse_Trade.py` hidden from the sidebar, see the "Streamlit app" section above) replacing what used to be one combined `6_Portfolio.py` (sidebar label "My Portfolio", retired). See the dedicated Portfolio pages section below for the full upload → match → save → refresh-registration pipeline, the multiple-coexisting-portfolios design (`portfolio_name`, migration `0014`), and the My Trades/Analyse Trade grouping. Each page reads every one of the signed-in user's saved rows across every portfolio and broker via `src/utils/portfolio_page.py`'s shared cached loaders; My Holdings/My Positions/My Trades each render one `st.tabs` entry per distinct `portfolio_name` (union of holdings' and positions' names — a portfolio can exist on positions alone) scoping `portfolio_service.merge_holdings`/`compute_portfolio_view` (LTP via `snapshot_repo.get_latest_prices`, a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why) and `compute_positions_view` to just that portfolio's own rows. Every table on these pages is a plain `st.dataframe` — see below for why, and for how row selection replaced the per-row 🔍 button.
+- **`6_My_Broker.py` / `7_My_Trades.py` / `8_My_Holdings.py` / `9_My_Positions.py` / `11_My_CSP.py` / `10_Analyse_Trade.py`** — six pages (`10_Analyse_Trade.py` hidden from the sidebar, see the "Streamlit app" section above) replacing what used to be one combined `6_Portfolio.py` (sidebar label "My Portfolio", retired). See the dedicated Portfolio pages section below for the full upload → match → save → refresh-registration pipeline, the multiple-coexisting-portfolios design (`portfolio_name`, migration `0014`), and the My Trades/Analyse Trade/My CSP grouping. Each page reads every one of the signed-in user's saved rows across every portfolio and broker via `src/utils/portfolio_page.py`'s shared cached loaders; My Holdings/My Positions/My Trades/My CSP each render one `st.tabs` entry per distinct `portfolio_name` (union of holdings' and positions' names — a portfolio can exist on positions alone) scoping `portfolio_service.merge_holdings`/`compute_portfolio_view` (LTP via `snapshot_repo.get_latest_prices`, a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why) and `compute_positions_view` to just that portfolio's own rows. Every table on these pages is a plain `st.dataframe` — see below for why, and for how row selection replaced the per-row 🔍 button.
 
 ## Portfolio pages
 
 The signed-in user's own broker holdings and F&O positions (not the
-Nifty50 screener universe) span five pages -- `pages/6_My_Broker.py`
+Nifty50 screener universe) span six pages -- `pages/6_My_Broker.py`
 (upload/connect/create/delete), `pages/7_My_Trades.py` (holdings +
 positions grouped by underlying into Trades), `pages/8_My_Holdings.py`
 (equity holdings, valued live against the app's own market data),
 `pages/9_My_Positions.py` (per-leg F&O positions split into Stock Options/
 Index Options/Others tables, valued against each file's own LTP -- see
-the Positions subsection near the end of this section for why), and
-`pages/10_Analyse_Trade.py` (one Trade's detail,
+the Positions subsection near the end of this section for why),
+`pages/11_My_CSP.py` (every position leg from a "CSP"-tagged Trade, with
+the underlying's own LTP/1D/5D/20D change -- see its own subsection
+below), and `pages/10_Analyse_Trade.py` (one Trade's detail,
 registered `visibility="hidden"` in `app.py` so it's reachable via
 `st.switch_page` but never shows as its own sidebar link). This used to
 be one combined page (`pages/6_Portfolio.py`, retired) -- most of the
 mechanics below are unchanged, just relocated; the split itself, and the
 new My Trades/Analyse Trade grouping, are covered in their own
-subsections further down. All five pages share one module,
+subsections further down. All six pages share one module,
 `src/utils/portfolio_page.py` (cached `@st.cache_data` loaders, the
 `portfolio_cache_bust` counter, `build_trade_legs`) -- since these are
 plain module-level functions rather than redefined per page, a cache hit
@@ -1841,6 +1844,44 @@ note above) -- landing on it directly with neither key set (a stale
 bookmark, or the trade having been fully split away since) shows an
 `st.info` pointing back to My Trades instead of crashing on a missing
 lookup.
+
+**My CSP (`pages/11_My_CSP.py`)** — a flat, un-grouped view of every
+*position* leg belonging to a Trade whose `trade_type` is "CSP". There's
+no dedicated boolean/tag column for this anywhere in the schema; it
+deliberately reuses the same free-text `trade_type` field Analyse Trade
+already lets you rename to anything ("Covered Call", "Aug Iron Condor",
+...) — "CSP" is just a convention this one page happens to filter on.
+`portfolio_service.is_csp_trade_type(trade_type)` does the match
+(`trade_type.strip().lower() == "csp"`, so "CSP"/"csp"/" CSP " all
+count). The page calls the exact same `build_trade_legs` +
+`group_into_trades` pipeline My Trades/Analyse Trade use (so a leg's
+`trade_type` here is identical to what those pages show), filters to
+`is_csp_trade_type(t["trade_type"])` trades, then flattens to
+`leg["leg_type"] == "Position"` legs only — a Holding leg has no
+expiry/strike/option_type to show, so a Trade that somehow got renamed
+"CSP" while only containing holdings (or a merge that pulled a holding
+leg in alongside a short put) silently contributes nothing from that
+leg rather than showing a row full of blanks. `bucket` (Stock/Index/
+Other) is irrelevant here and ignored — a CSP is filtered purely by
+its Trade Type, regardless of which My Trades table it'd otherwise
+sort into.
+
+Columns beyond what My Positions already shows (Instrument/Underlying/
+Expiry/Strike/Qty/Avg Price/LTP/P&L/P&L%) are the four
+**"... Underlying"** ones: `LTP Underlying` is the underlying stock's own
+current price (`snapshot_repo.get_latest_prices`, the same call My
+Holdings uses for its Cur Val column — a direct `daily_screener_snapshots`
+query, not `latest_screener_view`, so it still resolves for a
+portfolio-only symbol not in `nifty50_constituents`); `1D/5D/20D
+Underlying` are that stock's own `return_1d`/`return_5d`/`return_20d`
+(`snapshot_repo.get_latest_returns_and_pe`, the same fields My Holdings'
+"1D/5D/20D Change" columns are derived from) shown as a **plain
+percentage**, not converted to a rupee amount the way My Holdings does
+via `value_change_from_pct` — there's no "current value of the
+underlying" concept to apply that conversion to here, only the stock's
+own price, so the raw percentage is the more direct fit. All four are
+`None` (→ "N/A") for a leg with no resolved `symbol` (an undecoded
+contract), same as everywhere else on these pages.
 
 ## Auth: a non-obvious quirk
 
