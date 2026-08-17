@@ -5,9 +5,10 @@ import streamlit as st
 from postgrest.exceptions import APIError
 from pydantic import ValidationError
 
+from src.calculations.classification import criterion_b
 from src.repositories import settings_repo
 from src.services import portfolio_service
-from src.utils.formatting import format_inr
+from src.utils.formatting import format_inr, pass_fail_icon
 from src.utils.portfolio_page import (
     build_trade_legs,
     ensure_cache_bust,
@@ -126,6 +127,9 @@ def _render_csp_tab(
     table_rows = []
     for leg in csp_legs:
         rp = returns_by_symbol.get(leg["symbol"]) if leg["symbol"] else None
+        return_1d = rp["return_1d"] if rp else None
+        return_5d = rp["return_5d"] if rp else None
+        return_20d = rp["return_20d"] if rp else None
         underlying_ltp = ltp_by_symbol.get(leg["symbol"]) if leg["symbol"] else None
         breakeven_price = portfolio_service.csp_breakeven_price(leg["strike_price"], leg["avg_price"])
         breakeven_pct = portfolio_service.csp_breakeven_pct(breakeven_price, underlying_ltp)
@@ -142,9 +146,15 @@ def _render_csp_tab(
                 "P&L %": leg["pnl_pct"],
                 "Breakeven": _fmt_breakeven(breakeven_price, breakeven_pct),
                 "LTP Underlying": underlying_ltp,
-                "1D Underlying": rp["return_1d"] if rp else None,
-                "5D Underlying": rp["return_5d"] if rp else None,
-                "20D Underlying": rp["return_20d"] if rp else None,
+                "1D": return_1d,
+                "5D": return_5d,
+                "20D": return_20d,
+                # Same "Momentum" criterion (B) the Dashboard's screener
+                # classifies every stock on -- 1D, 5D, AND 20D returns all
+                # positive -- reused as-is (src.calculations.classification.
+                # criterion_b) so this column always agrees with what the
+                # Dashboard would show for the same underlying.
+                "Momentum": pass_fail_icon(criterion_b(return_1d, return_5d, return_20d)),
             }
         )
 
@@ -160,9 +170,9 @@ def _render_csp_tab(
             "P&L": st.column_config.NumberColumn(format="₹%,.2f"),
             "P&L %": st.column_config.NumberColumn(format="%+.2f%%"),
             "LTP Underlying": st.column_config.NumberColumn(format="₹%,.2f"),
-            "1D Underlying": st.column_config.NumberColumn(format="%+.2f%%"),
-            "5D Underlying": st.column_config.NumberColumn(format="%+.2f%%"),
-            "20D Underlying": st.column_config.NumberColumn(format="%+.2f%%"),
+            "1D": st.column_config.NumberColumn(format="%+.2f%%"),
+            "5D": st.column_config.NumberColumn(format="%+.2f%%"),
+            "20D": st.column_config.NumberColumn(format="%+.2f%%"),
         },
     )
 

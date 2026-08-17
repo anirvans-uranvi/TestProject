@@ -1034,7 +1034,7 @@ contributes nothing here -- Holding legs have no expiry/strike to show
 and are silently skipped. Columns: **Instrument** (the broker's raw
 contract string), **Underlying**, **Expiry**, **Strike**, **Qty**
 (signed -- negative is short), **Avg Price**, **LTP**, **P&L**, **P&L%**,
-then five more that don't appear on My Positions: **Breakeven** -- the
+then six more that don't appear on My Positions: **Breakeven** -- the
 CSP breakeven price (`Strike - Avg Price`, the premium collected)
 followed by how far that sits from the underlying's current price in
 parentheses (`(Breakeven / LTP Underlying - 1)` as a %), e.g.
@@ -1043,13 +1043,17 @@ current price (cushion: the underlying would need to fall that far
 before the position loses money past the premium collected), positive
 means it's already fallen through breakeven; **LTP Underlying** (the
 underlying stock's own current price, from `daily_screener_snapshots` --
-the same source My Holdings' Current Value already reads); and
-**1D/5D/20D Underlying**
+the same source My Holdings' Current Value already reads); **1D/5D/20D**
 (that stock's own 1-day/5-day/20-day percentage return, the same
 `return_1d`/`return_5d`/`return_20d` fields My Holdings' "1D/5D/20D
 Change" columns are derived from -- shown here as a plain percentage,
 not converted to a rupee amount, since there's no "value" of the
-underlying itself to apply it to). Like the other Portfolio pages, one
+underlying itself to apply it to); and **Momentum** -- the exact same
+"Momentum" criterion (B) the Dashboard's screener classifies every stock
+on (`src.calculations.classification.criterion_b`: 1D, 5D, AND 20D
+returns all positive), shown with the same ✅/❌/— icon
+(`src.utils.formatting.pass_fail_icon`) the Dashboard uses, so this always agrees
+with what the Dashboard would show for the same underlying. Like the other Portfolio pages, one
 tab per portfolio; a portfolio with no "CSP"-tagged Trades shows a plain
 caption rather than an empty table.
 

@@ -1886,21 +1886,31 @@ its Trade Type, regardless of which My Trades table it'd otherwise
 sort into.
 
 Columns beyond what My Positions already shows (Instrument/Underlying/
-Expiry/Strike/Qty/Avg Price/LTP/P&L/P&L%) are **Breakeven** plus four
-**"... Underlying"** ones: `LTP Underlying` is the underlying stock's own
-current price (`snapshot_repo.get_latest_prices`, the same call My
-Holdings uses for its Cur Val column — a direct `daily_screener_snapshots`
-query, not `latest_screener_view`, so it still resolves for a
-portfolio-only symbol not in `nifty50_constituents`); `1D/5D/20D
-Underlying` are that stock's own `return_1d`/`return_5d`/`return_20d`
+Expiry/Strike/Qty/Avg Price/LTP/P&L/P&L%) are **Breakeven**, **LTP
+Underlying**, **1D/5D/20D**, and **Momentum**: `LTP Underlying` is the
+underlying stock's own current price (`snapshot_repo.get_latest_prices`,
+the same call My Holdings uses for its Cur Val column — a direct
+`daily_screener_snapshots` query, not `latest_screener_view`, so it still
+resolves for a portfolio-only symbol not in `nifty50_constituents`);
+`1D`/`5D`/`20D` are that stock's own `return_1d`/`return_5d`/`return_20d`
 (`snapshot_repo.get_latest_returns_and_pe`, the same fields My Holdings'
-"1D/5D/20D Change" columns are derived from) shown as a **plain
-percentage**, not converted to a rupee amount the way My Holdings does
-via `value_change_from_pct` — there's no "current value of the
-underlying" concept to apply that conversion to here, only the stock's
-own price, so the raw percentage is the more direct fit. All five are
-`None` (→ "N/A") for a leg with no resolved `symbol` (an undecoded
-contract), same as everywhere else on these pages.
+"1D/5D/20D Change" columns are derived from — named without the
+"Underlying" suffix those columns first shipped with, on request, since
+every column on this page is already about the underlying except the
+option-leg ones that come first) shown as a **plain percentage**, not
+converted to a rupee amount the way My Holdings does via
+`value_change_from_pct` — there's no "current value of the underlying"
+concept to apply that conversion to here, only the stock's own price, so
+the raw percentage is the more direct fit. `Momentum` reuses
+`src.calculations.classification.criterion_b(return_1d, return_5d,
+return_20d)` unchanged — the exact same "all three returns positive"
+rule the Dashboard's screener classifies every stock on for its own
+Momentum criterion — rendered with the same `pass_fail_icon` (✅/❌/—)
+the Dashboard uses, so a CSP's underlying always shows the identical
+Momentum verdict it would on the Dashboard. All of `LTP Underlying`/
+`1D`/`5D`/`20D`/`Momentum` are `None`/`—` for a leg with no resolved
+`symbol` (an undecoded contract), same as everywhere else on these
+pages.
 
 **Breakeven** is a combined price+percentage string, same "value (pct%)"
 convention as My Holdings' 1D/5D/20D Change columns (`_fmt_value_change`
