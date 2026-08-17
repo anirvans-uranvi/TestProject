@@ -405,7 +405,17 @@ def _render_zerodha_connect_section(*, portfolio_name: str, key_prefix: str, on_
             st.rerun()
         return
 
-    if _zerodha_token_is_fresh(connection.token_saved_at):
+    # **A real bug this guards against**: `broker_connections.token_saved_at`
+    # is `not null default now()` (migration 0017) -- saving just the
+    # API Key/Secret (step 1, before any login) omits token_saved_at from
+    # the upsert payload, but since that's a fresh INSERT for this
+    # portfolio/broker, Postgres's own column default stamps it "now()"
+    # regardless, even though no session exists yet. Checking freshness
+    # alone therefore showed "Connected -- session started 1 minute(s)
+    # ago" immediately after just saving credentials, before ever
+    # clicking "Log in to Zerodha" -- confirmed live. `access_token` must
+    # also be present, not just a recent `token_saved_at`.
+    if connection.access_token and _zerodha_token_is_fresh(connection.token_saved_at):
         masked_key = f"...{connection.client_id[-4:]}" if len(connection.client_id) > 4 else connection.client_id
         st.caption(f"Connected -- API Key {masked_key}, session started {_relative_age(_hours_since(connection.token_saved_at))}.")
         sync_col, disconnect_col = st.columns(2)
