@@ -360,6 +360,34 @@ class TestClassifyUnderlyingBucket:
         assert portfolio_service.classify_underlying_bucket("SOMENEWCO", {}) == "stock"
 
 
+class TestClassifyPositionBucket:
+    def test_no_option_type_is_other(self):
+        # A plain stock/ETF position or an undecoded F&O row -- symbol is
+        # always None alongside a None option_type (see
+        # classify_position_bucket's docstring).
+        assert portfolio_service.classify_position_bucket(None, None, {}) == "other"
+
+    def test_stock_option_is_stock(self):
+        assert (
+            portfolio_service.classify_position_bucket(OptionType.CE, "RELIANCE", {"RELIANCE": CompanyType.EQUITY})
+            == "stock"
+        )
+
+    def test_index_option_is_index(self):
+        assert (
+            portfolio_service.classify_position_bucket(OptionType.PE, "NIFTY", {"NIFTY": CompanyType.INDEX}) == "index"
+        )
+
+    def test_etf_option_is_index(self):
+        assert (
+            portfolio_service.classify_position_bucket(OptionType.CE, "NIFTYBEES", {"NIFTYBEES": CompanyType.ETF})
+            == "index"
+        )
+
+    def test_unknown_underlying_option_defaults_to_stock(self):
+        assert portfolio_service.classify_position_bucket(OptionType.PE, "SOMENEWCO", {}) == "stock"
+
+
 class TestGroupIntoTrades:
     def _leg(self, *, raw_name, broker, symbol, leg_type, pnl):
         return {"raw_name": raw_name, "broker": broker, "symbol": symbol, "leg_type": leg_type, "pnl": pnl}

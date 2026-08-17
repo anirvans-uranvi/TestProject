@@ -110,7 +110,7 @@ pages/
   6_My_Broker.py                    Upload/connect Zerodha/Dhan holdings + F&O positions, create/delete portfolios
   7_My_Trades.py                     Holdings + positions grouped by underlying into Stock/Index/Other Trades
   8_My_Holdings.py                   Equity holdings, ETFs & Mutual Funds / Stocks split, identical columns
-  9_My_Positions.py                  Flat per-leg F&O positions table, no grouping
+  9_My_Positions.py                  Per-leg F&O positions, split into Stock Options / Index Options / Others
   10_Analyse_Trade.py                 One Trade's legs -- correct underlying/trade type, merge/split (hidden page)
 src/
   config.py                       Pydantic Settings, reads .env
@@ -859,9 +859,10 @@ Nifty50 screener universe) span five pages -- `pages/6_My_Broker.py`
 (upload/connect/create/delete), `pages/7_My_Trades.py` (holdings +
 positions grouped by underlying into Trades), `pages/8_My_Holdings.py`
 (equity holdings, valued live against the app's own market data),
-`pages/9_My_Positions.py` (flat per-leg F&O positions, valued against
-each file's own LTP -- see the Positions subsection near the end of this
-section for why), and `pages/10_Analyse_Trade.py` (one Trade's detail,
+`pages/9_My_Positions.py` (per-leg F&O positions split into Stock Options/
+Index Options/Others tables, valued against each file's own LTP -- see
+the Positions subsection near the end of this section for why), and
+`pages/10_Analyse_Trade.py` (one Trade's detail,
 registered `visibility="hidden"` in `app.py` so it's reachable via
 `st.switch_page` but never shows as its own sidebar link). This used to
 be one combined page (`pages/6_Portfolio.py`, retired) -- most of the
@@ -1407,6 +1408,30 @@ available for the CSV-upload path, so it's used as-is; only the
 position is different -- see "Connect Dhan account" below, which can
 fall back to this app's own EOD F&O data, including index options as of
 migration `0018`, when Dhan's own live quote is unavailable.)
+
+**My Positions renders three tables per portfolio tab — Stock Options,
+Index Options, Others** (`pages/9_My_Positions.py`), replacing an earlier
+single flat table. `portfolio_service.classify_position_bucket(option_type,
+symbol, company_type_by_symbol)` decides which: `option_type is None` →
+`"other"` (an undecoded F&O row, a futures position, or a plain stock/ETF
+bought/sold as a *position* rather than a holding — none of which this
+page has ever separately supported valuing beyond raw qty/avg_price/pnl);
+otherwise the *decoded* option's underlying sorts into `"index"`
+(company_type ETF/Fund/Index — the same three types `classify_underlying_bucket`
+treats as non-stock for My Trades/My Holdings) or `"stock"`. This is safe
+to key off `option_type` alone (rather than checking `symbol` too) because
+every position-parsing path — `parse_zerodha_option_instrument`,
+`parse_dhan_position_name`, `dhan_positions_from_api`,
+`zerodha_positions_from_api` — always sets `option_type` and `symbol`
+together from one decode-or-nothing result; there's no row with one set
+and not the other. The Stock/Index Options tables share identical columns
+(**Instrument** — the broker's raw contract string; **Underlying** — the
+decoded symbol; **Expiry**; **Strike**; **Type**; **Qty**; **Avg Price**;
+**P&L**; **P&L %**); Others drops the four option-specific columns since
+they don't apply (**Instrument** — here just `raw_name`, since `symbol` is
+always `None` in this bucket; **Qty**; **Avg Price**; **P&L**; **P&L %**).
+The page-level "Total P&L" stat above the three tables still sums across
+all of them, unchanged.
 
 **Connect Dhan account (`broker_connections`, migration `0017`)** — an
 alternative to CSV upload, Dhan only. `pages/6_My_Broker.py` offers a

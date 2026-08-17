@@ -511,6 +511,27 @@ def classify_underlying_bucket(symbol: str | None, company_type_by_symbol: dict[
     return "stock"
 
 
+def classify_position_bucket(
+    option_type: OptionType | None, symbol: str | None, company_type_by_symbol: dict[str, CompanyType]
+) -> str:
+    """Which of My Positions' three tables (Stock Options / Index Options
+    / Others) a position leg sorts into. "other" covers everything that
+    isn't a decoded option contract -- an undecoded F&O row, a futures
+    position, or a stock/ETF bought/sold as a position rather than a
+    holding -- since `option_type` and `symbol` are only ever set together
+    (parse_zerodha_option_instrument/parse_dhan_position_name/
+    dhan_positions_from_api/zerodha_positions_from_api all take both
+    fields from the same decode-or-nothing result). A decoded option's
+    underlying then splits "stock" vs "index" the same way
+    classify_underlying_bucket does for My Trades (ETF/Fund/Index
+    company_type -> "index", everything else -> "stock")."""
+    if option_type is None:
+        return "other"
+    if company_type_by_symbol.get(symbol) in (CompanyType.ETF, CompanyType.FUND, CompanyType.INDEX):
+        return "index"
+    return "stock"
+
+
 def group_into_trades(
     legs: list[dict],
     overrides: dict[tuple[str, str], str],

@@ -42,7 +42,7 @@ pages/                  Streamlit multipage app (each still its own script,
   6_My_Broker.py             Upload/connect Zerodha/Dhan holdings + F&O positions, create/delete portfolios
   7_My_Trades.py              Holdings + positions grouped by underlying into Stock/Index/Other Trades
   8_My_Holdings.py            Equity holdings, split ETFs & Mutual Funds / Stocks, both with 1D/5D/20D Change
-  9_My_Positions.py           Flat per-leg F&O positions table (no grouping -- see My Trades for that)
+  9_My_Positions.py           Per-leg F&O positions, split into Stock Options / Index Options / Others (no grouping -- see My Trades for that)
   10_Analyse_Trade.py          One Trade's legs -- correct underlying, rename trade type, merge/split
                               (hidden from the sidebar -- reached only via My Trades' row selection)
 src/
@@ -830,24 +830,36 @@ dependency on a page-wide expiry selector.
 
 ### My Positions (`pages/9_My_Positions.py`)
 
-Open F&O (options) positions decoded from the same broker exports, one
-row per leg, no grouping (see My Trades below for that): Broker, Symbol,
-Expiry, Strike, Type, Qty (signed -- negative is short), Avg Price, LTP,
-P&L, P&L%. Unlike holdings, LTP here is trusted from the uploaded file
-rather than fetched live. For a Dhan-synced position missing LTP (see
-"Connect Dhan account" above), `portfolio_service.apply_fallback_option_ltp`
-fills the gap from this app's own F&O data -- which now includes index
-options (NIFTY, BANKNIFTY via NSE; SENSEX, BANKEX via BSE -- migrations
-`0018`/`0019`), not just stock options. BSE is index-options-only, though
-(see the F&O Data Refresh buttons section above) -- a *stock* option
-position always falls back to NSE's own chain, never BSE's. Index
-*futures* remain out of scope on both exchanges. P&L/P&L% are still
-recomputed from qty/avg price/LTP rather than trusted from the file,
-since Zerodha's and Dhan's own P&L% columns turned out to mean different
-things (Dhan's is direction-aware, Zerodha's is a raw price change) --
-see `portfolio_service.compute_positions_view`. A position whose
-instrument string doesn't decode (see My Broker above) is still saved and
-shown here -- just with no expiry/strike/type.
+Open F&O positions decoded from the same broker exports, one row per leg,
+no grouping (see My Trades below for that) -- split into three tables per
+portfolio tab: **Stock Options**, **Index Options**, and **Others**.
+`portfolio_service.classify_position_bucket` decides which: a position
+whose instrument string decoded into an actual option contract sorts by
+its underlying's `company_type` (ETF/Fund/Index -> Index Options,
+everything else -> Stock Options); everything that *isn't* a decoded
+option -- an undecoded F&O row, a futures position, or a stock/ETF bought
+or sold as a *position* rather than a holding -- lands in Others instead.
+Stock Options and Index Options share the same columns: Instrument (the
+broker's raw contract string), Underlying, Expiry, Strike, Type, Qty
+(signed -- negative is short), Avg Price, P&L, P&L%. Others has just
+Instrument, Qty, Avg Price, P&L, P&L% -- no expiry/strike/type/underlying,
+since none of those apply. Unlike holdings, the LTP behind each P&L here
+is trusted from the uploaded file rather than fetched live (not shown as
+its own column, only used to compute P&L/P&L%). For a Dhan-synced position
+missing LTP (see "Connect Dhan account" above),
+`portfolio_service.apply_fallback_option_ltp` fills the gap from this
+app's own F&O data -- which now includes index options (NIFTY, BANKNIFTY
+via NSE; SENSEX, BANKEX via BSE -- migrations `0018`/`0019`), not just
+stock options. BSE is index-options-only, though (see the F&O Data
+Refresh buttons section above) -- a *stock* option position always falls
+back to NSE's own chain, never BSE's. Index *futures* remain out of scope
+on both exchanges. P&L/P&L% are still recomputed from qty/avg price/LTP
+rather than trusted from the file, since Zerodha's and Dhan's own P&L%
+columns turned out to mean different things (Dhan's is direction-aware,
+Zerodha's is a raw price change) -- see
+`portfolio_service.compute_positions_view`. A position whose instrument
+string doesn't decode (see My Broker above) is still saved and shown here
+-- in the Others table, with no expiry/strike/type.
 
 **LTP only comes from data already loaded in Supabase** -- never a fresh
 live fetch triggered by this page. The app's `companies`/
