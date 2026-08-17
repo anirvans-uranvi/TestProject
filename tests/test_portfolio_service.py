@@ -401,6 +401,37 @@ class TestIsCspTradeType:
         assert portfolio_service.is_csp_trade_type("Covered Call") is False
 
 
+class TestCspBreakevenPrice:
+    def test_subtracts_avg_price_from_strike(self):
+        assert portfolio_service.csp_breakeven_price(23500.0, 45.0) == 23455.0
+
+    def test_none_strike_is_none(self):
+        assert portfolio_service.csp_breakeven_price(None, 45.0) is None
+
+    def test_none_avg_price_is_none(self):
+        assert portfolio_service.csp_breakeven_price(23500.0, None) is None
+
+
+class TestCspBreakevenPct:
+    def test_breakeven_below_current_price_is_negative_cushion(self):
+        # Breakeven 23455, underlying at 24000 -- breakeven sits below
+        # the current price, so there's cushion (negative %).
+        assert portfolio_service.csp_breakeven_pct(23455.0, 24000.0) == pytest.approx(-2.2708, abs=1e-3)
+
+    def test_breakeven_above_current_price_is_positive(self):
+        # Underlying has already fallen below breakeven.
+        assert portfolio_service.csp_breakeven_pct(23455.0, 23000.0) == pytest.approx(1.9783, abs=1e-3)
+
+    def test_none_breakeven_price_is_none(self):
+        assert portfolio_service.csp_breakeven_pct(None, 24000.0) is None
+
+    def test_none_underlying_ltp_is_none(self):
+        assert portfolio_service.csp_breakeven_pct(23455.0, None) is None
+
+    def test_zero_underlying_ltp_is_none(self):
+        assert portfolio_service.csp_breakeven_pct(23455.0, 0.0) is None
+
+
 class TestClassifyPositionBucket:
     def test_no_option_type_is_other(self):
         # A plain stock/ETF position or an undecoded F&O row -- symbol is

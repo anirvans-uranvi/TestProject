@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from src.repositories import settings_repo
 from src.services import portfolio_service
+from src.utils.formatting import format_inr
 from src.utils.portfolio_page import (
     build_trade_legs,
     ensure_cache_bust,
@@ -73,6 +74,16 @@ except APIError:
     saved_trade_meta = []
 
 
+def _fmt_breakeven(breakeven_price: float | None, breakeven_pct: float | None) -> str:
+    """"₹22,455.00 (-2.27%)" -- the CSP breakeven price (Strike - Avg
+    Price) with how far it sits from the underlying's current price in
+    parentheses, or an em dash when either half is missing (unresolved
+    underlying, or no LTP for it yet)."""
+    if breakeven_price is None or breakeven_pct is None:
+        return "—"
+    return f"{format_inr(breakeven_price)} ({breakeven_pct:+.2f}%)"
+
+
 def _render_csp_tab(
     portfolio_name: str,
     holdings_for_portfolio: list,
@@ -115,6 +126,9 @@ def _render_csp_tab(
     table_rows = []
     for leg in csp_legs:
         rp = returns_by_symbol.get(leg["symbol"]) if leg["symbol"] else None
+        underlying_ltp = ltp_by_symbol.get(leg["symbol"]) if leg["symbol"] else None
+        breakeven_price = portfolio_service.csp_breakeven_price(leg["strike_price"], leg["avg_price"])
+        breakeven_pct = portfolio_service.csp_breakeven_pct(breakeven_price, underlying_ltp)
         table_rows.append(
             {
                 "Instrument": leg["raw_name"],
@@ -126,7 +140,8 @@ def _render_csp_tab(
                 "LTP": leg["ltp"],
                 "P&L": leg["pnl"],
                 "P&L %": leg["pnl_pct"],
-                "LTP Underlying": ltp_by_symbol.get(leg["symbol"]) if leg["symbol"] else None,
+                "Breakeven": _fmt_breakeven(breakeven_price, breakeven_pct),
+                "LTP Underlying": underlying_ltp,
                 "1D Underlying": rp["return_1d"] if rp else None,
                 "5D Underlying": rp["return_5d"] if rp else None,
                 "20D Underlying": rp["return_20d"] if rp else None,

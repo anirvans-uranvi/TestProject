@@ -581,6 +581,32 @@ def is_csp_trade_type(trade_type: str) -> bool:
     return trade_type.strip().lower() == "csp"
 
 
+def csp_breakeven_price(strike_price: float | None, avg_price: float | None) -> float | None:
+    """The textbook CSP breakeven price: `strike_price - avg_price` --
+    the premium collected (`avg_price`, the price the put was written
+    at) reduces the effective cost basis below the strike by that much.
+    `None` (-> N/A) when either input is missing."""
+    if strike_price is None or avg_price is None:
+        return None
+    return strike_price - avg_price
+
+
+def csp_breakeven_pct(breakeven_price: float | None, underlying_ltp: float | None) -> float | None:
+    """My CSP's "Breakeven" column's parenthesized percentage: how far
+    `breakeven_price` (see csp_breakeven_price above) sits from the
+    underlying's current price -- `(breakeven_price / underlying_ltp - 1)
+    * 100`. Negative means breakeven is *below* the current price (there's
+    cushion -- the underlying would need to fall by this % before the
+    position starts losing money past the premium collected); positive
+    means breakeven is already above the current price. `None` (-> N/A)
+    when either input is missing, or `underlying_ltp` is 0 (division by
+    zero -- shouldn't happen for a real quote, but a leg with no resolved
+    symbol has no LTP to begin with)."""
+    if breakeven_price is None or underlying_ltp is None or underlying_ltp == 0:
+        return None
+    return (breakeven_price / underlying_ltp - 1) * 100
+
+
 def classify_position_bucket(
     option_type: OptionType | None, symbol: str | None, company_type_by_symbol: dict[str, CompanyType]
 ) -> str:

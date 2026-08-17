@@ -1886,7 +1886,7 @@ its Trade Type, regardless of which My Trades table it'd otherwise
 sort into.
 
 Columns beyond what My Positions already shows (Instrument/Underlying/
-Expiry/Strike/Qty/Avg Price/LTP/P&L/P&L%) are the four
+Expiry/Strike/Qty/Avg Price/LTP/P&L/P&L%) are **Breakeven** plus four
 **"... Underlying"** ones: `LTP Underlying` is the underlying stock's own
 current price (`snapshot_repo.get_latest_prices`, the same call My
 Holdings uses for its Cur Val column — a direct `daily_screener_snapshots`
@@ -1898,9 +1898,33 @@ Underlying` are that stock's own `return_1d`/`return_5d`/`return_20d`
 percentage**, not converted to a rupee amount the way My Holdings does
 via `value_change_from_pct` — there's no "current value of the
 underlying" concept to apply that conversion to here, only the stock's
-own price, so the raw percentage is the more direct fit. All four are
+own price, so the raw percentage is the more direct fit. All five are
 `None` (→ "N/A") for a leg with no resolved `symbol` (an undecoded
 contract), same as everywhere else on these pages.
+
+**Breakeven** is a combined price+percentage string, same "value (pct%)"
+convention as My Holdings' 1D/5D/20D Change columns (`_fmt_value_change`
+there, `_fmt_breakeven` here) — plain text, not a `NumberColumn`, since
+it packs two numbers into one cell: `"₹23,455.00 (-2.27%)"`. Two pure
+functions build it:
+- `portfolio_service.csp_breakeven_price(strike_price, avg_price)` — the
+  textbook CSP breakeven price, `strike_price - avg_price`: the premium
+  collected for writing the put (`avg_price`, the price it was sold at)
+  reduces the effective cost basis below the strike by that much.
+- `portfolio_service.csp_breakeven_pct(breakeven_price, underlying_ltp)`
+  — `(breakeven_price / underlying_ltp - 1) * 100`, how far that
+  breakeven price sits from the underlying's *current* price (`LTP
+  Underlying`, not the option leg's own `LTP` — the option premium is
+  far too small relative to the strike for a direct comparison there to
+  mean anything). Negative means breakeven sits below the current
+  price — there's cushion, the underlying would need to fall by that %
+  before the position starts losing money past the premium collected;
+  positive means the underlying has already fallen through breakeven.
+
+Kept as two separate functions (rather than one, or inlined in the page)
+so each half is independently unit-testable without a live Supabase
+connection, same reasoning every other calculation on these pages
+follows.
 
 ## Auth: a non-obvious quirk
 
