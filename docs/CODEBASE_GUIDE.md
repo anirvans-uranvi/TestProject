@@ -942,6 +942,25 @@ other four Portfolio pages each render a plain, unkeyed `st.tabs(portfolio_names
 (no "+ New portfolio" tab, no active-tab tracking), since none of them
 can create or delete a portfolio.
 
+**An existing portfolio's Broker field is locked, not re-selectable.**
+Early on, `_render_broker_tab` gave every tab its own free `st.selectbox("Broker",
+BROKERS, ...)`, defaulting to whichever broker sorted first -- so opening
+"Dhan Corporate" could show "Zerodha" pre-selected in the dropdown, with
+nothing stopping an upload there from silently mixing a second broker's
+data into a portfolio whose name implied one specific account. Fixed by
+`_portfolio_broker(portfolio_name)`, which derives the portfolio's one
+real broker from its own saved holdings/positions (`{h.broker for h in
+saved_holdings if h.portfolio_name == portfolio_name} | {p.broker for p
+in saved_positions if ...}`) and renders it as a disabled single-option
+`st.selectbox` -- shown, but not changeable. (A pre-existing portfolio
+that somehow already mixed two brokers before this lock existed falls
+back to picking one deterministically, sorted alphabetically, rather than
+depending on set-iteration order.) The save button's label also now
+distinguishes the two flows: **"Update Portfolio"** on an existing tab
+(`_render_broker_tab`) vs. **"Create Portfolio"** on the "+ New portfolio"
+tab and the first-portfolio flow, where the Broker dropdown stays fully
+open since nothing has been saved under that name yet.
+
 **Opening the tab you just acted on** (`st.tabs(..., key="broker_active_tab",
 on_change="rerun")`): by default `st.tabs()` doesn't expose which tab is
 selected to server-side code at all, and a plain `st.rerun()` (e.g. right

@@ -602,14 +602,42 @@ def _render_upload_section(
         )
 
 
+def _portfolio_broker(portfolio_name: str) -> str:
+    """The single broker this portfolio's data actually came from --
+    inferred from its saved holdings/positions. A portfolio's name (e.g.
+    "Dhan Corporate") is meant to track one real broker account, not
+    become a free-form container any broker's data can be uploaded into
+    interchangeably -- so once a portfolio has data, its broker is fixed
+    rather than re-selectable on every render."""
+    brokers = {h.broker for h in saved_holdings if h.portfolio_name == portfolio_name} | {
+        p.broker for p in saved_positions if p.portfolio_name == portfolio_name
+    }
+    if len(brokers) == 1:
+        return next(iter(brokers))
+    if brokers:
+        # Legacy portfolio with more than one broker's data saved under it
+        # (possible before this lock existed) -- pick deterministically
+        # rather than depending on set ordering.
+        return sorted(brokers)[0]
+    return BROKERS[0]
+
+
 def _render_broker_tab(portfolio_name: str) -> None:
     st.caption(f'Uploading a broker\'s file replaces that broker\'s previously saved holdings or positions in "{portfolio_name}".')
-    broker = st.selectbox("Broker", BROKERS, key=f"portfolio_broker_{portfolio_name}")
+    broker = _portfolio_broker(portfolio_name)
+    st.selectbox(
+        "Broker",
+        [broker],
+        index=0,
+        disabled=True,
+        key=f"portfolio_broker_{portfolio_name}",
+        help='This portfolio is tied to the broker it was created with -- start a new portfolio (in the "+ New portfolio" tab) to use a different broker.',
+    )
     _render_upload_section(
         portfolio_name=portfolio_name,
         broker=broker,
         key_prefix=f"{portfolio_name}_{broker}",
-        save_label="Save portfolio",
+        save_label="Update Portfolio",
     )
 
     st.divider()
@@ -712,7 +740,7 @@ if not portfolio_names:
         portfolio_name=first_name.strip() or "Portfolio 1",
         broker=first_broker,
         key_prefix=f"first_{first_broker}",
-        save_label="Create portfolio",
+        save_label="Create Portfolio",
     )
 else:
     # Same "pending active tab" promotion pattern as the old combined
@@ -754,6 +782,6 @@ else:
                 portfolio_name=resolved_name,
                 broker=new_broker,
                 key_prefix=f"newportfolio_{new_broker}",
-                save_label="Create portfolio",
+                save_label="Create Portfolio",
                 on_saved=_open_new_portfolio_tab,
             )

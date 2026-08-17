@@ -650,8 +650,15 @@ only page a portfolio can be created or deleted from.
 ### My Broker (`pages/6_My_Broker.py`)
 
 Upload/connect Zerodha or Dhan holdings and F&O positions, per portfolio.
-Pick "Holdings" or "Positions" from a "What are you uploading?" selector,
-then the broker and file. Two broker formats are supported for each:
+**A portfolio's broker is fixed once it has data** -- an existing tab
+shows its own broker (inferred from its saved holdings/positions) as a
+locked, disabled field, so a portfolio named "Dhan Corporate" can't
+accidentally have Zerodha data uploaded into it; its save button reads
+"Update Portfolio". Only the "+ New portfolio" tab (or the first-ever
+portfolio) offers a real Broker dropdown, since nothing's saved under
+that name yet -- its button reads "Create Portfolio". Once a broker is
+picked, "Holdings" or "Positions" from a "What are you uploading?"
+selector, then the file. Two broker formats are supported for each:
 
 - **Holdings -- Zerodha**: the `Instrument` column is already the exact
   NSE trading symbol, so it's trusted directly.
