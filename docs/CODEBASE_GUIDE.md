@@ -1422,8 +1422,10 @@ symbol, company_type_by_symbol)` decides which: `option_type is None` →
 bought/sold as a *position* rather than a holding — none of which this
 page has ever separately supported valuing beyond raw qty/avg_price/pnl);
 otherwise the *decoded* option's underlying sorts into `"index"`
-(company_type ETF/Fund/Index — the same three types `classify_underlying_bucket`
-treats as non-stock for My Trades/My Holdings) or `"stock"`. This is safe
+(`company_type = 'Index'` only -- same Index-only rule
+`classify_underlying_bucket` uses for My Trades, see that section for the
+ETF/Fund bug this deliberately avoids) or `"stock"` (everything else,
+including ETF/Fund). This is safe
 to key off `option_type` alone (rather than checking `symbol` too) because
 every position-parsing path — `parse_zerodha_option_instrument`,
 `parse_dhan_position_name`, `dhan_positions_from_api`,
@@ -1733,24 +1735,49 @@ reattached afterwards); position rows go through the existing
 before calling it is enough.
 
 `portfolio_service.classify_underlying_bucket(symbol, company_type_by_symbol)`
-decides which of the three tables a leg's underlying belongs in: `None`
-symbol → `"other"` (an undecoded F&O contract or unmatched holding --
-nothing to classify by); `ETF`/`Fund`/`Index` → `"index"`; anything else,
-including an unknown symbol → `"stock"` (mirrors the fallback the old
-combined page's `_is_etf_or_fund` helper used for the Holdings ETF/MF
-split). `portfolio_service.group_into_trades(legs, overrides, trade_meta,
+decides which of the three tables a leg's underlying belongs in **by
+default**: `None` symbol → `"other"` (an undecoded F&O contract or
+unmatched holding -- nothing to classify by); `company_type = 'Index'`
+only → `"index"`; anything else, including `ETF`/`Fund` and an unknown
+symbol → `"stock"` (mirrors the fallback the old combined page's
+`_is_etf_or_fund` helper used for the Holdings ETF/MF split). **A real
+bug this fixed**: ETF/Fund used to be lumped in with Index here, so
+gilt/liquid/gold ETFs (BANKBEES, GILT5YBEES, GOLDBEES, LIQUIDCASE, ...)
+showed up in "Index Trades" alongside genuine index positions (NIFTY,
+FINNIFTY) -- confirmed live against a real portfolio; only a true Index
+company_type row counts now.
+
+`portfolio_service.group_into_trades(legs, overrides, trade_meta,
 company_type_by_symbol)` assigns `trade_id` via `assign_trade_ids`
 (unchanged -- see above, it only ever touched symbol/raw_name/broker, so
 it already worked for holding legs and position legs alike), groups legs
-by it, and for each trade computes `bucket` (unanimous across the
-trade's own legs' `classify_underlying_bucket`, else `"other"` --
-deliberate: a trade mixing a stock leg and an index leg, via a manual
-merge, doesn't cleanly belong to either specific table), a default
-underlying label (sorted, `" + "`-joined distinct `symbol or raw_name`
-across the legs -- the same "Symbols" summary format the old Trades
-table used), and `leg_count`/`total_pnl` (summed over the trade's own
-priced legs). My Trades then just buckets the returned list into three
-tables by `bucket`.
+by it, and for each trade computes `bucket`: `trade_meta`'s
+`bucket_override` if set (migration `0024` -- the user manually pinned
+this trade to a table, e.g. an index ETF they deliberately want shown
+alongside genuine Index Trades despite its `company_type` being `ETF`
+not `Index`), else unanimous across the trade's own legs'
+`classify_underlying_bucket`, else `"other"` when the legs' computed
+buckets disagree (deliberate: a trade mixing a stock leg and an index
+leg, via a manual merge, doesn't cleanly belong to either specific
+table). Also computes a default underlying label (sorted, `" + "`-joined
+distinct `symbol or raw_name` across the legs -- the same "Symbols"
+summary format the old Trades table used), and `leg_count`/`total_pnl`
+(summed over the trade's own priced legs). My Trades then just buckets
+the returned list into three tables by `bucket`. `pages/9_My_Positions.py`'s
+`classify_position_bucket` mirrors the same Index-only rule for
+Stock/Index Options (see the Positions subsection), but has no
+`bucket_override` equivalent -- there's no per-leg meta table for
+positions the way `portfolio_trade_meta` exists for trades.
+
+**Manual override (`10_Analyse_Trade.py`'s "Table (on My Trades)"
+selectbox, migration `0024_portfolio_trade_meta_bucket_override.sql`)**
+-- `_BUCKET_LABELS`/`_BUCKET_VALUES` map between the dropdown's four
+options (`"Auto (based on underlying)"` → `None`, plus the three
+table names → `"stock"`/`"index"`/`"other"`) and what's actually stored
+in `portfolio_trade_meta.bucket_override`. Defaults to whatever's
+already saved for this `trade_id` (`None` shows "Auto"), same pattern as
+the underlying-label/trade-type fields in the same form; saved via the
+same `set_trade_meta` upsert, just with one more keyword argument.
 
 **`portfolio_trade_meta` (migration `0021`) — a new table, not an
 extension of `portfolio_trade_groups`.** The user asked My Trades to

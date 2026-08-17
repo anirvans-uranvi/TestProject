@@ -585,6 +585,17 @@ class TestTradeMeta:
         assert len(rows) == 1
         assert rows[0]["underlying_label"] == "Tata Motors Passenger Vehicle"
         assert rows[0]["trade_type"] == "Long Term Hold"
+        assert rows[0]["bucket_override"] is None
+
+    def test_set_trade_meta_saves_bucket_override(self):
+        client = _FakeClient()
+
+        portfolio_repo.set_trade_meta(
+            client, "u1", "Portfolio 1", "NIFTYBEES", underlying_label=None, trade_type="Trade", bucket_override="index"
+        )
+
+        rows = client.store["portfolio_trade_meta"]
+        assert rows[0]["bucket_override"] == "index"
 
     def test_set_trade_meta_overwrites_the_existing_row_for_the_same_trade(self):
         client = _FakeClient()

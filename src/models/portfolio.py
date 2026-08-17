@@ -83,9 +83,16 @@ class PortfolioTradeMeta(BaseModel):
     post-demerger underlying "Tata Motors Passenger Vehicle"; None means
     "use the auto-computed default" (the joined distinct underlying
     symbols across the trade's own legs). `trade_type` is also free text,
-    defaulting to "Trade". See supabase/migrations/0021_portfolio_trade_meta.sql
-    for why a trade renamed via merge loses its old meta row rather than
-    carrying it forward."""
+    defaulting to "Trade". `bucket_override` (one of "stock"/"index"/
+    "other", or None) lets the user manually pin which My Trades table a
+    trade sorts into -- None means "use classify_underlying_bucket's
+    computed default" (see supabase/migrations/0024_portfolio_trade_meta_bucket_override.sql
+    for why this exists: an ETF's company_type no longer auto-counts as
+    "index" the way a real Index does, so a trade that genuinely belongs
+    in Index Trades despite being an ETF needs this manual escape hatch).
+    See supabase/migrations/0021_portfolio_trade_meta.sql for why a trade
+    renamed via merge loses its old meta row rather than carrying it
+    forward."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -94,6 +101,7 @@ class PortfolioTradeMeta(BaseModel):
     trade_id: str
     underlying_label: str | None = None
     trade_type: str = "Trade"
+    bucket_override: str | None = None
     updated_at: datetime | None = None
 
 

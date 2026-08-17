@@ -76,7 +76,10 @@ company_type_by_symbol = {c.symbol: c.company_type for c in all_companies}
 
 legs = build_trade_legs(client, st.session_state["portfolio_cache_bust"], holdings_for_portfolio, positions_for_portfolio)
 overrides_by_leg = {(g.broker, g.raw_name): g.trade_id for g in trade_groups_for_portfolio}
-trade_meta_by_id = {m.trade_id: {"underlying_label": m.underlying_label, "trade_type": m.trade_type} for m in trade_meta_for_portfolio}
+trade_meta_by_id = {
+    m.trade_id: {"underlying_label": m.underlying_label, "trade_type": m.trade_type, "bucket_override": m.bucket_override}
+    for m in trade_meta_for_portfolio
+}
 trades = portfolio_service.group_into_trades(legs, overrides_by_leg, trade_meta_by_id, company_type_by_symbol)
 
 trade = next((t for t in trades if t["trade_id"] == trade_id), None)
@@ -129,8 +132,11 @@ legs_event = st.dataframe(
 
 st.divider()
 
-# --- Edit underlying / trade type ---------------------------------------
-st.markdown("**Correct the underlying or rename the trade type**")
+# --- Edit underlying / trade type / table --------------------------------
+st.markdown("**Correct the underlying, rename the trade type, or pin the table**")
+_BUCKET_LABELS = {None: "Auto (based on underlying)", "stock": "Stock Trades", "index": "Index Trades", "other": "Other Trades"}
+_BUCKET_VALUES = {label: value for value, label in _BUCKET_LABELS.items()}
+current_bucket_override = trade_meta_by_id.get(trade_id, {}).get("bucket_override")
 with st.form(f"analyse_trade_edit_form_{slug(portfolio_name)}_{slug(trade_id)}"):
     edited_underlying = st.text_input(
         "Underlying Instrument",
@@ -138,6 +144,14 @@ with st.form(f"analyse_trade_edit_form_{slug(portfolio_name)}_{slug(trade_id)}")
         help='Free text -- e.g. correct a resolved "Tata Motors" to the real post-demerger underlying.',
     )
     edited_trade_type = st.text_input("Trade Type", value=trade["trade_type"])
+    edited_bucket_label = st.selectbox(
+        "Table (on My Trades)",
+        list(_BUCKET_LABELS.values()),
+        index=list(_BUCKET_LABELS.keys()).index(current_bucket_override),
+        help="Which of My Trades' three tables this trade shows in. \"Auto\" follows the underlying's own "
+        "classification (e.g. an ETF defaults to Stock Trades even if it tracks an index) -- pin it here to "
+        "override that, e.g. to keep an index ETF alongside Index Trades.",
+    )
     save_submitted = st.form_submit_button("Save")
 if save_submitted:
     underlying_to_save = edited_underlying.strip() or None
@@ -150,6 +164,7 @@ if save_submitted:
         trade_id,
         underlying_label=underlying_to_save,
         trade_type=edited_trade_type.strip() or "Trade",
+        bucket_override=_BUCKET_VALUES[edited_bucket_label],
     )
     st.session_state["portfolio_cache_bust"] += 1
     st.cache_data.clear()

@@ -125,7 +125,10 @@ def _render_trades_tab(
         return
 
     overrides_by_leg = {(g.broker, g.raw_name): g.trade_id for g in trade_groups_for_portfolio}
-    trade_meta_by_id = {m.trade_id: {"underlying_label": m.underlying_label, "trade_type": m.trade_type} for m in trade_meta_for_portfolio}
+    trade_meta_by_id = {
+        m.trade_id: {"underlying_label": m.underlying_label, "trade_type": m.trade_type, "bucket_override": m.bucket_override}
+        for m in trade_meta_for_portfolio
+    }
     trades = portfolio_service.group_into_trades(legs, overrides_by_leg, trade_meta_by_id, company_type_by_symbol)
 
     stock_trades = [t for t in trades if t["bucket"] == "stock"]

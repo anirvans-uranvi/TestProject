@@ -835,8 +835,8 @@ no grouping (see My Trades below for that) -- split into three tables per
 portfolio tab: **Stock Options**, **Index Options**, and **Others**.
 `portfolio_service.classify_position_bucket` decides which: a position
 whose instrument string decoded into an actual option contract sorts by
-its underlying's `company_type` (ETF/Fund/Index -> Index Options,
-everything else -> Stock Options); everything that *isn't* a decoded
+its underlying's `company_type` (`Index` only -> Index Options,
+everything else, including ETF/Fund -> Stock Options); everything that *isn't* a decoded
 option -- an undecoded F&O row, a futures position, or a stock/ETF bought
 or sold as a *position* rather than a holding -- lands in Others instead.
 Stock Options and Index Options share the same columns: Instrument (the
@@ -946,14 +946,27 @@ touches symbol/raw_name/broker, so it works identically for holding legs
 and position legs) and grouped into three tables:
 
 - **Stock Trades** -- every leg whose underlying resolves to
-  `company_type = Equity` (or an unresolved/unknown symbol, same fallback
-  My Holdings' old ETF/Stocks split used).
+  `company_type = Equity`, `ETF`, or `Fund` (or an unresolved/unknown
+  symbol, same fallback My Holdings' old ETF/Stocks split used).
 - **Index Trades** -- every leg whose underlying resolves to
-  `ETF`/`Fund`/`Index`.
+  `company_type = Index` only (NIFTY, BANKNIFTY, FINNIFTY, ...) -- an ETF
+  no longer counts, even a gilt/liquid/gold one, so BANKBEES/GILT5YBEES/
+  GOLDBEES/LIQUIDCASE-style holdings default to Stock Trades instead of
+  being lumped in here.
 - **Other Trades** -- a leg with no resolved symbol at all (an undecoded
   F&O contract, or an unmatched holding), or a *manually merged* Trade
   whose legs' underlyings don't all agree on one bucket. Present even
   when empty, as a placeholder for the case above.
+
+**Manually pin a Trade's table.** If a Trade's auto-computed table isn't
+what you want -- e.g. an index ETF you'd rather see alongside Index
+Trades despite its `company_type` being `ETF` -- Analyse Trade's "Table
+(on My Trades)" dropdown overrides it: "Auto" (the default) follows the
+rule above; picking "Stock Trades"/"Index Trades"/"Other Trades" pins it
+there regardless of the underlying's own classification. Saved to
+`portfolio_trade_meta.bucket_override` (migration `0024`) alongside the
+underlying-label/trade-type overrides -- `None` means "no override, use
+Auto".
 
 Each table shows **Underlying Instrument**, **Trade Type** (defaults to
 "Trade"), **Legs**, and **Total P&L** (summed over the trade's own priced

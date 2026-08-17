@@ -499,14 +499,22 @@ def assign_trade_ids(positions: list[dict], overrides: dict[tuple[str, str], str
 def classify_underlying_bucket(symbol: str | None, company_type_by_symbol: dict[str, CompanyType]) -> str:
     """Which of the three "My Trades" tables a leg's underlying sorts
     into -- "stock" (the default -- includes an unknown/unclassified
-    symbol, same fallback convention pages/6_Portfolio.py's now-retired
-    _is_etf_or_fund helper used for the Holdings ETF/MF split), "index"
-    (company_type ETF/Fund/Index), or "other" (symbol is None -- an
+    symbol, plus ETF/Fund, same fallback convention pages/6_Portfolio.py's
+    now-retired _is_etf_or_fund helper used for the Holdings ETF/MF split),
+    "index" (company_type Index only), or "other" (symbol is None -- an
     undecoded F&O contract or an unmatched holding, nothing to classify
-    by)."""
+    by).
+
+    **A real bug this fixed**: ETF/Fund used to be lumped in with Index
+    here, so gilt/liquid/gold ETFs (BANKBEES, GILT5YBEES, GOLDBEES,
+    LIQUIDCASE, ...) showed up in "Index Trades" alongside genuine index
+    positions (NIFTY, FINNIFTY) -- confirmed live against a real
+    portfolio. An ETF someone deliberately wants shown alongside Index
+    Trades still can be, via PortfolioTradeMeta.bucket_override (see
+    group_into_trades) -- this function only decides the *default*."""
     if symbol is None:
         return "other"
-    if company_type_by_symbol.get(symbol) in (CompanyType.ETF, CompanyType.FUND, CompanyType.INDEX):
+    if company_type_by_symbol.get(symbol) == CompanyType.INDEX:
         return "index"
     return "stock"
 
@@ -523,11 +531,11 @@ def classify_position_bucket(
     dhan_positions_from_api/zerodha_positions_from_api all take both
     fields from the same decode-or-nothing result). A decoded option's
     underlying then splits "stock" vs "index" the same way
-    classify_underlying_bucket does for My Trades (ETF/Fund/Index
-    company_type -> "index", everything else -> "stock")."""
+    classify_underlying_bucket does for My Trades (company_type Index
+    only -> "index"; ETF/Fund/everything else -> "stock")."""
     if option_type is None:
         return "other"
-    if company_type_by_symbol.get(symbol) in (CompanyType.ETF, CompanyType.FUND, CompanyType.INDEX):
+    if company_type_by_symbol.get(symbol) == CompanyType.INDEX:
         return "index"
     return "stock"
 
@@ -550,15 +558,19 @@ def group_into_trades(
     touches symbol/raw_name/broker, already agnostic to leg_type. Returns
     one dict per trade: `trade_id`, `legs` (the leg dicts, each now also
     carrying its assigned trade_id), `bucket` ("stock"/"index"/"other" --
-    unanimous across the trade's own legs' classify_underlying_bucket,
-    else "other", since a trade mixing stock and index underlyings
-    doesn't cleanly belong to either specific table), `default_underlying_label`
-    (sorted, " + "-joined distinct symbol-or-raw_name across the trade's
-    legs), `underlying_label` (trade_meta's override if set, else the
-    default -- see PortfolioTradeMeta for why this is free text, not
-    constrained to a known symbol), `trade_type` (trade_meta's override if
-    set, else "Trade"), `leg_count`, and `total_pnl` (sum over legs with a
-    known pnl; None if none are priced)."""
+    trade_meta's `bucket_override` if set (the user manually pinned this
+    trade to a table -- e.g. an ETF they want shown alongside genuine
+    Index Trades), else unanimous across the trade's own legs'
+    classify_underlying_bucket, else "other" when the legs' computed
+    buckets disagree, since a trade mixing stock and index underlyings
+    doesn't cleanly belong to either specific table),
+    `default_underlying_label` (sorted, " + "-joined distinct
+    symbol-or-raw_name across the trade's legs), `underlying_label`
+    (trade_meta's override if set, else the default -- see
+    PortfolioTradeMeta for why this is free text, not constrained to a
+    known symbol), `trade_type` (trade_meta's override if set, else
+    "Trade"), `leg_count`, and `total_pnl` (sum over legs with a known
+    pnl; None if none are priced)."""
     assigned = assign_trade_ids(legs, overrides)
     trades: dict[str, list[dict]] = {}
     order: list[str] = []
@@ -572,10 +584,14 @@ def group_into_trades(
     result = []
     for trade_id in order:
         trade_legs = trades[trade_id]
-        buckets = {classify_underlying_bucket(leg["symbol"], company_type_by_symbol) for leg in trade_legs}
-        bucket = next(iter(buckets)) if len(buckets) == 1 else "other"
-        default_label = " + ".join(sorted({leg["symbol"] or leg["raw_name"] for leg in trade_legs}))
         meta = trade_meta.get(trade_id)
+        bucket_override = meta.get("bucket_override") if meta else None
+        if bucket_override:
+            bucket = bucket_override
+        else:
+            buckets = {classify_underlying_bucket(leg["symbol"], company_type_by_symbol) for leg in trade_legs}
+            bucket = next(iter(buckets)) if len(buckets) == 1 else "other"
+        default_label = " + ".join(sorted({leg["symbol"] or leg["raw_name"] for leg in trade_legs}))
         underlying_label = (meta.get("underlying_label") if meta else None) or default_label
         trade_type = (meta.get("trade_type") if meta else None) or "Trade"
         priced = [leg for leg in trade_legs if leg.get("pnl") is not None]

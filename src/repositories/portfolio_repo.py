@@ -197,13 +197,22 @@ def list_trade_meta(client: Client, user_id: str) -> list[PortfolioTradeMeta]:
 
 
 def set_trade_meta(
-    client: Client, user_id: str, portfolio_name: str, trade_id: str, *, underlying_label: str | None, trade_type: str
+    client: Client,
+    user_id: str,
+    portfolio_name: str,
+    trade_id: str,
+    *,
+    underlying_label: str | None,
+    trade_type: str,
+    bucket_override: str | None = None,
 ) -> None:
-    """Saves (upserts) one trade's underlying label / trade type override
-    -- the Analyse Trade page's edit form. `underlying_label=None` clears
-    back to the auto-computed default (still writes a row, so a
+    """Saves (upserts) one trade's underlying label / trade type / bucket
+    override -- the Analyse Trade page's edit form. `underlying_label=None`
+    clears back to the auto-computed default (still writes a row, so a
     previously-corrected label can be explicitly reset without leaving a
-    stale non-null value behind)."""
+    stale non-null value behind); same for `bucket_override=None`, which
+    reverts to classify_underlying_bucket's computed Stock/Index/Other
+    table."""
     payload = [
         {
             "user_id": user_id,
@@ -211,6 +220,7 @@ def set_trade_meta(
             "trade_id": trade_id,
             "underlying_label": underlying_label,
             "trade_type": trade_type,
+            "bucket_override": bucket_override,
         }
     ]
     client.table("portfolio_trade_meta").upsert(payload, on_conflict="user_id,portfolio_name,trade_id").execute()

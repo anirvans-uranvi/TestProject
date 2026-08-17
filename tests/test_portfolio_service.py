@@ -344,11 +344,14 @@ class TestClassifyUnderlyingBucket:
     def test_none_symbol_is_other(self):
         assert portfolio_service.classify_underlying_bucket(None, {}) == "other"
 
-    def test_etf_is_index(self):
-        assert portfolio_service.classify_underlying_bucket("NIFTYBEES", {"NIFTYBEES": CompanyType.ETF}) == "index"
+    def test_etf_is_stock_not_index(self):
+        # A real bug this guards against: BANKBEES/GILT5YBEES/GOLDBEES/
+        # LIQUIDCASE-style ETFs used to be lumped in with genuine Index
+        # positions on My Trades' "Index Trades" table.
+        assert portfolio_service.classify_underlying_bucket("NIFTYBEES", {"NIFTYBEES": CompanyType.ETF}) == "stock"
 
-    def test_fund_is_index(self):
-        assert portfolio_service.classify_underlying_bucket("LIQUIDCASE", {"LIQUIDCASE": CompanyType.FUND}) == "index"
+    def test_fund_is_stock_not_index(self):
+        assert portfolio_service.classify_underlying_bucket("LIQUIDCASE", {"LIQUIDCASE": CompanyType.FUND}) == "stock"
 
     def test_index_company_type_is_index(self):
         assert portfolio_service.classify_underlying_bucket("NIFTY", {"NIFTY": CompanyType.INDEX}) == "index"
@@ -378,10 +381,10 @@ class TestClassifyPositionBucket:
             portfolio_service.classify_position_bucket(OptionType.PE, "NIFTY", {"NIFTY": CompanyType.INDEX}) == "index"
         )
 
-    def test_etf_option_is_index(self):
+    def test_etf_option_is_stock_not_index(self):
         assert (
             portfolio_service.classify_position_bucket(OptionType.CE, "NIFTYBEES", {"NIFTYBEES": CompanyType.ETF})
-            == "index"
+            == "stock"
         )
 
     def test_unknown_underlying_option_defaults_to_stock(self):
@@ -408,24 +411,52 @@ class TestGroupIntoTrades:
         assert trade["trade_type"] == "Trade"
 
     def test_unanimous_index_bucket(self):
-        legs = [self._leg(raw_name="NIFTYBEES", broker="Zerodha", symbol="NIFTYBEES", leg_type="Holding", pnl=None)]
+        legs = [self._leg(raw_name="NIFTY", broker="Zerodha", symbol="NIFTY", leg_type="Holding", pnl=None)]
         trades = portfolio_service.group_into_trades(
-            legs, overrides={}, trade_meta={}, company_type_by_symbol={"NIFTYBEES": CompanyType.ETF}
+            legs, overrides={}, trade_meta={}, company_type_by_symbol={"NIFTY": CompanyType.INDEX}
         )
         assert trades[0]["bucket"] == "index"
         assert trades[0]["total_pnl"] is None
 
+    def test_etf_bucket_defaults_to_stock_not_index(self):
+        # A real bug this guards against: an ETF holding used to land in
+        # "Index Trades" purely because of its company_type.
+        legs = [self._leg(raw_name="NIFTYBEES", broker="Zerodha", symbol="NIFTYBEES", leg_type="Holding", pnl=None)]
+        trades = portfolio_service.group_into_trades(
+            legs, overrides={}, trade_meta={}, company_type_by_symbol={"NIFTYBEES": CompanyType.ETF}
+        )
+        assert trades[0]["bucket"] == "stock"
+
     def test_mixed_bucket_legs_fall_to_other(self):
         legs = [
             self._leg(raw_name="RELIANCE", broker="Zerodha", symbol="RELIANCE", leg_type="Holding", pnl=100.0),
-            self._leg(raw_name="NIFTYBEES", broker="Zerodha", symbol="NIFTYBEES", leg_type="Holding", pnl=50.0),
+            self._leg(raw_name="NIFTY", broker="Zerodha", symbol="NIFTY", leg_type="Holding", pnl=50.0),
         ]
-        overrides = {("Zerodha", "RELIANCE"): "Mixed Trade", ("Zerodha", "NIFTYBEES"): "Mixed Trade"}
+        overrides = {("Zerodha", "RELIANCE"): "Mixed Trade", ("Zerodha", "NIFTY"): "Mixed Trade"}
         trades = portfolio_service.group_into_trades(
-            legs, overrides=overrides, trade_meta={}, company_type_by_symbol={"NIFTYBEES": CompanyType.ETF}
+            legs, overrides=overrides, trade_meta={}, company_type_by_symbol={"NIFTY": CompanyType.INDEX}
         )
         assert len(trades) == 1
         assert trades[0]["bucket"] == "other"
+
+    def test_bucket_override_wins_over_computed_default(self):
+        # The manual escape hatch for an ETF the user deliberately wants
+        # shown alongside genuine Index Trades (see
+        # supabase/migrations/0024_portfolio_trade_meta_bucket_override.sql).
+        legs = [self._leg(raw_name="NIFTYBEES", broker="Zerodha", symbol="NIFTYBEES", leg_type="Holding", pnl=None)]
+        trade_meta = {"NIFTYBEES": {"bucket_override": "index"}}
+        trades = portfolio_service.group_into_trades(
+            legs, overrides={}, trade_meta=trade_meta, company_type_by_symbol={"NIFTYBEES": CompanyType.ETF}
+        )
+        assert trades[0]["bucket"] == "index"
+
+    def test_no_bucket_override_falls_back_to_computed_default(self):
+        legs = [self._leg(raw_name="NIFTYBEES", broker="Zerodha", symbol="NIFTYBEES", leg_type="Holding", pnl=None)]
+        trade_meta = {"NIFTYBEES": {"bucket_override": None}}
+        trades = portfolio_service.group_into_trades(
+            legs, overrides={}, trade_meta=trade_meta, company_type_by_symbol={"NIFTYBEES": CompanyType.ETF}
+        )
+        assert trades[0]["bucket"] == "stock"
 
     def test_no_resolved_symbol_is_other_bucket(self):
         legs = [self._leg(raw_name="WEIRD FORMAT 123", broker="Zerodha", symbol=None, leg_type="Position", pnl=None)]
