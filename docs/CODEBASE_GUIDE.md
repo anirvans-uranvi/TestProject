@@ -469,15 +469,20 @@ just making the symbol's chain look normal again.
 bhavcopy (or any free source), and computing them was scoped out. The
 tables can gain those columns + a `greeks.py` later without reshaping.
 
-**Index F&O (migrations `0018_company_type.sql` / `0019_add_bankex.sql`)**
-— added so Dhan-synced index option positions
-(`pages/6_My_Broker.py`'s "Connect Dhan account") have real F&O data to
-fall back on for LTP instead of a blanket N/A (see the Portfolio pages
-section's "Connect Dhan account" subsection). Four symbols are seeded
-into `companies` as `company_type = 'Index'`: `NIFTY`, `BANKNIFTY` (both
-NSE-listed), `SENSEX`, `BANKEX` (both BSE-listed -- `0019` added BANKEX
-after `bse_fo_provider.py` confirmed it live alongside SENSEX in a real
-BSE bhavcopy response). `option_contracts`/`option_daily_prices`
+**Index F&O (migrations `0018_company_type.sql` / `0019_add_bankex.sql` /
+`0023_add_more_nse_indices.sql`)** — added so Dhan-synced index option
+positions (`pages/6_My_Broker.py`'s "Connect Dhan account") have real
+F&O data to fall back on for LTP instead of a blanket N/A (see the
+Portfolio pages section's "Connect Dhan account" subsection). Seven
+symbols are seeded into `companies` as `company_type = 'Index'`: `NIFTY`,
+`BANKNIFTY`, `FINNIFTY`, `MIDCPNIFTY`, `NIFTYNXT50` (all NSE-listed),
+`SENSEX`, `BANKEX` (both BSE-listed -- `0019` added BANKEX after
+`bse_fo_provider.py` confirmed it live alongside SENSEX in a real BSE
+bhavcopy response; `0023` added the other three NSE indices after a real
+Dhan-synced FINNIFTY option position showed up misclassified as a
+"stock" on My Positions -- `portfolio_service.classify_position_bucket`
+has no fallback beyond `companies.company_type`, so an underlying with no
+seeded row there silently defaults to "stock"). `option_contracts`/`option_daily_prices`
 themselves are unchanged -- an index option row is stored identically to
 a stock option row, just e.g. `symbol = 'SENSEX'`, so no schema change
 was needed there, only widening which bhavcopy rows get kept
