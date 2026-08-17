@@ -226,9 +226,31 @@ class TestParseZerodhaOptionInstrument:
         assert decoded["option_type"] == OptionType.CE
         assert decoded["expiry_date"] == date(2026, 12, 6)
 
+    def test_decodes_monthly_option(self):
+        # Confirmed live against a real Zerodha-synced portfolio -- both
+        # index (NIFTY) and stock underlyings use this exact shape for
+        # their monthly contracts, no day-of-month in the symbol itself
+        # (implicit: NSE monthly F&O always expires the last Thursday).
+        decoded = portfolio_service.parse_zerodha_option_instrument("NIFTY26AUG23100PE")
+        assert decoded == {
+            "symbol": "NIFTY",
+            "expiry_date": date(2026, 8, 27),  # last Thursday of August 2026
+            "strike_price": 23100.0,
+            "option_type": OptionType.PE,
+        }
+
+    def test_decodes_monthly_stock_option(self):
+        decoded = portfolio_service.parse_zerodha_option_instrument("SBIN25AUG970PE")
+        assert decoded == {
+            "symbol": "SBIN",
+            "expiry_date": date(2025, 8, 28),  # last Thursday of August 2025
+            "strike_price": 970.0,
+            "option_type": OptionType.PE,
+        }
+
     def test_returns_none_for_unrecognized_format(self):
-        assert portfolio_service.parse_zerodha_option_instrument("SBIN25AUG970PE") is None
         assert portfolio_service.parse_zerodha_option_instrument("NOTANOPTION") is None
+        assert portfolio_service.parse_zerodha_option_instrument("NIFTY26XYZ23100PE") is None
 
 
 class TestParseZerodhaPositionsCsv:
@@ -712,12 +734,25 @@ class TestZerodhaPositionsFromApi:
         assert p["avg_price"] == 10.15
         assert p["ltp"] == 1.1
 
-    def test_undecoded_monthly_stock_option_format_keeps_raw_name_with_no_contract_detail(self):
-        rows = [{"tradingsymbol": "SBIN25AUG970PE", "quantity": 1, "average_price": 5.0, "last_price": 4.5}]
+    def test_decodes_monthly_option_format(self):
+        # A real bug this guards against: NIFTY's monthly contracts
+        # ("NIFTY26AUG23100PE" -- no day-of-month in the symbol) used to
+        # fail to decode entirely, so My Trades showed the raw instrument
+        # string as the "underlying" and sorted it into Other Trades
+        # instead of Index Trades -- confirmed live.
+        rows = [{"tradingsymbol": "NIFTY26AUG23100PE", "quantity": -75, "average_price": 10.15, "last_price": 12.0}]
+        positions = portfolio_service.zerodha_positions_from_api(rows)
+        assert positions[0]["symbol"] == "NIFTY"
+        assert positions[0]["expiry_date"] == date(2026, 8, 27)
+        assert positions[0]["strike_price"] == 23100.0
+        assert positions[0]["option_type"] == OptionType.PE
+
+    def test_undecoded_futures_format_keeps_raw_name_with_no_contract_detail(self):
+        rows = [{"tradingsymbol": "NIFTY26AUGFUT", "quantity": 1, "average_price": 5.0, "last_price": 4.5}]
         positions = portfolio_service.zerodha_positions_from_api(rows)
         assert positions[0]["symbol"] is None
         assert positions[0]["expiry_date"] is None
-        assert positions[0]["raw_name"] == "SBIN25AUG970PE"
+        assert positions[0]["raw_name"] == "NIFTY26AUGFUT"
 
     def test_missing_last_price_leaves_ltp_none(self):
         rows = [{"tradingsymbol": "NIFTY2681123000PE", "quantity": -75, "average_price": 10.15}]

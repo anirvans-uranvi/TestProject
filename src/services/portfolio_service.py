@@ -9,8 +9,9 @@ expiry_date (date | None), strike_price (float | None), option_type
 """
 from __future__ import annotations
 
+import calendar
 import re
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -129,39 +130,82 @@ _WEEKLY_MONTH_CHARS = {str(m): m for m in range(1, 10)} | {"O": 10, "N": 11, "D"
 # expiries -- encodes the full expiry inline: 2-digit year, then a single
 # month character (1-9, or O/N/D for Oct/Nov/Dec), then 2-digit day.
 # e.g. "NIFTY2681123000PE" = NIFTY, 2026, month 8 (Aug), day 11, strike
-# 23000, PE. There's no sample of Zerodha's *monthly* stock-option format
-# (e.g. "SBIN25AUG970PE") to work from, so that's deliberately left
-# unparsed below rather than guessed at (monthly expiry falls on the last
-# Thursday of the month, which shifts for exchange holidays -- not safe to
-# infer from the symbol alone without a real template).
+# 23000, PE.
 _ZERODHA_WEEKLY_OPTION_RE = re.compile(
     r"^(?P<symbol>[A-Z]+)(?P<yy>\d{2})(?P<month>[1-9OND])(?P<dd>\d{2})"
     r"(?P<strike>\d+(?:\.\d+)?)(?P<type>CE|PE)$"
 )
 
+# Zerodha's *monthly* contract format -- 2-digit year, 3-letter month
+# abbreviation, no day at all (the day is implicit: NSE monthly F&O always
+# expires the last Thursday of that month). e.g. "NIFTY26AUG23100PE" =
+# NIFTY, 2026, August, strike 23100, PE -- confirmed live against a real
+# Zerodha-synced portfolio (previously only a guessed, unconfirmed shape,
+# "SBIN25AUG970PE"-style, deliberately left unparsed; a real sample showed
+# it's exactly that shape, for indices as well as stocks). Tried *after*
+# the weekly regex above since the two are mutually exclusive by
+# construction (weekly's month group is a single [1-9OND] character, never
+# 3 letters) -- order doesn't actually matter for correctness, just checked
+# in this order.
+_ZERODHA_MONTHLY_OPTION_RE = re.compile(
+    r"^(?P<symbol>[A-Z]+)(?P<yy>\d{2})(?P<mmm>[A-Z]{3})(?P<strike>\d+(?:\.\d+)?)(?P<type>CE|PE)$"
+)
+
+
+def _last_thursday(year: int, month: int) -> date:
+    """NSE monthly F&O contracts expire on the last Thursday of the month
+    -- same convention src/data_providers/mock_provider.py's synthetic
+    option-chain generator already uses. Doesn't account for an exchange
+    holiday landing on that day (which shifts the real expiry a day or
+    more earlier) -- good enough for display/grouping purposes, same
+    "not guaranteed to the exact day" trade-off already accepted
+    elsewhere in this app, not something to rely on for anything that
+    needs the precise contract date."""
+    last_day = calendar.monthrange(year, month)[1]
+    d = date(year, month, last_day)
+    while d.weekday() != 3:  # 3 == Thursday
+        d -= timedelta(days=1)
+    return d
+
 
 def parse_zerodha_option_instrument(instrument: str) -> dict | None:
     """Decodes a Zerodha F&O tradingsymbol into its underlying/expiry/
-    strike/type. Returns None for anything that isn't a weekly option in
-    the format above (futures, monthly stock options, or malformed
-    input) -- callers keep the row with symbol=None rather than dropping
-    it."""
-    m = _ZERODHA_WEEKLY_OPTION_RE.match(instrument.strip().upper())
-    if not m:
-        return None
-    year = 2000 + int(m.group("yy"))
-    month = _WEEKLY_MONTH_CHARS[m.group("month")]
-    day = int(m.group("dd"))
-    try:
-        expiry_date = date(year, month, day)
-    except ValueError:
-        return None
-    return {
-        "symbol": m.group("symbol"),
-        "expiry_date": expiry_date,
-        "strike_price": float(m.group("strike")),
-        "option_type": OptionType(m.group("type")),
-    }
+    strike/type -- tries the weekly format first, then the monthly one
+    (see the two regexes above). Returns None for anything matching
+    neither (futures, or malformed input) -- callers keep the row with
+    symbol=None rather than dropping it."""
+    text = instrument.strip().upper()
+
+    m = _ZERODHA_WEEKLY_OPTION_RE.match(text)
+    if m:
+        year = 2000 + int(m.group("yy"))
+        month = _WEEKLY_MONTH_CHARS[m.group("month")]
+        day = int(m.group("dd"))
+        try:
+            expiry_date = date(year, month, day)
+        except ValueError:
+            return None
+        return {
+            "symbol": m.group("symbol"),
+            "expiry_date": expiry_date,
+            "strike_price": float(m.group("strike")),
+            "option_type": OptionType(m.group("type")),
+        }
+
+    m = _ZERODHA_MONTHLY_OPTION_RE.match(text)
+    if m:
+        month = _MONTH_ABBR.get(m.group("mmm"))
+        if month is None:
+            return None
+        year = 2000 + int(m.group("yy"))
+        return {
+            "symbol": m.group("symbol"),
+            "expiry_date": _last_thursday(year, month),
+            "strike_price": float(m.group("strike")),
+            "option_type": OptionType(m.group("type")),
+        }
+
+    return None
 
 
 def parse_zerodha_positions_csv(file) -> list[dict]:

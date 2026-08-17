@@ -1357,19 +1357,38 @@ company-name fuzzy matching needed for either):
 
 - **Zerodha** (`parse_zerodha_positions_csv` /
   `parse_zerodha_option_instrument`) — the `Instrument` column is
-  Zerodha's own F&O tradingsymbol, e.g. `NIFTY2681123000PE`: underlying
-  (`[A-Z]+`, greedy — safe since NSE symbols are pure alphabetic, so the
-  first digit unambiguously ends it), 2-digit year, a single month
-  character (`1`-`9` for Jan-Sep, `O`/`N`/`D` for Oct/Nov/Dec), 2-digit
-  day, strike, `CE`/`PE`. This only covers *weekly* option contracts —
-  today, only indices (NIFTY, BANKNIFTY, SENSEX, ...) have weekly
-  expiries. Zerodha's *monthly* stock-option format (e.g.
-  `SBIN25AUG970PE`, no day component — monthly contracts expire on the
-  last Thursday of the month) is deliberately **not** decoded: inferring
-  that day from the symbol alone isn't safe without a real sample to
-  verify against, since exchange holidays can shift the actual expiry a
-  day earlier. A row in that format just comes back with `symbol=None`
-  and is saved undecoded rather than guessed.
+  Zerodha's own F&O tradingsymbol, decoded via two regexes tried in
+  order:
+  - **Weekly** (`_ZERODHA_WEEKLY_OPTION_RE`), e.g. `NIFTY2681123000PE`:
+    underlying (`[A-Z]+`, greedy — safe since NSE symbols are pure
+    alphabetic, so the first digit unambiguously ends it), 2-digit year,
+    a single month character (`1`-`9` for Jan-Sep, `O`/`N`/`D` for
+    Oct/Nov/Dec), 2-digit day, strike, `CE`/`PE`. Today, only indices
+    (NIFTY, BANKNIFTY, SENSEX, ...) have weekly expiries.
+  - **Monthly** (`_ZERODHA_MONTHLY_OPTION_RE`), e.g. `NIFTY26AUG23100PE`
+    or `SBIN25AUG970PE`: underlying, 2-digit year, 3-letter month
+    abbreviation, strike, `CE`/`PE` — no day-of-month in the symbol at
+    all, since NSE monthly F&O always expires the last Thursday of that
+    month (`_last_thursday`, the same convention
+    `src/data_providers/mock_provider.py`'s synthetic data already uses).
+    **A real bug this fixed**: this format used to be deliberately left
+    unparsed (there was no confirmed real sample, just a guessed shape) —
+    a Zerodha-synced NIFTY monthly option's `Instrument` came back with
+    `symbol=None`, so My Trades showed the raw tradingsymbol as the
+    "Underlying Instrument" and sorted the trade into Other Trades
+    instead of Index Trades. A real portfolio's synced data confirmed
+    the guessed shape was exactly right, for both index and stock
+    underlyings, so it's now decoded for both. **Caveat inherited from
+    that same guess**: `_last_thursday` doesn't account for an exchange
+    holiday landing on the natural last Thursday (which shifts the real
+    expiry a day or more earlier) — fine for grouping/display, but this
+    `expiry_date` isn't guaranteed to be the exact contract date the way
+    the weekly format's is (that one is unambiguous, no calendar guess
+    needed).
+  
+  A row matching neither regex (a futures contract, or a genuinely
+  malformed instrument string) comes back with `symbol=None` and is
+  saved undecoded rather than guessed.
 - **Dhan** (`parse_dhan_positions_csv` / `parse_dhan_position_name`) —
   the `Name` column is Dhan's own space-separated format, e.g.
   `"ONGC 25 AUG 230 PUT"`, used identically for monthly stock options and

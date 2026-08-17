@@ -669,14 +669,17 @@ selector, then the file. Two broker formats are supported for each:
   unresolved -- you can type the correct NSE symbol in before saving, or
   leave it blank to keep that row as N/A.
 - **Positions -- Zerodha**: the `Instrument` column is Zerodha's own F&O
-  tradingsymbol (e.g. `NIFTY2681123000PE` -- underlying + 2-digit year +
-  a single month character + 2-digit day + strike + CE/PE), decoded by
-  `portfolio_service.parse_zerodha_option_instrument`. Only the *weekly*
-  format (currently index-only: NIFTY, BANKNIFTY, SENSEX, ...) is
-  decoded; Zerodha's monthly stock-option format isn't, since inferring
-  its expiry day (the exchange's last-Thursday convention, shiftable by
-  holidays) from the symbol alone isn't safe without a real sample to
-  verify against.
+  tradingsymbol, decoded by `portfolio_service.parse_zerodha_option_instrument`
+  in one of two formats: the *weekly* one (e.g. `NIFTY2681123000PE` --
+  underlying + 2-digit year + a single month character + 2-digit day +
+  strike + CE/PE; today, index-only -- NIFTY, BANKNIFTY, SENSEX, ...),
+  or the *monthly* one (e.g. `NIFTY26AUG23100PE` or `SBIN25AUG970PE` --
+  underlying + 2-digit year + 3-letter month, no day at all, since NSE
+  monthly contracts always expire the last Thursday of that month, a day
+  this app computes rather than reads off the symbol -- doesn't account
+  for an exchange holiday shifting that day earlier, so treat the
+  computed expiry as approximate for a monthly contract, exact for a
+  weekly one).
 - **Positions -- Dhan**: the `Name` column is Dhan's own space-separated
   format (e.g. `ONGC 25 AUG 230 PUT`), used uniformly for both monthly
   and weekly contracts, decoded by `portfolio_service.parse_dhan_position_name`.
