@@ -1,5 +1,6 @@
 """Broker CSV parsing, symbol matching, and valuation for the Portfolio
-page (pages/6_Portfolio.py). Holdings and positions are plain dicts
+feature's pages (pages/6_My_Broker.py, 7_My_Trades.py, 8_My_Holdings.py,
+9_My_Positions.py, 10_Analyse_Trade.py). Holdings and positions are plain dicts
 throughout (not a dataclass) -- same convention as fo_service's row-dict
 outputs. Holdings keys: raw_name, symbol (str | None), qty, avg_price,
 investment. Positions keys: raw_name, symbol (str | None, the underlying),
@@ -14,7 +15,7 @@ from datetime import date
 import pandas as pd
 
 from src.models.company import Company
-from src.models.enums import OptionType
+from src.models.enums import CompanyType, OptionType
 from src.models.portfolio import PortfolioHolding, PortfolioPosition
 
 
@@ -368,7 +369,7 @@ def apply_fallback_option_ltp(
     """Fills any still-missing `ltp` (e.g. a Dhan sync whose Market Quote
     call 401'd because the account lacks the separate "Data APIs"
     subscription -- see dhan_positions_from_api's docstring and
-    pages/6_Portfolio.py's _sync_dhan) from this app's own F&O data:
+    pages/6_My_Broker.py's _sync_dhan) from this app's own F&O data:
     `option_chains` is `{(symbol, expiry_date): latest_option_chain_view
     rows}`, the same shape fo_repo.get_option_chain returns. This is the
     most recent trading day's close/settle, not a live tick -- same
@@ -396,19 +397,99 @@ def apply_fallback_option_ltp(
 
 
 def assign_trade_ids(positions: list[dict], overrides: dict[tuple[str, str], str]) -> list[dict]:
-    """Adds a `trade_id` to each position -- the manual "Trade" grouping
-    shown in "My Positions" (pages/6_Portfolio.py). Default is one Trade
-    per underlying symbol (or raw_name, for a still-undecoded contract
-    with no resolved symbol); `overrides` -- keyed by (broker, raw_name),
-    from portfolio_repo.list_trade_groups -- wins when the user has
-    manually combined this leg into, or split it out of, a Trade. Each
-    position dict must include a `broker` key (positions_to_records/
-    dhan_positions_from_api-shaped rows already do)."""
+    """Adds a `trade_id` to each leg -- the manual "Trade" grouping shown
+    on My Trades / Analyse Trade (pages/7_My_Trades.py,
+    10_Analyse_Trade.py; see group_into_trades, which calls this). Works
+    identically for holding legs and position legs -- it only touches
+    symbol/raw_name/broker. Default is one Trade per underlying symbol (or
+    raw_name, for a still-undecoded/unresolved leg with no resolved
+    symbol); `overrides` -- keyed by (broker, raw_name), from
+    portfolio_repo.list_trade_groups -- wins when the user has manually
+    combined this leg into, or split it out of, a Trade. Each leg dict
+    must include a `broker` key."""
     result = []
     for p in positions:
         default_trade_id = p["symbol"] or p["raw_name"]
         trade_id = overrides.get((p["broker"], p["raw_name"]), default_trade_id)
         result.append({**p, "trade_id": trade_id})
+    return result
+
+
+def classify_underlying_bucket(symbol: str | None, company_type_by_symbol: dict[str, CompanyType]) -> str:
+    """Which of the three "My Trades" tables a leg's underlying sorts
+    into -- "stock" (the default -- includes an unknown/unclassified
+    symbol, same fallback convention pages/6_Portfolio.py's now-retired
+    _is_etf_or_fund helper used for the Holdings ETF/MF split), "index"
+    (company_type ETF/Fund/Index), or "other" (symbol is None -- an
+    undecoded F&O contract or an unmatched holding, nothing to classify
+    by)."""
+    if symbol is None:
+        return "other"
+    if company_type_by_symbol.get(symbol) in (CompanyType.ETF, CompanyType.FUND, CompanyType.INDEX):
+        return "index"
+    return "stock"
+
+
+def group_into_trades(
+    legs: list[dict],
+    overrides: dict[tuple[str, str], str],
+    trade_meta: dict[str, dict],
+    company_type_by_symbol: dict[str, CompanyType],
+) -> list[dict]:
+    """Groups holding + position legs into "Trades" for the My Trades /
+    Analyse Trade pages. Each leg dict must already carry `leg_type`
+    ("Holding" or "Position", added by the caller before grouping) plus
+    the usual symbol/raw_name/broker/pnl keys (holding legs priced via
+    compute_portfolio_view, position legs via compute_positions_view --
+    both already work on unmerged per-broker rows, which is what "Trades"
+    needs: leg-level identity, not merge_holdings' cross-broker merge).
+
+    `trade_id` assignment reuses assign_trade_ids unchanged -- it only
+    touches symbol/raw_name/broker, already agnostic to leg_type. Returns
+    one dict per trade: `trade_id`, `legs` (the leg dicts, each now also
+    carrying its assigned trade_id), `bucket` ("stock"/"index"/"other" --
+    unanimous across the trade's own legs' classify_underlying_bucket,
+    else "other", since a trade mixing stock and index underlyings
+    doesn't cleanly belong to either specific table), `default_underlying_label`
+    (sorted, " + "-joined distinct symbol-or-raw_name across the trade's
+    legs), `underlying_label` (trade_meta's override if set, else the
+    default -- see PortfolioTradeMeta for why this is free text, not
+    constrained to a known symbol), `trade_type` (trade_meta's override if
+    set, else "Trade"), `leg_count`, and `total_pnl` (sum over legs with a
+    known pnl; None if none are priced)."""
+    assigned = assign_trade_ids(legs, overrides)
+    trades: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for leg in assigned:
+        trade_id = leg["trade_id"]
+        if trade_id not in trades:
+            trades[trade_id] = []
+            order.append(trade_id)
+        trades[trade_id].append(leg)
+
+    result = []
+    for trade_id in order:
+        trade_legs = trades[trade_id]
+        buckets = {classify_underlying_bucket(leg["symbol"], company_type_by_symbol) for leg in trade_legs}
+        bucket = next(iter(buckets)) if len(buckets) == 1 else "other"
+        default_label = " + ".join(sorted({leg["symbol"] or leg["raw_name"] for leg in trade_legs}))
+        meta = trade_meta.get(trade_id)
+        underlying_label = (meta.get("underlying_label") if meta else None) or default_label
+        trade_type = (meta.get("trade_type") if meta else None) or "Trade"
+        priced = [leg for leg in trade_legs if leg.get("pnl") is not None]
+        total_pnl = sum(leg["pnl"] for leg in priced) if priced else None
+        result.append(
+            {
+                "trade_id": trade_id,
+                "legs": trade_legs,
+                "bucket": bucket,
+                "default_underlying_label": default_label,
+                "underlying_label": underlying_label,
+                "trade_type": trade_type,
+                "leg_count": len(trade_legs),
+                "total_pnl": total_pnl,
+            }
+        )
     return result
 
 

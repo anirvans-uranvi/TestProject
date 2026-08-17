@@ -38,7 +38,7 @@ class CompanyType(StrEnum):
     src.services.portfolio_service.looks_like_etf_name() at company-
     registration time. INDEX covers NIFTY/BANKNIFTY/SENSEX, seeded once by
     migration 0018 so Dhan-synced index option positions (see
-    pages/6_Portfolio.py) and this app's F&O ingestion (widened to index
+    pages/6_My_Broker.py) and this app's F&O ingestion (widened to index
     options, src/data_providers/nse_fo_provider.py) have a companies row to
     reference. FUND has no rows yet -- reserved for a future non-ETF fund
     classification (see looks_like_etf_name()'s own docstring for why

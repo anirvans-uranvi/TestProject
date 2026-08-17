@@ -1,7 +1,8 @@
 """Shared "refresh data" bar shown at a consistent location -- right
 after the page title/disclaimer -- on every page (Dashboard, Stock
-Detail, Options, My Portfolio, Settings), so a user never has to navigate
-back to one specific page just to trigger a data refresh. Three buttons:
+Detail, Options, My Broker, My Trades, My Holdings, My Positions,
+Settings), so a user never has to navigate back to one specific page just
+to trigger a data refresh. Three buttons:
 Stock Data Refresh (Yahoo Finance, via the manual-refresh Edge Function),
 NSE F&O Data Refresh, and BSE F&O Data Refresh (both via the same
 fo-refresh Edge Function, parameterized by exchange -- see

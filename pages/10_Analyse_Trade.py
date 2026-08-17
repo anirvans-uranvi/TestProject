@@ -1,0 +1,228 @@
+from __future__ import annotations
+
+import pandas as pd
+import streamlit as st
+from postgrest.exceptions import APIError
+from pydantic import ValidationError
+
+from src.repositories import portfolio_repo, settings_repo
+from src.services import portfolio_service
+from src.utils.portfolio_page import (
+    build_trade_legs,
+    ensure_cache_bust,
+    load_all_companies,
+    load_holdings,
+    load_positions,
+    load_trade_groups,
+    load_trade_meta,
+    slug,
+)
+from src.utils.refresh_bar import render_global_refresh_bar
+from src.utils.session import current_user_id, get_user_client_cached, require_login
+from src.utils.ui import inject_global_styles, render_disclaimer
+
+st.set_page_config(page_title="Analyse Trade | Nifty 50 Screener", page_icon="\U0001f50d", layout="wide")
+require_login()  # already injects Tailwind + the light-theme CSS design system
+
+client = get_user_client_cached()
+user_id = current_user_id()
+user_settings = settings_repo.get_user_settings(client, user_id)
+inject_global_styles(user_settings.theme)  # re-inject with the user's actual theme
+
+st.title("\U0001f50d Analyse Trade")
+render_disclaimer()
+render_global_refresh_bar(client)
+
+ensure_cache_bust()
+
+trade_id = st.session_state.get("analyse_trade_id")
+portfolio_name = st.session_state.get("analyse_trade_portfolio")
+
+if not trade_id or not portfolio_name:
+    st.info("No trade selected. Go to My Trades, select a row, and click \"Analyse Trade\".")
+    if st.button("Go to My Trades"):
+        st.switch_page("pages/7_My_Trades.py")
+    st.stop()
+
+
+def _load_portfolio_data():
+    try:
+        holdings = load_holdings(client, user_id, st.session_state["portfolio_cache_bust"])
+    except (APIError, ValidationError):
+        holdings = []
+    try:
+        positions = load_positions(client, user_id, st.session_state["portfolio_cache_bust"])
+    except APIError:
+        positions = []
+    try:
+        trade_groups = load_trade_groups(client, user_id, st.session_state["portfolio_cache_bust"])
+    except APIError:
+        trade_groups = []
+    try:
+        trade_meta = load_trade_meta(client, user_id, st.session_state["portfolio_cache_bust"])
+    except APIError:
+        trade_meta = []
+    return holdings, positions, trade_groups, trade_meta
+
+
+saved_holdings, saved_positions, saved_trade_groups, saved_trade_meta = _load_portfolio_data()
+holdings_for_portfolio = [h for h in saved_holdings if h.portfolio_name == portfolio_name]
+positions_for_portfolio = [p for p in saved_positions if p.portfolio_name == portfolio_name]
+trade_groups_for_portfolio = [g for g in saved_trade_groups if g.portfolio_name == portfolio_name]
+trade_meta_for_portfolio = [m for m in saved_trade_meta if m.portfolio_name == portfolio_name]
+
+all_companies = load_all_companies(client, st.session_state["portfolio_cache_bust"])
+company_type_by_symbol = {c.symbol: c.company_type for c in all_companies}
+
+legs = build_trade_legs(client, st.session_state["portfolio_cache_bust"], holdings_for_portfolio, positions_for_portfolio)
+overrides_by_leg = {(g.broker, g.raw_name): g.trade_id for g in trade_groups_for_portfolio}
+trade_meta_by_id = {m.trade_id: {"underlying_label": m.underlying_label, "trade_type": m.trade_type} for m in trade_meta_for_portfolio}
+trades = portfolio_service.group_into_trades(legs, overrides_by_leg, trade_meta_by_id, company_type_by_symbol)
+
+trade = next((t for t in trades if t["trade_id"] == trade_id), None)
+
+if trade is None:
+    st.info(
+        f'Trade "{trade_id}" in "{portfolio_name}" has no legs anymore -- it was probably fully split or '
+        "the underlying data changed. Go back to My Trades and pick another one."
+    )
+    if st.button("Go to My Trades"):
+        st.session_state.pop("analyse_trade_id", None)
+        st.session_state.pop("analyse_trade_portfolio", None)
+        st.switch_page("pages/7_My_Trades.py")
+    st.stop()
+
+st.subheader(f"{trade['underlying_label']} -- {portfolio_name}")
+st.caption(f"Trade Type: {trade['trade_type']} | {trade['leg_count']} leg(s)")
+
+# --- Legs table ---------------------------------------------------------
+trade_legs = trade["legs"]
+leg_table_rows = [
+    {
+        "Type": leg["leg_type"],
+        "Broker": leg["broker"],
+        "Instrument": leg["symbol"] or f'{leg["raw_name"]} (unresolved)',
+        "Expiry": leg["expiry_date"].strftime("%d %b %Y") if leg.get("expiry_date") else None,
+        "Strike": leg.get("strike_price"),
+        "Option Type": leg["option_type"].value if leg.get("option_type") else None,
+        "Qty": leg["qty"],
+        "Avg Price": leg["avg_price"],
+        "LTP": leg.get("ltp"),
+        "P&L": leg.get("pnl"),
+    }
+    for leg in trade_legs
+]
+legs_event = st.dataframe(
+    pd.DataFrame(leg_table_rows),
+    use_container_width=True,
+    hide_index=True,
+    on_select="rerun",
+    selection_mode="multi-row",
+    key=f"analyse_trade_legs_{slug(portfolio_name)}_{slug(trade_id)}",
+    column_config={
+        "Qty": st.column_config.NumberColumn(format="%+,.2f"),
+        "Avg Price": st.column_config.NumberColumn(format="₹%,.2f"),
+        "LTP": st.column_config.NumberColumn(format="₹%,.2f"),
+        "P&L": st.column_config.NumberColumn(format="₹%,.2f"),
+    },
+)
+
+st.divider()
+
+# --- Edit underlying / trade type ---------------------------------------
+st.markdown("**Correct the underlying or rename the trade type**")
+with st.form(f"analyse_trade_edit_form_{slug(portfolio_name)}_{slug(trade_id)}"):
+    edited_underlying = st.text_input(
+        "Underlying Instrument",
+        value=trade["underlying_label"],
+        help='Free text -- e.g. correct a resolved "Tata Motors" to the real post-demerger underlying.',
+    )
+    edited_trade_type = st.text_input("Trade Type", value=trade["trade_type"])
+    save_submitted = st.form_submit_button("Save")
+if save_submitted:
+    underlying_to_save = edited_underlying.strip() or None
+    if underlying_to_save == trade["default_underlying_label"]:
+        underlying_to_save = None  # matches the auto-computed default -- no override needed
+    portfolio_repo.set_trade_meta(
+        client,
+        user_id,
+        portfolio_name,
+        trade_id,
+        underlying_label=underlying_to_save,
+        trade_type=edited_trade_type.strip() or "Trade",
+    )
+    st.session_state["portfolio_cache_bust"] += 1
+    st.cache_data.clear()
+    st.success("Saved.")
+    st.rerun()
+
+st.divider()
+
+# --- Merge / split --------------------------------------------------------
+other_trade_ids = sorted(t["trade_id"] for t in trades if t["trade_id"] != trade_id)
+merge_col, split_col = st.columns(2)
+
+with merge_col:
+    st.markdown("**Merge other trades into this one**")
+    trades_to_merge = st.multiselect(
+        "Other trades in this portfolio",
+        other_trade_ids,
+        key=f"analyse_trade_merge_select_{slug(portfolio_name)}_{slug(trade_id)}",
+    )
+    if st.button(
+        "Merge into this trade", disabled=not trades_to_merge, key=f"analyse_trade_merge_btn_{slug(portfolio_name)}_{slug(trade_id)}"
+    ):
+        legs_to_move = [
+            (leg["broker"], leg["raw_name"])
+            for other in trades
+            if other["trade_id"] in trades_to_merge
+            for leg in other["legs"]
+        ]
+        portfolio_repo.set_trade_group(client, user_id, portfolio_name, legs_to_move, trade_id)
+        st.session_state["portfolio_cache_bust"] += 1
+        st.cache_data.clear()
+        st.success(f"Merged {len(trades_to_merge)} trade(s) into this one.")
+        st.rerun()
+
+with split_col:
+    st.markdown("**Split selected legs out of this trade**")
+    selected_leg_rows = legs_event.selection.rows if legs_event and legs_event.selection else []
+    if not selected_leg_rows:
+        st.caption("Select one or more legs above first.")
+    else:
+        selected_legs = [trade_legs[i] for i in selected_leg_rows]
+        selected_leg_keys = [(leg["broker"], leg["raw_name"]) for leg in selected_legs]
+        st.caption(f"{len(selected_legs)} leg(s) selected.")
+        split_mode = st.radio(
+            "Split to",
+            ["Default grouping (by underlying)", "A new Trade ID"],
+            key=f"analyse_trade_split_mode_{slug(portfolio_name)}_{slug(trade_id)}",
+            horizontal=True,
+        )
+        if split_mode == "A new Trade ID":
+            new_trade_id = st.text_input(
+                "New Trade ID", key=f"analyse_trade_split_new_id_{slug(portfolio_name)}_{slug(trade_id)}"
+            ).strip()
+            if st.button(
+                "Split into new trade",
+                disabled=not new_trade_id,
+                key=f"analyse_trade_split_new_btn_{slug(portfolio_name)}_{slug(trade_id)}",
+            ):
+                portfolio_repo.set_trade_group(client, user_id, portfolio_name, selected_leg_keys, new_trade_id)
+                st.session_state["portfolio_cache_bust"] += 1
+                st.cache_data.clear()
+                st.success(f'Split {len(selected_legs)} leg(s) into "{new_trade_id}".')
+                st.rerun()
+        else:
+            if st.button("Split to default grouping", key=f"analyse_trade_split_default_btn_{slug(portfolio_name)}_{slug(trade_id)}"):
+                portfolio_repo.clear_trade_group_overrides(client, user_id, portfolio_name, selected_leg_keys)
+                st.session_state["portfolio_cache_bust"] += 1
+                st.cache_data.clear()
+                st.success(f"Split {len(selected_legs)} leg(s) back to their default per-underlying Trade.")
+                st.rerun()
+
+st.divider()
+if st.button("← Back to My Trades"):
+    st.session_state.pop("analyse_trade_id", None)
+    st.session_state.pop("analyse_trade_portfolio", None)
+    st.switch_page("pages/7_My_Trades.py")

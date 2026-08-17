@@ -200,7 +200,7 @@ class DhanProvider(PriceDataProvider):
         return result
 
     # ------------------------------------------------------------------
-    # Per-user portfolio sync (pages/6_Portfolio.py "Connect Dhan account")
+    # Per-user portfolio sync (pages/6_My_Broker.py "Connect Dhan account")
     # -- reuses this same class's auth/header handling for a per-user
     # client_id/access_token pair (rather than this app's own single
     # settings.dhan_client_id/dhan_access_token), since the request

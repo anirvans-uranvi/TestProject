@@ -1,6 +1,6 @@
 """Tests for DhanProvider's per-user portfolio-sync methods (get_holdings,
 get_positions, get_ltp_by_security_id) -- header construction and the
-401 -> DhanAuthError mapping used by pages/6_Portfolio.py's "Connect Dhan
+401 -> DhanAuthError mapping used by pages/6_My_Broker.py's "Connect Dhan
 account" flow. The pre-existing price-pipeline methods (get_quote/
 get_quotes/get_historical_daily) are untouched and untested here."""
 import httpx

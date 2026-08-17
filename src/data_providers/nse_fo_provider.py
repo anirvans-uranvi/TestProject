@@ -13,7 +13,7 @@ turnover, number of trades, expiry, strike, option type, and lot size.
 Instrument types: STF = stock future, STO = stock option, IDO = index
 option (NIFTY/BANKNIFTY -- see migration 0018's Index company_type rows).
 IDF (index future) stays out of scope -- no Index position on this app
-needs a futures LTP today (see pages/6_Portfolio.py's Dhan sync, which
+needs a futures LTP today (see pages/6_My_Broker.py's Dhan sync, which
 only deals in option positions), so it isn't worth widening for yet.
 
 The CSV row shape itself (SEBI's UDiFF format) is shared with BSE's own

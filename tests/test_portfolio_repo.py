@@ -8,7 +8,7 @@ import types
 from datetime import date
 
 from src.models.enums import OptionType
-from src.models.portfolio import BrokerConnection, PortfolioHolding, PortfolioPosition, PortfolioTradeGroup
+from src.models.portfolio import BrokerConnection, PortfolioHolding, PortfolioPosition, PortfolioTradeGroup, PortfolioTradeMeta
 from src.repositories import portfolio_repo
 
 
@@ -247,6 +247,20 @@ class TestDeletePortfolio:
         remaining = client.store["portfolio_trade_groups"]
         assert len(remaining) == 1
         assert remaining[0]["raw_name"] == "KEEP"
+
+    def test_also_deletes_trade_meta_within_the_named_portfolio_only(self):
+        client = _FakeClient()
+        client.store["portfolio_holdings"] = [_row("Portfolio 1", "Zerodha", "SBIN")]
+        client.store["portfolio_trade_meta"] = [
+            _trade_meta_row("Portfolio 1", "SBIN"),
+            _trade_meta_row("Portfolio 2", "KEEP"),
+        ]
+
+        portfolio_repo.delete_portfolio(client, "u1", "Portfolio 1")
+
+        remaining = client.store["portfolio_trade_meta"]
+        assert len(remaining) == 1
+        assert remaining[0]["trade_id"] == "KEEP"
 
     def test_does_not_touch_other_users_portfolio_of_the_same_name(self):
         client = _FakeClient()
@@ -533,3 +547,53 @@ class TestTradeGroups:
         assert len(remaining) == 2
         assert not any(r["broker"] == "Zerodha" and r["raw_name"] == "LEG_A" for r in remaining)
         assert any(r["broker"] == "Dhan" and r["raw_name"] == "LEG_A" for r in remaining)
+
+
+def _trade_meta_row(portfolio_name, trade_id, underlying_label=None, trade_type="Trade", user_id="u1"):
+    return {
+        "user_id": user_id,
+        "portfolio_name": portfolio_name,
+        "trade_id": trade_id,
+        "underlying_label": underlying_label,
+        "trade_type": trade_type,
+        "updated_at": None,
+    }
+
+
+class TestTradeMeta:
+    def test_list_returns_only_the_requested_users_rows_as_models(self):
+        client = _FakeClient()
+        client.store["portfolio_trade_meta"] = [
+            _trade_meta_row("Portfolio 1", "RELIANCE", underlying_label="Reliance Industries"),
+            {**_trade_meta_row("Portfolio 1", "OTHER"), "user_id": "u2"},
+        ]
+
+        result = portfolio_repo.list_trade_meta(client, "u1")
+
+        assert len(result) == 1
+        assert isinstance(result[0], PortfolioTradeMeta)
+        assert result[0].underlying_label == "Reliance Industries"
+
+    def test_set_trade_meta_upserts_a_new_row(self):
+        client = _FakeClient()
+
+        portfolio_repo.set_trade_meta(
+            client, "u1", "Portfolio 1", "TATAMTRDVR", underlying_label="Tata Motors Passenger Vehicle", trade_type="Long Term Hold"
+        )
+
+        rows = client.store["portfolio_trade_meta"]
+        assert len(rows) == 1
+        assert rows[0]["underlying_label"] == "Tata Motors Passenger Vehicle"
+        assert rows[0]["trade_type"] == "Long Term Hold"
+
+    def test_set_trade_meta_overwrites_the_existing_row_for_the_same_trade(self):
+        client = _FakeClient()
+        client.store["portfolio_trade_meta"] = [_trade_meta_row("Portfolio 1", "RELIANCE", trade_type="Trade")]
+
+        portfolio_repo.set_trade_meta(
+            client, "u1", "Portfolio 1", "RELIANCE", underlying_label=None, trade_type="Hedge"
+        )
+
+        rows = client.store["portfolio_trade_meta"]
+        assert len(rows) == 1
+        assert rows[0]["trade_type"] == "Hedge"

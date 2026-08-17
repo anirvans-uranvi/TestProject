@@ -10,7 +10,7 @@ live, no zipfile handling needed here. Built specifically so SENSEX and
 BANKEX index options (both BSE-listed -- NSE's own bhavcopy never
 contains them) have a real F&O data source: before this, a Dhan-synced
 SENSEX/BANKEX position could only ever show LTP as N/A (see migration
-0018's Index company_type rows and pages/6_Portfolio.py's Dhan LTP
+0018's Index company_type rows and pages/6_My_Broker.py's Dhan LTP
 fallback).
 
 **BSE ingestion is index-options-only (`IDO`) -- no stock futures/options

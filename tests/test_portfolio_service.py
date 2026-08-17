@@ -340,6 +340,99 @@ class TestAssignTradeIds:
         assert dhan_leg["trade_id"] == "X"
 
 
+class TestClassifyUnderlyingBucket:
+    def test_none_symbol_is_other(self):
+        assert portfolio_service.classify_underlying_bucket(None, {}) == "other"
+
+    def test_etf_is_index(self):
+        assert portfolio_service.classify_underlying_bucket("NIFTYBEES", {"NIFTYBEES": CompanyType.ETF}) == "index"
+
+    def test_fund_is_index(self):
+        assert portfolio_service.classify_underlying_bucket("LIQUIDCASE", {"LIQUIDCASE": CompanyType.FUND}) == "index"
+
+    def test_index_company_type_is_index(self):
+        assert portfolio_service.classify_underlying_bucket("NIFTY", {"NIFTY": CompanyType.INDEX}) == "index"
+
+    def test_equity_is_stock(self):
+        assert portfolio_service.classify_underlying_bucket("RELIANCE", {"RELIANCE": CompanyType.EQUITY}) == "stock"
+
+    def test_unknown_symbol_defaults_to_stock(self):
+        assert portfolio_service.classify_underlying_bucket("SOMENEWCO", {}) == "stock"
+
+
+class TestGroupIntoTrades:
+    def _leg(self, *, raw_name, broker, symbol, leg_type, pnl):
+        return {"raw_name": raw_name, "broker": broker, "symbol": symbol, "leg_type": leg_type, "pnl": pnl}
+
+    def test_groups_by_default_underlying_and_sums_pnl(self):
+        legs = [
+            self._leg(raw_name="RELIANCE", broker="Zerodha", symbol="RELIANCE", leg_type="Holding", pnl=1000.0),
+            self._leg(raw_name="RELIANCE 25AUG3000CE", broker="Zerodha", symbol="RELIANCE", leg_type="Position", pnl=-200.0),
+        ]
+        trades = portfolio_service.group_into_trades(legs, overrides={}, trade_meta={}, company_type_by_symbol={})
+        assert len(trades) == 1
+        trade = trades[0]
+        assert trade["trade_id"] == "RELIANCE"
+        assert trade["leg_count"] == 2
+        assert trade["total_pnl"] == 800.0
+        assert trade["bucket"] == "stock"
+        assert trade["underlying_label"] == "RELIANCE"
+        assert trade["trade_type"] == "Trade"
+
+    def test_unanimous_index_bucket(self):
+        legs = [self._leg(raw_name="NIFTYBEES", broker="Zerodha", symbol="NIFTYBEES", leg_type="Holding", pnl=None)]
+        trades = portfolio_service.group_into_trades(
+            legs, overrides={}, trade_meta={}, company_type_by_symbol={"NIFTYBEES": CompanyType.ETF}
+        )
+        assert trades[0]["bucket"] == "index"
+        assert trades[0]["total_pnl"] is None
+
+    def test_mixed_bucket_legs_fall_to_other(self):
+        legs = [
+            self._leg(raw_name="RELIANCE", broker="Zerodha", symbol="RELIANCE", leg_type="Holding", pnl=100.0),
+            self._leg(raw_name="NIFTYBEES", broker="Zerodha", symbol="NIFTYBEES", leg_type="Holding", pnl=50.0),
+        ]
+        overrides = {("Zerodha", "RELIANCE"): "Mixed Trade", ("Zerodha", "NIFTYBEES"): "Mixed Trade"}
+        trades = portfolio_service.group_into_trades(
+            legs, overrides=overrides, trade_meta={}, company_type_by_symbol={"NIFTYBEES": CompanyType.ETF}
+        )
+        assert len(trades) == 1
+        assert trades[0]["bucket"] == "other"
+
+    def test_no_resolved_symbol_is_other_bucket(self):
+        legs = [self._leg(raw_name="WEIRD FORMAT 123", broker="Zerodha", symbol=None, leg_type="Position", pnl=None)]
+        trades = portfolio_service.group_into_trades(legs, overrides={}, trade_meta={}, company_type_by_symbol={})
+        assert trades[0]["bucket"] == "other"
+        assert trades[0]["underlying_label"] == "WEIRD FORMAT 123"
+
+    def test_default_label_joins_multiple_underlyings_when_merged(self):
+        legs = [
+            self._leg(raw_name="NIFTY LEG", broker="Zerodha", symbol="NIFTY", leg_type="Position", pnl=None),
+            self._leg(raw_name="BANKNIFTY LEG", broker="Zerodha", symbol="BANKNIFTY", leg_type="Position", pnl=None),
+        ]
+        overrides = {("Zerodha", "NIFTY LEG"): "Pairs Trade", ("Zerodha", "BANKNIFTY LEG"): "Pairs Trade"}
+        trades = portfolio_service.group_into_trades(legs, overrides, trade_meta={}, company_type_by_symbol={})
+        assert trades[0]["underlying_label"] == "BANKNIFTY + NIFTY"
+
+    def test_trade_meta_override_wins_for_underlying_label_and_trade_type(self):
+        legs = [self._leg(raw_name="TATAMTRDVR", broker="Zerodha", symbol="TATAMTRDVR", leg_type="Holding", pnl=None)]
+        trade_meta = {"TATAMTRDVR": {"underlying_label": "Tata Motors Passenger Vehicle", "trade_type": "Long Term Hold"}}
+        trades = portfolio_service.group_into_trades(
+            legs, overrides={}, trade_meta=trade_meta, company_type_by_symbol={}
+        )
+        assert trades[0]["underlying_label"] == "Tata Motors Passenger Vehicle"
+        assert trades[0]["trade_type"] == "Long Term Hold"
+
+    def test_blank_meta_override_falls_back_to_default(self):
+        legs = [self._leg(raw_name="RELIANCE", broker="Zerodha", symbol="RELIANCE", leg_type="Holding", pnl=None)]
+        trade_meta = {"RELIANCE": {"underlying_label": "", "trade_type": ""}}
+        trades = portfolio_service.group_into_trades(
+            legs, overrides={}, trade_meta=trade_meta, company_type_by_symbol={}
+        )
+        assert trades[0]["underlying_label"] == "RELIANCE"
+        assert trades[0]["trade_type"] == "Trade"
+
+
 class TestPositionsToRecords:
     def test_builds_portfolio_position_models(self):
         positions = [

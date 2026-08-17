@@ -24,7 +24,7 @@ operations; that doc covers the code itself.
 - [Scheduled refresh](#scheduled-refresh)
 - [On-demand refresh (the refresh bar)](#on-demand-refresh-the-refresh-bar)
 - [Futures & Options (F&O) data](#futures--options-fo-data)
-- [My Portfolio](#my-portfolio)
+- [Portfolio pages](#portfolio-pages)
 - [Docker](#docker)
 - [Limitations](#limitations)
 
@@ -39,7 +39,12 @@ pages/                  Streamlit multipage app (each still its own script,
   2_Stock_Detail.py       Price/volume/dividend charts, scorecard, per-stock alerts -- sidebar label "Equity"
   4_Settings.py            Per-user thresholds, alert CRUD + notification history, notification channels, sign out
   5_Options.py              F&O: futures term structure, 5% CSP / 5% CC breakdown
-  6_Portfolio.py             Upload Zerodha/Dhan holdings + F&O positions -- sidebar label "My Portfolio"
+  6_My_Broker.py             Upload/connect Zerodha/Dhan holdings + F&O positions, create/delete portfolios
+  7_My_Trades.py              Holdings + positions grouped by underlying into Stock/Index/Other Trades
+  8_My_Holdings.py            Equity holdings, split ETFs & Mutual Funds / Stocks, CC ROI columns
+  9_My_Positions.py           Flat per-leg F&O positions table (no grouping -- see My Trades for that)
+  10_Analyse_Trade.py          One Trade's legs -- correct underlying, rename trade type, merge/split
+                              (hidden from the sidebar -- reached only via My Trades' row selection)
 src/
   config.py               Pydantic Settings (env-driven)
   data_providers/         PriceDataProvider / FundamentalsDataProvider + Dhan/mock/manual impls
@@ -153,7 +158,7 @@ settings.
   `0013_screener_fallback_and_portfolio_symbols.sql` (falls back to
   the last snapshot row that actually has a price instead of always
   using today's, and folds in the viewing user's portfolio symbols --
-  see [My Portfolio](#my-portfolio) for why), and
+  see [Portfolio pages](#portfolio-pages) for why), and
   `0015_add_is_etf_to_companies.sql` (added `companies.is_etf`, filtered
   out of this same view -- ETFs/funds tracked via a portfolio still
   showed up on this stock-focused screener otherwise) and
@@ -161,7 +166,7 @@ settings.
   `company_type` category -- `Equity`/`ETF`/`Index`/`Fund` -- filtering
   the view on `company_type = 'Equity'` instead, so it now also excludes
   the Index rows the same migration seeds; see
-  [My Portfolio](#my-portfolio) for the classification story).
+  [Portfolio pages](#portfolio-pages) for the classification story).
 - **Password reset uses a 6-digit code, not the email's magic link.**
   Supabase's recovery link puts the session token in the URL fragment
   (`#access_token=...`), which no server (including ours) ever receives,
@@ -374,9 +379,9 @@ Streamlit only ever sends the *calling user's own* access token
 
 `src/utils/refresh_bar.py`'s `render_global_refresh_bar()` renders all
 three at once, at the same spot on every page (right after the title and
-disclaimer) -- **Dashboard, Stock Detail, Options, My Portfolio, and
-Settings** -- so refreshing data never requires navigating back to one
-specific page. A click clears Streamlit's entire cache (`st.cache_data.clear()`)
+disclaimer) -- **Dashboard, Stock Detail, Options, My Broker, My Trades,
+My Holdings, My Positions, and Settings** -- so refreshing data never
+requires navigating back to one specific page. A click clears Streamlit's entire cache (`st.cache_data.clear()`)
 before rerunning, so every page's own cached loaders pick up the fresh
 data regardless of which page triggered the refresh.
 
@@ -561,7 +566,7 @@ table.
 
 If you hold this stock in one of your own saved portfolios, a third
 **"Portfolio CC"** table appears below 5% CC (silently absent otherwise)
--- the same per-holding covered-call figure as the Portfolio page's own
+-- the same per-holding covered-call figure as My Holdings' own
 "CC ROI"/"CC Assignment ROI" columns (avg-buy-price-vs-LTP-dependent
 target, nearest strike, not 5% CC's fixed-5%-OTM floor), so the numbers
 always match that page for this exact stock. One table per named
@@ -614,54 +619,27 @@ above) are the easier way to pick up each new trading day's bhavcopy --
 no terminal/service-role key needed, and each is a no-op if nothing new is
 published yet.
 
-## My Portfolio
+## Portfolio pages
 
-The **My Portfolio** page (`pages/6_Portfolio.py`) shows your own
-holdings and F&O positions -- uploaded from broker CSV exports, not the
-Nifty50 screener universe. Each portfolio tab has two sections:
+Your own holdings and F&O positions -- uploaded from broker CSV exports,
+not the Nifty50 screener universe -- span five pages, only four of which
+appear in the sidebar (**My Broker**, **My Trades**, **My Holdings**, **My
+Positions**; **Analyse Trade** is reached only by selecting a row on My
+Trades). All five share one loader/formatting module,
+`src/utils/portfolio_page.py` (cached data loaders, the cache-bust
+counter, `build_trade_legs`), so a cache hit on one page is a cache hit on
+another -- e.g. switching from My Holdings to My Trades doesn't re-fetch
+holdings that are still fresh. Every page keeps the same "one tab per
+portfolio" structure (**you can maintain multiple, independently-named
+portfolios that all coexist**, e.g. "Personal", "Family", "Retirement");
+only **My Broker** also gets a "+ New portfolio" tab, since that's the
+only page a portfolio can be created or deleted from.
 
-- **My Holdings** -- equity holdings valued live against the app's own
-  market data, split into two tables by `companies.company_type`
-  (migration `0018`): **ETFs & Mutual Funds** (`ETF`/`Fund`) first, then
-  **Stocks** (`Equity`/`Index`, and any still-unresolved holding, since
-  there's no better signal for those). Both tables share the base columns
-  -- Stock, Qty, Avg Price, LTP, Investment, Cur Val, P&L, P&L%; the Total
-  Investment/Cur Val/P&L/P&L% stat grid above both tables still aggregates
-  across everything. **The Stocks table only** additionally shows **CC
-  ROI** / **CC Assignment ROI** (see below) -- removed from the ETFs &
-  Mutual Funds table per user request, along with a TTM PE column that
-  used to sit alongside it there. **The ETFs & Mutual Funds table only**
-  shows **1D/5D/20D Change** (the holding's rupee value change over that
-  period, `%` in parentheses -- e.g. `₹+588.24 (+2.00%)`). Sourced from
-  `daily_screener_snapshots` via `snapshot_repo.get_latest_returns_and_pe`
-  (`return_1d`/`return_5d`/`return_20d`, the same fields Dashboard/Stock
-  Detail already read for the Nifty50 universe) -- that table stores only
-  *percentage* returns, not historical closes, so the rupee change is
-  derived via `src/calculations/returns.py::value_change_from_pct
-  (cur_val, return_pct)`, the algebraic inverse of `pct_return`. Not shown
-  on the Stocks table -- the user only asked for it on ETFs/funds, where a
-  quick freshness/valuation check across a handful of large index
-  positions is the actual use case.
-- **My Positions** -- open F&O (options) positions decoded from the same
-  broker exports, grouped into **Trades** (see below): Trade ID, Symbol,
-  Expiry, Strike, Type, Qty (signed -- negative is short), Avg Price, LTP,
-  P&L, P&L%. Unlike holdings, LTP here is
-  trusted from the uploaded file rather than fetched live. For a
-  Dhan-synced position missing LTP (see "Connect Dhan account" below),
-  `portfolio_service.apply_fallback_option_ltp` fills the gap from this
-  app's own F&O data -- which now includes index options (NIFTY, BANKNIFTY
-  via NSE; SENSEX, BANKEX via BSE -- migrations `0018`/`0019`), not just
-  stock options. BSE is index-options-only, though (see the F&O Data
-  Refresh buttons section below) -- a *stock* option position always
-  falls back to NSE's own chain, never BSE's. Index *futures* remain out
-  of scope on both exchanges. P&L/P&L% are still recomputed from qty/avg price/LTP
-  rather than trusted from the file, since Zerodha's and Dhan's own P&L%
-  columns turned out to mean different things (Dhan's is direction-aware,
-  Zerodha's is a raw price change) -- see `portfolio_service.compute_positions_view`.
+### My Broker (`pages/6_My_Broker.py`)
 
-Both sections upload the same way: pick "Holdings" or "Positions" from a
-"What are you uploading?" selector, then the broker and file. Two broker
-formats are supported for each:
+Upload/connect Zerodha or Dhan holdings and F&O positions, per portfolio.
+Pick "Holdings" or "Positions" from a "What are you uploading?" selector,
+then the broker and file. Two broker formats are supported for each:
 
 - **Holdings -- Zerodha**: the `Instrument` column is already the exact
   NSE trading symbol, so it's trusted directly.
@@ -733,25 +711,68 @@ are left as-is, same as switching away from CSV upload.
 
 Both holdings and positions are saved per-user (`portfolio_holdings`,
 migrations `0012`/`0014`; `portfolio_positions`, migration `0016`;
-manual Trade groupings, `portfolio_trade_groups`, migration `0020`), and
-**you can maintain multiple, independently-named portfolios that all
-coexist** -- each one shown as its own tab (e.g. "Personal", "Family",
-"Retirement"), right below the disclaimer; a portfolio's tab exists as
-soon as it has holdings *or* positions saved (not holdings alone). Within
-a portfolio's tab: My Holdings and My Positions (same stock/contract held
-across multiple brokers within that one portfolio is combined into one
-row for display), then one upload section scoped to just that portfolio
--- uploading a broker's file there replaces that broker's previously
-saved rows of the selected type *in this portfolio only*; every other
-portfolio, broker, and the other upload type are untouched. A "+ New
-portfolio" tab is always available at the end to start an entirely
-separate portfolio from scratch (pick a name -- it defaults to
-"Portfolio N" if left blank -- and a broker); creating one never deletes
-or modifies any existing portfolio. Each tab also has a collapsed "🗑️
-Delete" section at the bottom to remove that portfolio entirely (every
-holding and position, every broker within it) -- it requires ticking a
-confirmation checkbox before the delete button becomes clickable, since
-this can't be undone; every other portfolio is unaffected.
+manual Trade groupings/metadata, `portfolio_trade_groups` and
+`portfolio_trade_meta`, migrations `0020`/`0021` -- see My Trades below),
+right below the disclaimer; a portfolio's tab exists as soon as it has
+holdings *or* positions saved (not holdings alone). Uploading a broker's
+file replaces that broker's previously saved rows of the selected type
+*in this portfolio only*; every other portfolio, broker, and the other
+upload type are untouched. A "+ New portfolio" tab is always available at
+the end to start an entirely separate portfolio from scratch (pick a name
+-- it defaults to "Portfolio N" if left blank -- and a broker); creating
+one never deletes or modifies any existing portfolio. Each tab also has a
+collapsed "🗑️ Delete" section at the bottom to remove that portfolio
+entirely (every holding, position, broker connection, and Trade
+grouping/metadata within it) -- it requires ticking a confirmation
+checkbox before the delete button becomes clickable, since this can't be
+undone; every other portfolio is unaffected.
+
+### My Holdings (`pages/8_My_Holdings.py`)
+
+Equity holdings valued live against the app's own market data (same
+stock/contract held across multiple brokers within one portfolio is
+combined into one row for display -- `portfolio_service.merge_holdings`),
+split into two tables by `companies.company_type` (migration `0018`):
+**ETFs & Mutual Funds** (`ETF`/`Fund`) first, then **Stocks**
+(`Equity`/`Index`, and any still-unresolved holding, since there's no
+better signal for those). Both tables share the base columns -- Stock,
+Qty, Avg Price, LTP, Investment, Cur Val, P&L, P&L%; the Total
+Investment/Cur Val/P&L/P&L% stat grid above both tables still aggregates
+across everything. **The Stocks table only** additionally shows **CC
+ROI** / **CC Assignment ROI** (see below). **The ETFs & Mutual Funds
+table only** shows **1D/5D/20D Change** (the holding's rupee value change
+over that period, `%` in parentheses -- e.g. `₹+588.24 (+2.00%)`).
+Sourced from `daily_screener_snapshots` via
+`snapshot_repo.get_latest_returns_and_pe` (`return_1d`/`return_5d`/`return_20d`,
+the same fields Dashboard/Stock Detail already read for the Nifty50
+universe) -- that table stores only *percentage* returns, not historical
+closes, so the rupee change is derived via
+`src/calculations/returns.py::value_change_from_pct(cur_val, return_pct)`,
+the algebraic inverse of `pct_return`. Not shown on the Stocks table --
+the user only asked for it on ETFs/funds, where a quick freshness/
+valuation check across a handful of large index positions is the actual
+use case.
+
+### My Positions (`pages/9_My_Positions.py`)
+
+Open F&O (options) positions decoded from the same broker exports, one
+row per leg, no grouping (see My Trades below for that): Broker, Symbol,
+Expiry, Strike, Type, Qty (signed -- negative is short), Avg Price, LTP,
+P&L, P&L%. Unlike holdings, LTP here is trusted from the uploaded file
+rather than fetched live. For a Dhan-synced position missing LTP (see
+"Connect Dhan account" above), `portfolio_service.apply_fallback_option_ltp`
+fills the gap from this app's own F&O data -- which now includes index
+options (NIFTY, BANKNIFTY via NSE; SENSEX, BANKEX via BSE -- migrations
+`0018`/`0019`), not just stock options. BSE is index-options-only, though
+(see the F&O Data Refresh buttons section above) -- a *stock* option
+position always falls back to NSE's own chain, never BSE's. Index
+*futures* remain out of scope on both exchanges. P&L/P&L% are still
+recomputed from qty/avg price/LTP rather than trusted from the file,
+since Zerodha's and Dhan's own P&L% columns turned out to mean different
+things (Dhan's is direction-aware, Zerodha's is a raw price change) --
+see `portfolio_service.compute_positions_view`. A position whose
+instrument string doesn't decode (see My Broker above) is still saved and
+shown here -- just with no expiry/strike/type.
 
 **LTP only comes from data already loaded in Supabase** -- never a fresh
 live fetch triggered by this page. The app's `companies`/
@@ -783,7 +804,7 @@ Hindustan Zinc or IndusInd Bank) becomes selectable on all three pages
 the moment it's tracked, and "Total stocks" grows accordingly (never
 hardcoded to 50). Options gracefully shows "No open F&O contracts"
 instead of a blank/missing entry for a portfolio symbol with no listed
-derivatives (most ETFs). Selecting a holding on the Portfolio page's own
+derivatives (most ETFs). Selecting a holding on My Holdings' own
 table (see below) and opening it in Stock Detail or Options follows
 directly from this: any resolved holding is, by construction, one of the
 viewing user's own portfolio symbols, so it's always selectable on both.
@@ -796,8 +817,8 @@ except the Settings page's alert "Applies to" list.
 `is_etf` from `0015`) -- a momentum/dividend/PEG stock screener doesn't
 make much sense for a fund (those criteria are all meaningless for one),
 so real ETFs/funds (NIFTYBEES, GILT5YBEES, LIQUIDCASE, LTGILTCASE) are
-excluded from this one list specifically; Stock Detail, Options, and the
-Portfolio page still show them fine. `company_type` is one of `Equity`
+excluded from this one list specifically; Stock Detail, Options, and My
+Holdings still show them fine. `company_type` is one of `Equity`
 (default), `ETF`, `Index`, or `Fund` (reserved, no rows yet); the
 screener view only ever shows `Equity` rows, so `Index` (NIFTY,
 BANKNIFTY, SENSEX -- seeded by `0018` so Dhan-synced index option
@@ -813,7 +834,7 @@ Indian-listed ETFs (it returns `"EQUITY"` for every one of these). See
 *today's* snapshot row per symbol even when today's price fetch failed,
 showing a blank "--" instead of the last known price. It now prefers the
 most recent row that actually has a price, falling back across days --
-the same resilience `get_latest_prices` (used by the Portfolio page)
+the same resilience `get_latest_prices` (used by My Holdings/My Trades)
 already had. The Dashboard (`pages/1_Dashboard.py`) flags exactly which
 rows are showing a fallback price: it compares each row's
 `snapshot_date` to the newest `snapshot_date` seen anywhere in that
@@ -849,31 +870,76 @@ the Options screen's Futures table -- click a row in either one to select
 it (the checkbox on the left) and two buttons appear below that table:
 "Open in Stock Detail" and "Open in Options" for that stock.
 
-**Trades (My Positions grouping).** Every position leg belongs to exactly
-one Trade, shown as a "Trade ID" column and summarized in a small **Trades**
-table above the detailed positions table (leg count, symbols involved,
-summed P&L). By default, one Trade per underlying symbol (Trade ID = the
-symbol itself, or the raw instrument string for a still-undecoded leg) --
-`portfolio_service.assign_trade_ids`. You can select two or more legs in
-the positions table (multi-row selection, same checkboxes as the holdings
-tables) and either **combine** them into a new or existing named Trade
-(e.g. "NIFTY Aug Iron Condor" spanning legs from different underlyings) or
-**split** selected legs back out to their own default per-symbol Trade.
-This manual grouping is stored in `portfolio_trade_groups` (migration
-`0020`), keyed by each leg's own `(portfolio_name, broker, raw_name)` --
-the exact instrument string a broker's export already gives one specific
-contract -- rather than any `portfolio_positions` row id. That's
-deliberate: `replace_broker_positions` fully deletes and reinserts a
-broker's positions on every upload/sync, so a grouping keyed to an
-ephemeral row id would be wiped on the very next refresh; keyed to
-`raw_name` instead, it survives every future refresh, re-upload, or Dhan
-"Sync now" the same way a saved `broker_connections` row already survives
-a holdings re-upload. One caveat: if a broker ever changes how it formats
-`raw_name` for the same contract (or the same portfolio/broker pair is
-later synced from a different source), a previously grouped leg's override
-simply stops matching anything and silently falls back to its default
-per-symbol Trade -- nothing breaks, but the grouping needs to be redone for
-that leg.
+### My Trades (`pages/7_My_Trades.py`) + Analyse Trade (`pages/10_Analyse_Trade.py`)
+
+My Trades groups holdings *and* F&O positions sharing an underlying into
+one **Trade**, unlike My Holdings/My Positions, which each show their own
+un-grouped rows. Every leg (a holding or a position row, *unmerged* --
+per-broker, same natural identity as `portfolio_trade_groups`' key, not
+My Holdings' cross-broker `merge_holdings`) is assigned a `trade_id`
+(`portfolio_service.assign_trade_ids`, unchanged from before -- it only
+touches symbol/raw_name/broker, so it works identically for holding legs
+and position legs) and grouped into three tables:
+
+- **Stock Trades** -- every leg whose underlying resolves to
+  `company_type = Equity` (or an unresolved/unknown symbol, same fallback
+  My Holdings' old ETF/Stocks split used).
+- **Index Trades** -- every leg whose underlying resolves to
+  `ETF`/`Fund`/`Index`.
+- **Other Trades** -- a leg with no resolved symbol at all (an undecoded
+  F&O contract, or an unmatched holding), or a *manually merged* Trade
+  whose legs' underlyings don't all agree on one bucket. Present even
+  when empty, as a placeholder for the case above.
+
+Each table shows **Underlying Instrument**, **Trade Type** (defaults to
+"Trade"), **Legs**, and **Total P&L** (summed over the trade's own priced
+legs). Select a row and click "Analyse Trade" to open that Trade's detail
+page (`st.session_state["analyse_trade_id"]`/`["analyse_trade_portfolio"]`
++ `st.switch_page` -- Analyse Trade is registered in `app.py` with
+`st.Page(..., visibility="hidden")`, so it's reachable this way but never
+appears as its own sidebar link). There you can:
+
+- See every leg in the Trade (type, broker, instrument, expiry/strike/
+  option type where applicable, qty, avg price, LTP, P&L).
+- **Correct the underlying, or rename the Trade Type.** Both are free
+  text, not constrained to a known symbol or a fixed list -- e.g.
+  correcting a resolved "Tata Motors" to the real post-demerger
+  underlying "Tata Motors Passenger Vehicle", or renaming "Trade" to
+  something meaningful like "Covered Call" or "Aug Iron Condor". Saved to
+  a new table, `portfolio_trade_meta` (migration `0021`), keyed by
+  `(portfolio_name, trade_id)` -- a different grain from
+  `portfolio_trade_groups`' per-*leg* key, since a label/type applies to
+  the whole Trade, not one leg. Leaving the underlying field unchanged
+  from its computed default doesn't write an override -- only an actual
+  correction is stored.
+- **Merge** other Trades into this one (multiselect of this portfolio's
+  other Trade IDs), or **split** selected legs out of this Trade -- either
+  back to their own default per-underlying Trade, or into a brand-new
+  named Trade ID. Both actions reassign the affected legs'
+  `(broker, raw_name) -> trade_id` mapping via
+  `portfolio_repo.set_trade_group`/`clear_trade_group_overrides`, the
+  same `portfolio_trade_groups` mechanism (migration `0020`) this app
+  already used for F&O-only Trade grouping before My Trades existed --
+  now applied uniformly to holdings and positions alike.
+
+Both `portfolio_trade_groups` and `portfolio_trade_meta` are keyed by
+natural identity (a leg's own `(portfolio_name, broker, raw_name)`, or a
+Trade's own `(portfolio_name, trade_id)`) rather than any database row id
+-- deliberate, since `replace_broker_holdings`/`replace_broker_positions`
+fully delete and reinsert a broker's rows on every upload/sync, so a
+grouping/label keyed to an ephemeral row id would be wiped on the very
+next refresh. Two related caveats worth knowing: (1) if a broker ever
+changes how it formats `raw_name` for the same contract (or the
+portfolio/broker pair is later synced from a different source), a
+previously grouped leg's override simply stops matching anything and
+silently falls back to its default per-underlying Trade -- nothing
+breaks, but the grouping needs to be redone for that leg; (2) if a Trade
+is renamed via merge (its `trade_id` changes to the target Trade's id),
+any `portfolio_trade_meta` row for the *old* `trade_id` is left behind
+unused -- no automatic carry-forward, since the target Trade already has
+its own (possibly already-customized) label/type and silently overwriting
+it would be more surprising than a clean "re-enter it if you still want
+it".
 
 ## Docker
 

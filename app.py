@@ -11,7 +11,11 @@ pages = [
     st.Page("pages/1_Dashboard.py", title="Screener", default=True),
     st.Page("pages/2_Stock_Detail.py", title="Equity"),
     st.Page("pages/5_Options.py", title="Options"),
-    st.Page("pages/6_Portfolio.py", title="My Portfolio"),
+    st.Page("pages/6_My_Broker.py", title="My Broker"),
+    st.Page("pages/7_My_Trades.py", title="My Trades"),
+    st.Page("pages/8_My_Holdings.py", title="My Holdings"),
+    st.Page("pages/9_My_Positions.py", title="My Positions"),
+    st.Page("pages/10_Analyse_Trade.py", title="Analyse Trade", visibility="hidden"),
     st.Page("pages/4_Settings.py", title="Settings"),
 ]
 st.navigation(pages).run()

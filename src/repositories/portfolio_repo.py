@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from supabase import Client
 
-from src.models.portfolio import BrokerConnection, PortfolioHolding, PortfolioPosition, PortfolioTradeGroup
+from src.models.portfolio import BrokerConnection, PortfolioHolding, PortfolioPosition, PortfolioTradeGroup, PortfolioTradeMeta
 
 
 def list_holdings(client: Client, user_id: str) -> list[PortfolioHolding]:
@@ -58,12 +58,13 @@ def replace_broker_holdings(
 def delete_portfolio(client: Client, user_id: str, portfolio_name: str) -> None:
     """Permanently deletes every row for (user_id, portfolio_name) --
     every broker's holdings, positions, saved API connection, and manual
-    Trade grouping within it. Used by the Portfolio page's "Delete this
-    portfolio" control; every other portfolio is untouched."""
+    Trade grouping/metadata within it. Used by the My Broker page's
+    "Delete this portfolio" control; every other portfolio is untouched."""
     client.table("portfolio_holdings").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
     client.table("portfolio_positions").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
     client.table("broker_connections").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
     client.table("portfolio_trade_groups").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
+    client.table("portfolio_trade_meta").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
 
 
 def list_positions(client: Client, user_id: str) -> list[PortfolioPosition]:
@@ -182,3 +183,34 @@ def clear_trade_group_overrides(client: Client, user_id: str, portfolio_name: st
             .eq("raw_name", raw_name)
             .execute()
         )
+
+
+def list_trade_meta(client: Client, user_id: str) -> list[PortfolioTradeMeta]:
+    """Every trade-level underlying-label/trade-type override across every
+    one of the user's portfolios -- same shape as list_trade_groups, but
+    keyed by (portfolio_name, trade_id) rather than a leg's (broker,
+    raw_name). A trade with no row here uses the defaults: the
+    auto-computed underlying label and trade_type "Trade" -- see
+    src.services.portfolio_service.group_into_trades."""
+    resp = client.table("portfolio_trade_meta").select("*").eq("user_id", user_id).execute()
+    return [PortfolioTradeMeta.model_validate(r) for r in (resp.data or [])]
+
+
+def set_trade_meta(
+    client: Client, user_id: str, portfolio_name: str, trade_id: str, *, underlying_label: str | None, trade_type: str
+) -> None:
+    """Saves (upserts) one trade's underlying label / trade type override
+    -- the Analyse Trade page's edit form. `underlying_label=None` clears
+    back to the auto-computed default (still writes a row, so a
+    previously-corrected label can be explicitly reset without leaving a
+    stale non-null value behind)."""
+    payload = [
+        {
+            "user_id": user_id,
+            "portfolio_name": portfolio_name,
+            "trade_id": trade_id,
+            "underlying_label": underlying_label,
+            "trade_type": trade_type,
+        }
+    ]
+    client.table("portfolio_trade_meta").upsert(payload, on_conflict="user_id,portfolio_name,trade_id").execute()

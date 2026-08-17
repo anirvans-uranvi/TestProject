@@ -107,7 +107,11 @@ pages/
   2_Stock_Detail.py               Price/volume/dividend charts, scorecard, per-stock alerts -- sidebar label "Equity"
   4_Settings.py                    Per-user thresholds, alert CRUD + notification history, theme, change password, sign out
   5_Options.py                     F&O: futures term structure + 5% CSP/CC breakdown per stock
-  6_Portfolio.py                    Upload Zerodha/Dhan holdings + F&O positions -- sidebar label "My Portfolio"
+  6_My_Broker.py                    Upload/connect Zerodha/Dhan holdings + F&O positions, create/delete portfolios
+  7_My_Trades.py                     Holdings + positions grouped by underlying into Stock/Index/Other Trades
+  8_My_Holdings.py                   Equity holdings, ETFs & Mutual Funds / Stocks split, CC ROI columns
+  9_My_Positions.py                  Flat per-leg F&O positions table, no grouping
+  10_Analyse_Trade.py                 One Trade's legs -- correct underlying/trade type, merge/split (hidden page)
 src/
   config.py                       Pydantic Settings, reads .env
   models/                          Pydantic domain models + enums
@@ -170,14 +174,15 @@ three `Index` rows, and redefines `latest_screener_view` a third time;
 - `user_positions` — entry/target/stop-loss/notes per symbol
 - `alerts` — alert configs
 - `notification_log` — alert-fired history, deduped via a unique `dedupe_key`
-- `portfolio_holdings` — broker-CSV-uploaded holdings (migration `0012`, `portfolio_name` added in `0014`), keyed `(user_id, portfolio_name, broker, raw_name)` -- a user can maintain multiple independently-named portfolios that all coexist. `symbol` is nullable and deliberately **not** FK'd to `companies` -- a resolved symbol may not exist there yet (an ETF/fund or non-Nifty50 stock the screener doesn't otherwise track); see the My Portfolio section below for how it gets registered.
-- `portfolio_positions` — broker-CSV-uploaded F&O positions (migration `0016`), same keying/RLS shape as `portfolio_holdings`. `symbol`/`expiry_date`/`strike_price`/`option_type` are nullable together (an undecoded instrument format), and `qty` keeps its broker-reported sign (negative = short). See the My Portfolio section's Positions subsection.
-- `broker_connections` — saved Dhan API credentials per `(user_id, portfolio_name, broker)` (migration `0017`), letting a portfolio sync holdings/positions directly from Dhan's API instead of a CSV upload. `access_token` is stored as entered, protected only by this table's own RLS policy -- no application-level encryption. See the My Portfolio section's "Connect Dhan account" subsection.
-- `portfolio_trade_groups` — manual "Trade" grouping overrides for F&O position legs (migration `0020`), keyed `(user_id, portfolio_name, broker, raw_name)` -- the leg's own natural identity, not a `portfolio_positions` row id, so it survives that table's delete-then-insert replace semantics. See the My Portfolio section's "Trades" subsection.
+- `portfolio_holdings` — broker-CSV-uploaded holdings (migration `0012`, `portfolio_name` added in `0014`), keyed `(user_id, portfolio_name, broker, raw_name)` -- a user can maintain multiple independently-named portfolios that all coexist. `symbol` is nullable and deliberately **not** FK'd to `companies` -- a resolved symbol may not exist there yet (an ETF/fund or non-Nifty50 stock the screener doesn't otherwise track); see the Portfolio pages section below for how it gets registered.
+- `portfolio_positions` — broker-CSV-uploaded F&O positions (migration `0016`), same keying/RLS shape as `portfolio_holdings`. `symbol`/`expiry_date`/`strike_price`/`option_type` are nullable together (an undecoded instrument format), and `qty` keeps its broker-reported sign (negative = short). See the Portfolio pages section's My Positions subsection.
+- `broker_connections` — saved Dhan API credentials per `(user_id, portfolio_name, broker)` (migration `0017`), letting a portfolio sync holdings/positions directly from Dhan's API instead of a CSV upload. `access_token` is stored as entered, protected only by this table's own RLS policy -- no application-level encryption. See the Portfolio pages section's "Connect Dhan account" subsection.
+- `portfolio_trade_groups` — manual "Trade" grouping overrides for one holding or F&O position leg (migration `0020`), keyed `(user_id, portfolio_name, broker, raw_name)` -- the leg's own natural identity, not a `portfolio_holdings`/`portfolio_positions` row id, so it survives those tables' delete-then-insert replace semantics. See the Portfolio pages section's My Trades subsection.
+- `portfolio_trade_meta` — trade-*level* underlying-label/trade-type overrides (migration `0021`), keyed `(user_id, portfolio_name, trade_id)` -- a different grain from `portfolio_trade_groups` above (many legs share one `trade_id`). See the Portfolio pages section's My Trades subsection.
 
 Two generated helpers, defined in `0003_views_functions.sql` (and patched
 in `0004`):
-- `latest_screener_view` — one joined row per current constituent (companies + its latest daily_screener_snapshot), plus (as of `0013`) every symbol the *viewing* user holds in their own `portfolio_holdings`, filtered (as of `0018`, originally `0015`'s `where not is_etf`) to `company_type = 'Equity'` -- excluding ETF/Index/Fund rows by construction rather than a separate flag per category. This is what the Dashboard queries in a single call instead of joining client-side. `0004` added `coalesce(status, 'unavailable')` / `coalesce(data_quality, '{}')` here because a constituent with no snapshot yet would otherwise return `NULL` for those columns, which fails Pydantic validation on the `ScreenerRow` model. `0006` added `week_52_high`/`week_52_low`/`criterion_52w_high`/`criterion_52w_low` — **a real deploy-time error hit here**: `create or replace view` can only *append* new output columns; inserting them positionally in the middle of the existing `select` list (as the first draft of `0006` did) makes Postgres think you're renaming the columns that got pushed down a slot, and it fails with `42P16: cannot change name of view column ... HINT: Use ALTER VIEW ... RENAME COLUMN ... instead`. The fix is to always append new columns at the very end of the `select` list in any future `create or replace view` migration, never insert them mid-list — column *order* doesn't matter to the app since every read is by name (`ScreenerRow.model_validate(dict)`), so this costs nothing. `0013` made two further changes, both **real production bugs found after the Portfolio feature shipped** (see the My Portfolio section's "Screener fallback" note below for the full story): the per-symbol lateral join now prefers the most recent snapshot row that actually has a price (falling back across days when today's fetch failed) instead of always taking literally the latest date regardless of whether it has data, and the join went from `nifty50_constituents` inner-join to `left join ... where nc.is_current or exists (select 1 from portfolio_holdings where symbol = c.symbol and user_id = auth.uid())` — `security_invoker = true` means `auth.uid()` here is the actual querying user, so this stays correctly scoped per user (reinforced by `portfolio_holdings`' own RLS policy on top).
+- `latest_screener_view` — one joined row per current constituent (companies + its latest daily_screener_snapshot), plus (as of `0013`) every symbol the *viewing* user holds in their own `portfolio_holdings`, filtered (as of `0018`, originally `0015`'s `where not is_etf`) to `company_type = 'Equity'` -- excluding ETF/Index/Fund rows by construction rather than a separate flag per category. This is what the Dashboard queries in a single call instead of joining client-side. `0004` added `coalesce(status, 'unavailable')` / `coalesce(data_quality, '{}')` here because a constituent with no snapshot yet would otherwise return `NULL` for those columns, which fails Pydantic validation on the `ScreenerRow` model. `0006` added `week_52_high`/`week_52_low`/`criterion_52w_high`/`criterion_52w_low` — **a real deploy-time error hit here**: `create or replace view` can only *append* new output columns; inserting them positionally in the middle of the existing `select` list (as the first draft of `0006` did) makes Postgres think you're renaming the columns that got pushed down a slot, and it fails with `42P16: cannot change name of view column ... HINT: Use ALTER VIEW ... RENAME COLUMN ... instead`. The fix is to always append new columns at the very end of the `select` list in any future `create or replace view` migration, never insert them mid-list — column *order* doesn't matter to the app since every read is by name (`ScreenerRow.model_validate(dict)`), so this costs nothing. `0013` made two further changes, both **real production bugs found after the Portfolio feature shipped** (see the Portfolio pages section's "Screener fallback" note below for the full story): the per-symbol lateral join now prefers the most recent snapshot row that actually has a price (falling back across days when today's fetch failed) instead of always taking literally the latest date regardless of whether it has data, and the join went from `nifty50_constituents` inner-join to `left join ... where nc.is_current or exists (select 1 from portfolio_holdings where symbol = c.symbol and user_id = auth.uid())` — `security_invoker = true` means `auth.uid()` here is the actual querying user, so this stays correctly scoped per user (reinforced by `portfolio_holdings`' own RLS policy on top).
 - `get_classification_history(symbol, days)` — a SQL function returning one symbol's snapshot history, used by the Stock Detail status-over-time chart.
 
 Migration `0007` adds two more views on the same `DISTINCT ON` pattern:
@@ -325,7 +330,7 @@ without needing this treatment.
 - **`market_calendar.py`** — NSE trading-day/market-state logic. The holiday list (`NSE_HOLIDAYS`) is hardcoded **per calendar year** and needs a manual update every year; falls back to weekday-only for years not listed.
 - **`threshold_override.py`** — `daily_screener_snapshots` is computed server-side against *default* thresholds (the stable audit trail); a signed-in user can configure their own thresholds in Settings, so pages re-run `build_classification()` client-side against the row's stored raw inputs (which are threshold-independent) to reflect that choice, without a server-side recompute per user. Also recomputes `is_stale` from `data_quality.stale_minutes` against the user's own `stale_data_threshold_minutes` when available.
 - **`explanation.py`** — `explain_classification(row)` builds the plain-English sentence shown on Stock Detail, branching on which criteria passed/failed/are missing.
-- **`portfolio_service.py`** — CSV parsing for the two supported broker holdings exports (`parse_zerodha_csv`, `parse_dhan_csv`), name-to-symbol matching (`match_symbol`, normalized-substring containment against `companies.name`), cross-broker merging (`merge_holdings`), and live valuation (`compute_portfolio_view`); plus the two broker *positions* exports (`parse_zerodha_positions_csv`/`parse_zerodha_option_instrument`, `parse_dhan_positions_csv`/`parse_dhan_position_name`) and their own valuation (`compute_positions_view`, migration `0016`). `resolve_tracked_symbols` is the pure diff both refresh paths call to register newly-seen portfolio symbols; `looks_like_etf_name` is the real-display-name-based ETF/fund classifier those same paths apply to it before upserting (migration `0015`). See the My Portfolio section below and the Futures & Options section's "A follow-up problem 0013 itself introduced" paragraph for the full ETF story.
+- **`portfolio_service.py`** — CSV parsing for the two supported broker holdings exports (`parse_zerodha_csv`, `parse_dhan_csv`), name-to-symbol matching (`match_symbol`, normalized-substring containment against `companies.name`), cross-broker merging (`merge_holdings`), and live valuation (`compute_portfolio_view`); plus the two broker *positions* exports (`parse_zerodha_positions_csv`/`parse_zerodha_option_instrument`, `parse_dhan_positions_csv`/`parse_dhan_position_name`) and their own valuation (`compute_positions_view`, migration `0016`). `resolve_tracked_symbols` is the pure diff both refresh paths call to register newly-seen portfolio symbols; `looks_like_etf_name` is the real-display-name-based ETF/fund classifier those same paths apply to it before upserting (migration `0015`). See the Portfolio pages section below and the Futures & Options section's "A follow-up problem 0013 itself introduced" paragraph for the full ETF story.
 
 ## Notifications (`src/notifications/`)
 
@@ -466,8 +471,8 @@ tables can gain those columns + a `greeks.py` later without reshaping.
 
 **Index F&O (migrations `0018_company_type.sql` / `0019_add_bankex.sql`)**
 — added so Dhan-synced index option positions
-(`pages/6_Portfolio.py`'s "Connect Dhan account") have real F&O data to
-fall back on for LTP instead of a blanket N/A (see the My Portfolio
+(`pages/6_My_Broker.py`'s "Connect Dhan account") have real F&O data to
+fall back on for LTP instead of a blanket N/A (see the Portfolio pages
 section's "Connect Dhan account" subsection). Four symbols are seeded
 into `companies` as `company_type = 'Index'`: `NIFTY`, `BANKNIFTY` (both
 NSE-listed), `SENSEX`, `BANKEX` (both BSE-listed -- `0019` added BANKEX
@@ -755,11 +760,25 @@ pages = [
     st.Page("pages/1_Dashboard.py", title="Screener", default=True),
     st.Page("pages/2_Stock_Detail.py", title="Equity"),
     st.Page("pages/5_Options.py", title="Options"),
-    st.Page("pages/6_Portfolio.py", title="My Portfolio"),
+    st.Page("pages/6_My_Broker.py", title="My Broker"),
+    st.Page("pages/7_My_Trades.py", title="My Trades"),
+    st.Page("pages/8_My_Holdings.py", title="My Holdings"),
+    st.Page("pages/9_My_Positions.py", title="My Positions"),
+    st.Page("pages/10_Analyse_Trade.py", title="Analyse Trade", visibility="hidden"),
     st.Page("pages/4_Settings.py", title="Settings"),
 ]
 st.navigation(pages).run()
 ```
+
+**`visibility="hidden"` on Analyse Trade** (confirmed supported in the
+installed Streamlit version, 1.59.1 -- `st.Page`'s own `visibility`
+parameter): the page is excluded from the sidebar nav menu but stays
+reachable via `st.switch_page`, which is exactly what My Trades needs --
+selecting a row and clicking "Analyse Trade" stashes
+`st.session_state["analyse_trade_id"]`/`["analyse_trade_portfolio"]` and
+calls `st.switch_page("pages/10_Analyse_Trade.py")`, landing on a real
+page (its own URL, its own script) that simply never appears as a 5th
+sidebar link alongside My Broker/My Trades/My Holdings/My Positions.
 
 This replaced the legacy `pages/`-directory auto-discovery convention
 (where the sidebar label and display order were both derived from each
@@ -798,7 +817,7 @@ page's own `st.set_page_config(page_title=..., page_icon=...)` call
 (browser-tab metadata) is unaffected too -- it's independent of `st.Page`'s
 `title=` (sidebar label).
 
-- **`1_Dashboard.py`** — loads `latest_screener_view` via `snapshot_repo.get_latest_screener()`, applies the signed-in user's thresholds via `threshold_override.apply_user_thresholds()`, renders metric cards (also usable as quick filters, wired through `st.session_state["status_filter"]`), sidebar filters, and the screener table. The Status sidebar filter is a `st.multiselect` over `ALL_STATUSES = ["Green", "Amber", "Red", "Unavailable"]` — `status_filter` is always a *list* (any combination, not one-or-all), and the final row filter is a single `df["status"].isin([...])`, so selecting all four is equivalent to no filter at all. Saved filter presets normalize old single-string `"status"` values (from before this was a multiselect) into a list on load for backward compatibility. The "Minimum dividend yield" / "Minimum PEG" sidebar filters default to `0.0`, **not** `user_settings.dividend_yield_threshold`/`peg_threshold` — they're a separate display filter from the criterion A/C pass/fail thresholds, and defaulting them to the threshold value silently hid every stock below it on first load (a real bug, since fixed). Keep these two concepts distinct if you touch this page: the Settings-page thresholds decide Green/Amber/Red/Unavailable; these sidebar inputs just additionally hide rows below a value the user dials in themselves, and should default to "show everything." Right after the title/disclaimer, `render_global_refresh_bar(client)` (`src/utils/refresh_bar.py`, see the Utils section below) renders the three on-demand refresh buttons — this used to be two Dashboard-only buttons hand-rolled in this file, now a shared component called identically from every page (Dashboard, Stock Detail, Options, My Portfolio, Settings), so refreshing data never requires navigating back here specifically. Below the title, a "Data sources" caption reads `get_settings().market_data_provider`/`fundamentals_provider` directly (e.g. "Stock prices: `yfinance`") and states the options/F&O source as a fixed string, "NSE + BSE Bhavcopy (end-of-day)" — there's no configurable F&O provider setting to read (`src/config.py` has no such field; F&O ingestion always means these two bhavcopy sources, see the Futures & Options section). The header's "Data freshness" line covers stock refresh only now (`last_fetch_at`, still needed for `get_market_state()`'s staleness check); the per-exchange F&O refresh timestamps live in the shared refresh bar's own captions instead of a Dashboard-only line. "Latest NSE Bhavcopy: <date>" / "Latest BSE Bhavcopy: <date>" are still Dashboard-specific, each from its own `fo_repo.get_latest_fo_trade_date(client, source_prefix=...)` call (`"nse_fo_bhavcopy"` / `"bse_fo_bhavcopy"` -- same `source`-prefix scoping the fo-refresh Edge Function's own watermark query uses, and for the same reason: NSE and BSE publish on the same trading days, so one combined "latest bhavcopy" figure couldn't tell you which exchange's file was actually newest, and a single shared line was exactly what made a real BSE-side false-success bug easy to miss -- see the Edge Functions section's "A third real bug, once BSE was added"). Each is deliberately **not** that exchange's own last-successful-fetch timestamp: a bhavcopy is published for a specific trading day and a run on a non-trading day finds nothing new, so a refresh can succeed today while the loaded data is still from a prior session -- these lines surface that distinction. Wrapped in the same `except APIError: None` degrade as the rest of this page's optional F&O reads, for a deployment that hasn't applied migration `0007` yet.
+- **`1_Dashboard.py`** — loads `latest_screener_view` via `snapshot_repo.get_latest_screener()`, applies the signed-in user's thresholds via `threshold_override.apply_user_thresholds()`, renders metric cards (also usable as quick filters, wired through `st.session_state["status_filter"]`), sidebar filters, and the screener table. The Status sidebar filter is a `st.multiselect` over `ALL_STATUSES = ["Green", "Amber", "Red", "Unavailable"]` — `status_filter` is always a *list* (any combination, not one-or-all), and the final row filter is a single `df["status"].isin([...])`, so selecting all four is equivalent to no filter at all. Saved filter presets normalize old single-string `"status"` values (from before this was a multiselect) into a list on load for backward compatibility. The "Minimum dividend yield" / "Minimum PEG" sidebar filters default to `0.0`, **not** `user_settings.dividend_yield_threshold`/`peg_threshold` — they're a separate display filter from the criterion A/C pass/fail thresholds, and defaulting them to the threshold value silently hid every stock below it on first load (a real bug, since fixed). Keep these two concepts distinct if you touch this page: the Settings-page thresholds decide Green/Amber/Red/Unavailable; these sidebar inputs just additionally hide rows below a value the user dials in themselves, and should default to "show everything." Right after the title/disclaimer, `render_global_refresh_bar(client)` (`src/utils/refresh_bar.py`, see the Utils section below) renders the three on-demand refresh buttons — this used to be two Dashboard-only buttons hand-rolled in this file, now a shared component called identically from every page (Dashboard, Stock Detail, Options, My Broker, My Trades, My Holdings, My Positions, Settings), so refreshing data never requires navigating back here specifically. Below the title, a "Data sources" caption reads `get_settings().market_data_provider`/`fundamentals_provider` directly (e.g. "Stock prices: `yfinance`") and states the options/F&O source as a fixed string, "NSE + BSE Bhavcopy (end-of-day)" — there's no configurable F&O provider setting to read (`src/config.py` has no such field; F&O ingestion always means these two bhavcopy sources, see the Futures & Options section). The header's "Data freshness" line covers stock refresh only now (`last_fetch_at`, still needed for `get_market_state()`'s staleness check); the per-exchange F&O refresh timestamps live in the shared refresh bar's own captions instead of a Dashboard-only line. "Latest NSE Bhavcopy: <date>" / "Latest BSE Bhavcopy: <date>" are still Dashboard-specific, each from its own `fo_repo.get_latest_fo_trade_date(client, source_prefix=...)` call (`"nse_fo_bhavcopy"` / `"bse_fo_bhavcopy"` -- same `source`-prefix scoping the fo-refresh Edge Function's own watermark query uses, and for the same reason: NSE and BSE publish on the same trading days, so one combined "latest bhavcopy" figure couldn't tell you which exchange's file was actually newest, and a single shared line was exactly what made a real BSE-side false-success bug easy to miss -- see the Edge Functions section's "A third real bug, once BSE was added"). Each is deliberately **not** that exchange's own last-successful-fetch timestamp: a bhavcopy is published for a specific trading day and a run on a non-trading day finds nothing new, so a refresh can succeed today while the loaded data is still from a prior session -- these lines surface that distinction. Wrapped in the same `except APIError: None` degrade as the rest of this page's optional F&O reads, for a deployment that hasn't applied migration `0007` yet.
 
   **Metric cards**: seven buttons in a row (`st.columns(7)`) — `Total stocks`, `🟢 Green`/`🟠 Amber`/`🔴 Red` (each sets the status filter to just that one status), and `Yield > threshold`/`All momentum +ve`/`PEG ≤ threshold` (each sets `criterion_filter` instead). There is deliberately no `Unavailable` button — the status itself is still fully selectable via the sidebar's Status multiselect and still counts toward `ALL_STATUSES`, but it wasn't considered a useful one-click quick filter and was dropped to declutter the row (a purely cosmetic trim, not a behavior change to filtering).
 
@@ -827,22 +846,35 @@ page's own `st.set_page_config(page_title=..., page_icon=...)` call
   - **5% CSP** is a **near/next/far month table** (`fo_service.csp_5pct_for_rows`, one call per expiry — the same term-structure shape the Futures section above already uses), columns Term / Expiry / Spot / Strike / Put Premium / **Trade Date** / 5% CSP. The near row reuses the already-fetched `chain_rows` when the expiry selector above happens to be on the near expiry; next/far are fetched separately via `fo_repo.get_option_chain`. The Trade Date column is what actually surfaces a stale quote to the user — see `_freshest_rows`'s docstring above for why a strike's "latest" row can silently be weeks old.
   - **5% CC** is also a **near/next/far month table** (`fo_service.cc_5pct_for_rows`, one call per expiry, mirroring 5% CSP's own loop exactly), columns Term / Expiry / Strike (lowest ≥5% above spot) / Premium / Trade Date / **Net Investment** / 5% CC / **Assignment Profit** (`(strike / net_investment - 1) * 100`, `None`/"N/A" if `net_investment` is zero or negative -- premium ≥ spot). This originally only showed the nearest expiry as a stat-grid breakdown (via `fo_service.cc_5pct_map`, which itself just restricts to the nearest expiry and delegates to `cc_5pct_for_rows`) -- changed on request to match 5% CSP's table shape once a live user actually wanted to see next/far month CC yields too, not just the near month `dashboard_fo_metrics` already caches for the Dashboard. "Net Investment" and "Assignment Profit" only appear here, not on the Dashboard, which only ever caches/displays `cc_pct`.
   Both loops share one `_chain_rows_for(exp)` helper (reuses the already-fetched `chain_rows` when `exp` happens to be the expiry selected above, otherwise fetches that expiry's chain separately) and both use the cash-market spot for every expiry, not just the near one -- so **every** row of both tables, not just the near-month one, matches what the Dashboard would compute for that same expiry. Shaping is done by `fo_service.option_chain_summary`/`futures_term_structure`/`csp_5pct_for_rows`/`cc_5pct_for_rows`, not in the page.
-  - **Portfolio CC** -- a third near/next/far table, shown *only* when the signed-in user actually holds this stock in at least one of their own saved portfolios (`portfolio_repo.list_holdings(client, user_id)`, filtered to this symbol; silently absent otherwise, unlike 5% CSP/CC above which always render). Reuses the exact same per-holding formula behind the My Portfolio page's own "CC ROI"/"CC Assignment ROI" columns (`fo_service.covered_call_for_holding` -- avg-buy-price-vs-LTP-dependent target, nearest-strike, not 5% CC's fixed-5%-OTM floor filter), so the numbers here always agree with that page for this exact stock. If the same portfolio name holds this symbol across multiple brokers, `portfolio_service.merge_holdings` combines them into one row first (same as the My Portfolio page); if the stock is held in more than one *named* portfolio, one table renders per portfolio (each with its own qty/avg price subheading), since different portfolios can have different cost bases and thus different target strikes. Columns: Term / Expiry / Strike / Premium / Trade Date / Invested Amount / CC ROI / CC Assignment ROI.
+  - **Portfolio CC** -- a third near/next/far table, shown *only* when the signed-in user actually holds this stock in at least one of their own saved portfolios (`portfolio_repo.list_holdings(client, user_id)`, filtered to this symbol; silently absent otherwise, unlike 5% CSP/CC above which always render). Reuses the exact same per-holding formula behind My Holdings' own "CC ROI"/"CC Assignment ROI" columns (`fo_service.covered_call_for_holding` -- avg-buy-price-vs-LTP-dependent target, nearest-strike, not 5% CC's fixed-5%-OTM floor filter), so the numbers here always agree with that page for this exact stock. If the same portfolio name holds this symbol across multiple brokers, `portfolio_service.merge_holdings` combines them into one row first (same as My Holdings); if the stock is held in more than one *named* portfolio, one table renders per portfolio (each with its own qty/avg price subheading), since different portfolios can have different cost bases and thus different target strikes. Columns: Term / Expiry / Strike / Premium / Trade Date / Invested Amount / CC ROI / CC Assignment ROI.
 
   **A real bug found here, right after this section first shipped**: the CSP/CC breakdown's spot value (CC was still "ITM PMCC" at the time, but the bug and fix applied identically) was initially taken from `option_chain_summary(near_chain_rows)["spot"]` — the F&O bhavcopy's own `underlying_price` column — while the Dashboard's two columns (now the `dashboard_fo_metrics` cache, see above) use the cash-market `latest_price` from `latest_screener_view`. These two prices aren't the same value, so this page's numbers didn't match the Dashboard's for the same stock (confirmed live: ADANIENT showed 5% CSP = 0.54% on the Dashboard but 0.45% here, since a different spot picked a different nearest-5%-below strike, 3040 vs 3020). Fixed by fetching `snapshot_repo.get_latest_screener_row(client, symbol).latest_price` and using that as the spot for both calculations here too, instead of the chain's `underlying_price` — the top-of-page "Spot"/"ATM strike" summary tiles are unaffected and deliberately still use the chain's own `underlying_price` (correct for highlighting the ATM row in the actual option-chain data being displayed there). If you add another F&O-derived calculation to either screen, source spot the same way this one now does — from the screener, not the chain — to keep the two screens' numbers in agreement.
 
-- **`6_Portfolio.py`** — sidebar label "My Portfolio". See the dedicated section below for the full upload → match → save → refresh-registration pipeline, and for the multiple-coexisting-portfolios design (`portfolio_name`, migration `0014`). On the page itself: `_load_holdings`/`_load_positions` read every one of the signed-in user's saved rows across every portfolio and broker; one `st.tabs` entry is rendered per distinct `portfolio_name` (union of holdings' and positions' names — a portfolio can exist on positions alone), each showing a **My Holdings** table and a **My Positions** table, scoping `portfolio_service.merge_holdings`/`compute_portfolio_view` (LTP via `snapshot_repo.get_latest_prices`, a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why) and `compute_positions_view` to just that portfolio's own rows. Both tables are a plain `st.dataframe` — see below for why, and for how row selection (My Holdings only) replaced the per-row 🔍 button.
+- **`6_My_Broker.py` / `7_My_Trades.py` / `8_My_Holdings.py` / `9_My_Positions.py` / `10_Analyse_Trade.py`** — five pages (`10_Analyse_Trade.py` hidden from the sidebar, see the "Streamlit app" section above) replacing what used to be one combined `6_Portfolio.py` (sidebar label "My Portfolio", retired). See the dedicated Portfolio pages section below for the full upload → match → save → refresh-registration pipeline, the multiple-coexisting-portfolios design (`portfolio_name`, migration `0014`), and the My Trades/Analyse Trade grouping. Each page reads every one of the signed-in user's saved rows across every portfolio and broker via `src/utils/portfolio_page.py`'s shared cached loaders; My Holdings/My Positions/My Trades each render one `st.tabs` entry per distinct `portfolio_name` (union of holdings' and positions' names — a portfolio can exist on positions alone) scoping `portfolio_service.merge_holdings`/`compute_portfolio_view` (LTP via `snapshot_repo.get_latest_prices`, a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why) and `compute_positions_view` to just that portfolio's own rows. Every table on these pages is a plain `st.dataframe` — see below for why, and for how row selection replaced the per-row 🔍 button.
 
-## My Portfolio
+## Portfolio pages
 
-`pages/6_Portfolio.py` shows the signed-in user's own broker holdings and
-F&O positions (not the Nifty50 screener universe) under "My Holdings" and
-"My Positions" respectively -- holdings valued live against the app's own
-market data, positions valued against each file's own LTP (see the
-Positions subsection near the end of this section for why). This is a
-separate, self-contained subsystem from the screener, similar in spirit
-to the F&O section above: its own tables, its own service module, its
-own refresh-pipeline hook — nothing here changes `nifty50_constituents`,
+The signed-in user's own broker holdings and F&O positions (not the
+Nifty50 screener universe) span five pages -- `pages/6_My_Broker.py`
+(upload/connect/create/delete), `pages/7_My_Trades.py` (holdings +
+positions grouped by underlying into Trades), `pages/8_My_Holdings.py`
+(equity holdings, valued live against the app's own market data),
+`pages/9_My_Positions.py` (flat per-leg F&O positions, valued against
+each file's own LTP -- see the Positions subsection near the end of this
+section for why), and `pages/10_Analyse_Trade.py` (one Trade's detail,
+registered `visibility="hidden"` in `app.py` so it's reachable via
+`st.switch_page` but never shows as its own sidebar link). This used to
+be one combined page (`pages/6_Portfolio.py`, retired) -- most of the
+mechanics below are unchanged, just relocated; the split itself, and the
+new My Trades/Analyse Trade grouping, are covered in their own
+subsections further down. All five pages share one module,
+`src/utils/portfolio_page.py` (cached `@st.cache_data` loaders, the
+`portfolio_cache_bust` counter, `build_trade_legs`) -- since these are
+plain module-level functions rather than redefined per page, a cache hit
+in one page is a cache hit in another. This is a separate,
+self-contained subsystem from the screener, similar in spirit to the F&O
+section above: its own tables, its own service module, its own
+refresh-pipeline hook — nothing here changes `nifty50_constituents`,
 `latest_screener_view`, or any existing page.
 
 **Schema (migrations `0012_portfolio_holdings.sql` and
@@ -865,8 +897,9 @@ per distinct portfolio without colliding. `PortfolioHolding` gained a
 required `portfolio_name: str` field to match; a deployment that's
 applied `0012` but not yet `0014` fails **every** row with a Pydantic
 `ValidationError` (`portfolio_name` missing), not a `postgrest.APIError`
-— `pages/6_Portfolio.py` catches both around `_load_holdings` and shows
-one combined "apply 0012 and 0014, in that order" message (confirmed live
+— every Portfolio page catches both around its own `load_holdings` call
+(`src/utils/portfolio_page.py`) and shows one combined "apply 0012 and
+0014, in that order" message (confirmed live
 against the deployed project, which had `0012` but not yet `0014` at the
 time this shipped: `list_holdings` raised exactly this `ValidationError`,
 not an `APIError`).
@@ -885,26 +918,31 @@ user's *entire* portfolio (every broker) before inserting the fresh
 upload, which was corrected on request — creating a new portfolio must
 never touch any existing one.
 
-`pages/6_Portfolio.py` renders one `st.tabs` entry per distinct
+`pages/6_My_Broker.py` renders one `st.tabs` entry per distinct
 `portfolio_name` the user has (`sorted({h.portfolio_name for h in
-saved_holdings})`), each showing that portfolio's own holdings table
-(`_render_portfolio_tab`) plus its own upload section scoped to that
-`portfolio_name` — uploading a broker's file there only ever calls
-`replace_broker_holdings` for *this* `(portfolio_name, broker)` pair, so
-every other tab is untouched no matter what you upload. A permanent
-"+ New portfolio" tab at the end takes a portfolio name (`st.text_input`,
-defaulting to `f"Portfolio {len(portfolio_names) + 1}"` if left blank)
-and a broker; it refuses to proceed (shows `st.error`, no uploader) if
-the name collides with an existing tab, to avoid silently merging into
-what the user probably meant as a distinct portfolio. When the user has
-no portfolios at all yet, there's nothing to make tabs out of, so the
-page skips `st.tabs` entirely and renders the same name+broker+uploader
-creation flow directly. Both call sites share one `_render_upload_section()`
-helper for the parse → preview → manual-symbol-form → save sequence
+saved_holdings} | {p.portfolio_name for p in saved_positions})`), each
+showing that portfolio's own upload section (`_render_broker_tab`)
+scoped to that `portfolio_name` — uploading a broker's file there only
+ever calls `replace_broker_holdings`/`replace_broker_positions` for
+*this* `(portfolio_name, broker)` pair, so every other tab is untouched
+no matter what you upload. A permanent "+ New portfolio" tab at the end
+takes a portfolio name (`st.text_input`, defaulting to `f"Portfolio
+{len(portfolio_names) + 1}"` if left blank) and a broker; it refuses to
+proceed (shows `st.error`, no uploader) if the name collides with an
+existing tab, to avoid silently merging into what the user probably
+meant as a distinct portfolio. When the user has no portfolios at all
+yet, there's nothing to make tabs out of, so the page skips `st.tabs`
+entirely and renders the same name+broker+uploader creation flow
+directly. Every call site shares one `_render_upload_section()` helper
+for the parse → preview → manual-symbol-form → save sequence
 (parameterized by `portfolio_name`/`broker`/`key_prefix`/`save_label`, so
-the ~50 lines of shared logic isn't duplicated three times).
+the ~50 lines of shared logic isn't duplicated three times). **This
+tab-tracking/create/delete machinery lives only on My Broker** -- the
+other four Portfolio pages each render a plain, unkeyed `st.tabs(portfolio_names)`
+(no "+ New portfolio" tab, no active-tab tracking), since none of them
+can create or delete a portfolio.
 
-**Opening the tab you just acted on** (`st.tabs(..., key="portfolio_active_tab",
+**Opening the tab you just acted on** (`st.tabs(..., key="broker_active_tab",
 on_change="rerun")`): by default `st.tabs()` doesn't expose which tab is
 selected to server-side code at all, and a plain `st.rerun()` (e.g. right
 after a save) reset the view back to the first tab regardless of which
@@ -915,26 +953,26 @@ whichever tab was first alphabetically, not the new one. `key=` +
 enough that it wasn't available when this page was first written --
 worth checking `st.tabs()`'s own signature if this ever looks unsupported
 again) makes Streamlit track the active tab through
-`st.session_state["portfolio_active_tab"]`.
+`st.session_state["broker_active_tab"]`.
 
 **A second real bug, found immediately after the first fix**: the "+ New
 portfolio" save path's `on_saved` callback originally wrote
-`st.session_state["portfolio_active_tab"] = created_name` directly —
-which raised `StreamlitAPIException: st.session_state.portfolio_active_tab
-cannot be modified after the widget with key portfolio_active_tab is
+`st.session_state["broker_active_tab"] = created_name` directly —
+which raised `StreamlitAPIException: st.session_state.broker_active_tab
+cannot be modified after the widget with key broker_active_tab is
 instantiated` (confirmed live: creating "Portfolio 2" saved successfully,
 then crashed the very next line). The cause: `on_saved` runs from
 *inside* one of the tabs' content, which only executes *after*
-`st.tabs(..., key="portfolio_active_tab")` already ran earlier in that
+`st.tabs(..., key="broker_active_tab")` already ran earlier in that
 same script execution — Streamlit forbids writing to a widget's own
 `session_state` key once that widget has been instantiated in the
 current run, full stop, even from code that logically "belongs" to one
-of its children. The fix: never write `"portfolio_active_tab"` directly
+of its children. The fix: never write `"broker_active_tab"` directly
 from inside a tab. Instead, stash the request in a plain (non-widget)
-`"portfolio_pending_active_tab"` key and call `st.rerun()`; right before
+`"broker_pending_active_tab"` key and call `st.rerun()`; right before
 `st.tabs(...)` is instantiated on the *next* run — i.e. before it exists
 for that run — a short block pops the pending key and promotes it into
-`"portfolio_active_tab"` (empty string `""` means "clear", used by the
+`"broker_active_tab"` (empty string `""` means "clear", used by the
 delete path so a deleted portfolio's now-stale name doesn't linger and
 `st.tabs()` falls back to the first remaining tab; any other string
 means "select this one"). Reproduced and confirmed both the crash (a
@@ -946,7 +984,7 @@ every tab click, and only the open tab's own code actually runs) instead
 of every tab's content always computing regardless of visibility -- a
 reasonable trade since this page
 already reruns on every other interaction anyway, and it avoids
-computing every portfolio's LTP lookups on every load.
+computing every portfolio's upload-form state on every load.
 
 **A real bug found here**: right after successfully creating a portfolio
 from the "+ New portfolio" tab, that same tab immediately (and on the
@@ -963,19 +1001,21 @@ render now legitimately included it too — the collision check
 portfolio" call site passes `on_saved=lambda:
 st.session_state.pop("portfolio_new_name", None)`, so the field resets to
 blank on the next render instead of re-showing what was just created. The
-`_render_portfolio_tab()`/first-portfolio call sites don't need this —
+`_render_broker_tab()`/first-portfolio call sites don't need this —
 their name isn't user-editable text that could re-collide with itself.
 
 **Deleting a portfolio** (`portfolio_repo.delete_portfolio(client,
 user_id, portfolio_name)`) — an unconditional delete of every row for
-`(user_id, portfolio_name)`, every broker within it, leaving every other
-portfolio untouched. Rendered inside each tab as a collapsed
-`st.expander("🗑️ Delete \"<name>\"")` at the very bottom, below the
-upload section, so it's out of the way of the normal update flow: a
-warning, an `st.checkbox` the user must tick ("I understand -- permanently
-delete ..."), and an `st.button(..., disabled=not confirm)` that only
-becomes clickable once that box is checked -- a deliberate two-step
-confirmation, since there's no undo for this one.
+`(user_id, portfolio_name)`, every broker within it (plus every Trade
+grouping/metadata row -- `portfolio_trade_groups`/`portfolio_trade_meta`,
+see My Trades below), leaving every other portfolio untouched. Rendered
+inside each tab as a collapsed `st.expander("🗑️ Delete \"<name>\"")` at
+the very bottom, below the upload section, so it's out of the way of the
+normal update flow: a warning, an `st.checkbox` the user must tick ("I
+understand -- permanently delete ..."), and an `st.button(...,
+disabled=not confirm)` that only becomes clickable once that box is
+checked -- a deliberate two-step confirmation, since there's no undo for
+this one.
 
 **Two broker CSV formats, one broker-agnostic shape after parsing**
 (`src/services/portfolio_service.py`):
@@ -1201,7 +1241,7 @@ buy price, not just the spot price:
   symbol -- ETFs/funds, or a non-Nifty50 stock with no listed
   derivatives, like VAML).
 
-`pages/6_Portfolio.py` renders one shared "Covered call expiry" selectbox
+`pages/8_My_Holdings.py` renders one shared "Covered call expiry" selectbox
 above the tabs, applying uniformly across every portfolio. Its options
 are real expiry dates, not fixed "Near/Next/Far" labels: it unions
 `fo_repo.list_option_expiries(client, symbol)` across every symbol held
@@ -1258,7 +1298,7 @@ This was verified against real production data via Streamlit's
 browser tab reports `document.visibilityState === "hidden"`, and
 `st.dataframe`'s grid (glide-data-grid, canvas-based) never mounts a
 canvas at all on a hidden tab, so no click can land on it. `AppTest` sets
-`st.session_state["portfolio_table_<slug>"] = {"selection": {"rows": [i],
+`st.session_state["holdings_table_<slug>"] = {"selection": {"rows": [i],
 ...}}` directly (the same schema a real click produces) and reruns the
 script -- confirming `rows[i]["symbol"]` resolves to the right stock and
 the right button renders, without needing the canvas to paint.
@@ -1283,11 +1323,13 @@ option whose underlying only trades on BSE (never true for a Nifty50
 constituent, but possible for a portfolio-only stock), a strike/expiry
 this app hasn't ingested yet, or a plain CSV-parsing gap can all leave a
 decoded position's contract missing from that table, so a hard FK would
-be too strict. `pages/6_Portfolio.py` degrades gracefully (an `st.info`
-pointing at the migration, no `st.stop()`) if `portfolio_positions`
-doesn't exist yet — Holdings keeps working either way, unlike the
-holdings-table load itself, which does `st.stop()` if `0012`/`0014`
-aren't applied.
+be too strict. `pages/9_My_Positions.py` (and My Trades, which also reads
+positions) degrades gracefully (an `st.info` pointing at the migration,
+no `st.stop()`) if `portfolio_positions` doesn't exist yet -- unlike the
+holdings-table load, which every Portfolio page `st.stop()`s on if
+`0012`/`0014` aren't applied (there's nothing useful to show any of these
+pages without holdings at all, but a missing `portfolio_positions` table
+is a narrower, tolerable gap).
 
 **Two broker position-export formats, decoded to a common shape**
 (`src/services/portfolio_service.py`) — unlike holdings, *both* brokers'
@@ -1357,7 +1399,7 @@ fall back to this app's own EOD F&O data, including index options as of
 migration `0018`, when Dhan's own live quote is unavailable.)
 
 **Connect Dhan account (`broker_connections`, migration `0017`)** — an
-alternative to CSV upload, Dhan only. `pages/6_Portfolio.py` offers a
+alternative to CSV upload, Dhan only. `pages/6_My_Broker.py` offers a
 CSV-vs-API toggle whenever the selected broker is Dhan; picking "Connect
 Dhan account" saves a Client ID + Access Token (`upsert_broker_connection`)
 and a "Sync now" button drives the sync (`_sync_dhan`). This reuses
@@ -1437,13 +1479,14 @@ old enough to likely be expired.
 **Holdings split by `company_type` (ETFs & Mutual Funds vs Stocks)** — the
 old single "My Holdings" table became two, `_render_holdings_table` (a
 small helper factored out of what was previously an inline block in
-`_render_portfolio_tab`, so both tables share the exact same columns,
-`column_config`, and single-row-selection "Open in Stock Detail"/"Open in
-Options" behavior, just keyed with a different `key_suffix` so their
-widgets don't collide). The split itself is a pure filter over
-`companies.company_type` (loaded via the already-cached
-`_load_all_companies`, the same loader the Dhan CSV upload path already
-used for name-matching): `ETF`/`Fund` symbols go to "ETFs & Mutual Funds",
+`_render_holdings_tab` (`pages/8_My_Holdings.py`), so both tables share
+the exact same columns, `column_config`, and single-row-selection "Open
+in Stock Detail"/"Open in Options" behavior, just keyed with a different
+`key_suffix` so their widgets don't collide). The split itself is a pure
+filter over `companies.company_type` (loaded via the already-cached
+`src/utils/portfolio_page.py::load_all_companies`, the same loader the
+Dhan CSV upload path -- now `pages/6_My_Broker.py` -- already used for
+name-matching): `ETF`/`Fund` symbols go to "ETFs & Mutual Funds",
 everything else (`Equity`, `Index`, and any holding with no resolved
 symbol at all -- there's no company_type to check for one of those) goes
 to "Stocks". The Total Investment/Cur Val/P&L/P&L% stat grid above both
@@ -1498,43 +1541,107 @@ across separate amount/percent columns like P&L/P&L% -- deliberately
 different from that existing pair, since three periods as six columns
 would be repetitive.
 
-**Trades (`portfolio_trade_groups`, migration `0020`)** — F&O positions
-are grouped into "Trades" rather than listed as one flat table. The
-default grouping needs no stored state at all: `portfolio_service.
-assign_trade_ids` sets `trade_id = symbol or raw_name` for every leg with
-no override. A manual override — the user selecting two or more legs in
-the positions table (`selection_mode="multi-row"`, the same mechanism the
-holdings tables use for single-row selection) and clicking "Combine
-selected into this Trade" (a new or existing Trade ID) or "Split selected
-back to individual Trades" — is what actually needs persisting, and that's
-the one design decision worth explaining: **it's keyed by the leg's own
-`(portfolio_name, broker, raw_name)`, not by any `portfolio_positions` row
-id.** `replace_broker_positions` does a full delete-then-insert on every
-upload/sync (same as `replace_broker_holdings` always has), so a row id
-never survives a refresh — but `raw_name` is the exact instrument string a
-broker's export already gives one specific contract (Zerodha's
-tradingsymbol, Dhan's `Name`/`tradingSymbol`), and that string is stable
-across re-uploads of the same broker's data. Keying the override table to
-it instead of a row id means `portfolio_trade_groups` is simply never
-touched by `replace_broker_positions` at all — the exact same trick
-`broker_connections` already relies on to survive a holdings re-upload,
-just applied to a different table. `portfolio_repo.set_trade_group`
-upserts one row per selected leg (`on_conflict="user_id,portfolio_name,
-broker,raw_name"`); `clear_trade_group_overrides` deletes them, reverting
-to the default per-symbol grouping. Both are looped per-leg on the delete
-side rather than batched — selection sizes here are small (a handful of
-option legs, not thousands of rows), so simplicity won over a batched
-`.in_()` call that can't cleanly express a composite-key `OR` anyway.
+**My Trades (`pages/7_My_Trades.py`) + Analyse Trade (`pages/10_Analyse_Trade.py`)**
+— holdings and F&O positions sharing an underlying, grouped into "Trades".
+This used to be F&O-positions-only (the original `portfolio_trade_groups`
+"Trades" feature, migration `0020`); My Trades widens the same mechanism
+to holdings too and adds a real detail page instead of an inline
+combine/split control under the positions table.
 
-One sharp edge worth knowing, not a bug: if a broker ever changes how it
-formats `raw_name` for the same contract, or the same `(portfolio_name,
-broker)` pair starts being synced from a different source (e.g. switching
-a Dhan portfolio from CSV upload to "Connect Dhan account", which produces
-`raw_name` from `tradingSymbol` instead of the CSV's own `Name` column), a
-previously-grouped leg's override row simply stops matching any current
-position and that leg silently falls back to its default per-symbol
-Trade. Nothing errors or crashes; the manual grouping for that one leg
-just needs to be redone.
+`src/utils/portfolio_page.py::build_trade_legs(client, cache_bust,
+holdings_for_portfolio, positions_for_portfolio)` is the shared leg
+builder both `7_My_Trades.py` and `10_Analyse_Trade.py` call (so their
+grouping/labels never drift apart): holding rows are priced via
+`compute_portfolio_view` (called on the **unmerged** per-broker dicts,
+not `merge_holdings`'s cross-broker-combined rows -- Trades need leg-
+level identity, the same `(broker, raw_name)` natural key
+`portfolio_trade_groups` is keyed by) and re-tagged `leg_type="Holding"`
+by zipping the input list against `compute_portfolio_view`'s output rows
+(that function builds a fixed-key dict per row, so any caller-supplied
+extra key like `broker` doesn't survive through it and has to be
+reattached afterwards); position rows go through the existing
+`compute_positions_view`, which *does* pass extra keys through
+(`{**p, "pnl": ..., "pnl_pct": ...}`), so tagging `leg_type="Position"`
+before calling it is enough.
+
+`portfolio_service.classify_underlying_bucket(symbol, company_type_by_symbol)`
+decides which of the three tables a leg's underlying belongs in: `None`
+symbol → `"other"` (an undecoded F&O contract or unmatched holding --
+nothing to classify by); `ETF`/`Fund`/`Index` → `"index"`; anything else,
+including an unknown symbol → `"stock"` (mirrors the fallback the old
+combined page's `_is_etf_or_fund` helper used for the Holdings ETF/MF
+split). `portfolio_service.group_into_trades(legs, overrides, trade_meta,
+company_type_by_symbol)` assigns `trade_id` via `assign_trade_ids`
+(unchanged -- see above, it only ever touched symbol/raw_name/broker, so
+it already worked for holding legs and position legs alike), groups legs
+by it, and for each trade computes `bucket` (unanimous across the
+trade's own legs' `classify_underlying_bucket`, else `"other"` --
+deliberate: a trade mixing a stock leg and an index leg, via a manual
+merge, doesn't cleanly belong to either specific table), a default
+underlying label (sorted, `" + "`-joined distinct `symbol or raw_name`
+across the legs -- the same "Symbols" summary format the old Trades
+table used), and `leg_count`/`total_pnl` (summed over the trade's own
+priced legs). My Trades then just buckets the returned list into three
+tables by `bucket`.
+
+**`portfolio_trade_meta` (migration `0021`) — a new table, not an
+extension of `portfolio_trade_groups`.** The user asked My Trades to
+show a "Trade Type" (defaulting to "Trade", freely renameable) and to
+let the underlying itself be corrected (free text, not constrained to a
+known symbol -- e.g. a resolved "Tata Motors" corrected to the real
+post-demerger underlying "Tata Motors Passenger Vehicle"). Neither of
+these fits `portfolio_trade_groups`' key: that table is per-*leg*
+`(portfolio_name, broker, raw_name) -> trade_id`, but a label/type
+applies to the whole *trade*, so a second table keyed
+`(portfolio_name, trade_id) -> {underlying_label, trade_type}` was
+needed instead. `portfolio_repo.set_trade_meta` upserts one row (`on_conflict
+="user_id,portfolio_name,trade_id"`); `underlying_label=None` clears
+back to the auto-computed default while still writing a row (so a
+previously-corrected label can be explicitly reset). `10_Analyse_Trade.py`'s
+edit form only calls `set_trade_meta` with a non-`None` label when the
+edited text differs from `trade["default_underlying_label"]` -- leaving
+the field unchanged doesn't create an unnecessary override row.
+
+**Merge and split, generalized to holdings + positions.** Analyse Trade
+reuses the exact same `portfolio_repo.set_trade_group`/
+`clear_trade_group_overrides` calls the old Trades feature already had
+-- "Merge into this trade" (a multiselect of the portfolio's *other*
+`trade_id`s) collects every leg across the selected source trades and
+reassigns them all to the current trade's id; "Split" (multi-row-select
+over *this* trade's own legs table) either clears their override (back
+to the default per-underlying grouping) or assigns them a fresh
+`trade_id`. Same keying rationale as before: `(portfolio_name, broker,
+raw_name)` is a leg's natural identity, stable across
+`replace_broker_holdings`/`replace_broker_positions`'s full
+delete-then-insert on every upload/sync -- the exact same trick
+`broker_connections` already relies on to survive a holdings re-upload,
+now shared by two override tables instead of one.
+
+Two sharp edges worth knowing, neither a bug:
+1. If a broker ever changes how it formats `raw_name` for the same
+   contract, or the same `(portfolio_name, broker)` pair starts being
+   synced from a different source (e.g. switching a Dhan portfolio from
+   CSV upload to "Connect Dhan account", which produces `raw_name` from
+   `tradingSymbol` instead of the CSV's own `Name` column), a
+   previously-grouped leg's `portfolio_trade_groups` override row simply
+   stops matching any current leg and silently falls back to its default
+   per-underlying Trade. Nothing errors or crashes; the manual grouping
+   for that one leg just needs to be redone.
+2. If a trade is renamed via merge (its `trade_id` changes to the target
+   trade's id), any `portfolio_trade_meta` row for the *old* `trade_id`
+   is simply left behind, unused -- no automatic carry-forward. This is
+   deliberate, not an oversight: the target trade already has its own
+   (possibly already-customized) label/type, and silently overwriting it
+   with the source trade's would be more surprising than a clean
+   "re-enter it if you still want it".
+
+`10_Analyse_Trade.py` itself is reached only via `st.session_state["analyse_trade_id"]`/
+`["analyse_trade_portfolio"]` + `st.switch_page` from My Trades' row
+selection (see the "Streamlit app" section's `visibility="hidden"`
+note above) -- landing on it directly with neither key set (a stale
+bookmark, or the trade having been fully split away since) shows an
+`st.info` pointing back to My Trades instead of crashing on a missing
+lookup.
 
 ## Auth: a non-obvious quirk
 
@@ -1590,7 +1697,7 @@ every page re-injects with the user's actual `Theme` setting once loaded
 
 **Tailwind CSS — how it's actually wired in, and why not the obvious way.** Streamlit renders its own native widgets (buttons, inputs, `st.dataframe`, columns, sidebar) through its own internal React components with no supported hook for external CSS frameworks to target them — Tailwind only styles HTML we hand-render ourselves via `st.markdown(html, unsafe_allow_html=True)` (the disclaimer banner, the design-system components below). Within that scope, there's a second, less obvious trap: Tailwind's current CDN distribution (the "Play CDN") is a `<script>` that scans the DOM at runtime and injects styles as it goes — but `st.markdown(unsafe_allow_html=True)` inserts HTML via `innerHTML`, and browsers never execute `<script>` tags inserted that way (a standard, deliberate DOM security behavior, not a Streamlit quirk). Loading the Play CDN script this way silently does nothing; there's no error, the styles just never apply. `inject_tailwind()` in `ui.py` instead loads the older, fully-precompiled Tailwind **v2** static stylesheet via a `<link rel="stylesheet">` tag, which — unlike `<script>` — *is* honored via `innerHTML`. Call it once near the top of any page before rendering Tailwind-classed HTML (every page already does).
 
-**Historical note, in case a future table goes back to hand-rendered HTML**: the Dashboard's screener table and the Portfolio page's holdings table both used to be hand-rendered this way (`render_screener_table()`, since removed as dead code once both pages moved to a native `st.dataframe` -- see the Pages section's `1_Dashboard.py`/`6_Portfolio.py` bullets above for why). It rendered the same data twice into one HTML blob — a normal `<table>` wrapped `hidden md:block` (visible only ≥768px) and a stacked list of cards wrapped `md:hidden` (visible only below that) — a pure-CSS responsive switch, no JS, fixing a real mobile problem the previous plain `df.to_html()` table had (no responsive handling at all, overflowing or squeezing unreadably on a phone). Because the static Tailwind v2 build has no `dark:` variant available, its light/dark table colors were chosen explicitly in Python (a small `theme`-branching helper, the same pattern `_surface_classes()` below still uses) from the same `user_settings.theme` that already drives `plotly_template()`. If a future table needs this dual-block technique again (`st.dataframe` can't do it -- see the note on Settings' notification history below), this is the pattern to reach for.
+**Historical note, in case a future table goes back to hand-rendered HTML**: the Dashboard's screener table and the old combined Portfolio page's holdings table both used to be hand-rendered this way (`render_screener_table()`, since removed as dead code once both pages moved to a native `st.dataframe` -- see the Pages section's `1_Dashboard.py` bullet and the Portfolio pages bullet above for why). It rendered the same data twice into one HTML blob — a normal `<table>` wrapped `hidden md:block` (visible only ≥768px) and a stacked list of cards wrapped `md:hidden` (visible only below that) — a pure-CSS responsive switch, no JS, fixing a real mobile problem the previous plain `df.to_html()` table had (no responsive handling at all, overflowing or squeezing unreadably on a phone). Because the static Tailwind v2 build has no `dark:` variant available, its light/dark table colors were chosen explicitly in Python (a small `theme`-branching helper, the same pattern `_surface_classes()` below still uses) from the same `user_settings.theme` that already drives `plotly_template()`. If a future table needs this dual-block technique again (`st.dataframe` can't do it -- see the note on Settings' notification history below), this is the pattern to reach for.
 
 **The design system — combining Tailwind with a global CSS override for native widgets.** Until this pass, Tailwind reached exactly one surface in the whole app: the Dashboard's screener table. Every other screen (landing page, login/signup/forgot-password, Stock Detail, Alerts -- now folded into Settings, see the Pages section above -- Settings) was 100% unstyled native Streamlit, since `inject_tailwind()` was called on every page but nothing on those pages actually used a Tailwind class. Tailwind *can't* reach native widgets at all (buttons, inputs, forms, sidebar, tabs, `st.metric`, `st.dataframe`, `st.expander` are React components Streamlit renders itself, with no exposed hook for an external CSS framework) — a Tailwind `<div>` can never wrap a native `st.button`/`st.form`, since hand-rendered HTML and native widgets are DOM siblings, not parent/child (each Streamlit element call appends its own separate node; one `st.markdown()` call's HTML can't "contain" a later `st.button()` call's output).
 
