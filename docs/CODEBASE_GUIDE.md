@@ -1738,14 +1738,18 @@ before calling it is enough.
 decides which of the three tables a leg's underlying belongs in **by
 default**: `None` symbol → `"other"` (an undecoded F&O contract or
 unmatched holding -- nothing to classify by); `company_type = 'Index'`
-only → `"index"`; anything else, including `ETF`/`Fund` and an unknown
-symbol → `"stock"` (mirrors the fallback the old combined page's
-`_is_etf_or_fund` helper used for the Holdings ETF/MF split). **A real
-bug this fixed**: ETF/Fund used to be lumped in with Index here, so
-gilt/liquid/gold ETFs (BANKBEES, GILT5YBEES, GOLDBEES, LIQUIDCASE, ...)
-showed up in "Index Trades" alongside genuine index positions (NIFTY,
-FINNIFTY) -- confirmed live against a real portfolio; only a true Index
-company_type row counts now.
+only → `"index"`; `company_type` `ETF`/`Fund` → `"other"` too (neither a
+real equity trade nor a genuine index); anything else, including an
+unknown symbol → `"stock"` (mirrors the fallback the old combined page's
+`_is_etf_or_fund` helper used for the Holdings ETF/MF split). **Two real
+bugs this fixed, in sequence**: ETF/Fund first got lumped in with Index,
+so gilt/liquid/gold ETFs (BANKBEES, GILT5YBEES, GOLDBEES, LIQUIDCASE,
+...) showed up in "Index Trades" alongside genuine index positions
+(NIFTY, FINNIFTY) -- confirmed live against a real portfolio. Moving
+ETF/Fund to `"stock"` instead (only a true Index company_type counts as
+`"index"`) was a second live request's worth of correction -- an ETF
+isn't a real equity trade either, so it now defaults to `"other"`
+instead.
 
 `portfolio_service.group_into_trades(legs, overrides, trade_meta,
 company_type_by_symbol)` assigns `trade_id` via `assign_trade_ids`

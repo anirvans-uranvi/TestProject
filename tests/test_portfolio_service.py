@@ -344,14 +344,16 @@ class TestClassifyUnderlyingBucket:
     def test_none_symbol_is_other(self):
         assert portfolio_service.classify_underlying_bucket(None, {}) == "other"
 
-    def test_etf_is_stock_not_index(self):
+    def test_etf_is_other_not_index_or_stock(self):
         # A real bug this guards against: BANKBEES/GILT5YBEES/GOLDBEES/
         # LIQUIDCASE-style ETFs used to be lumped in with genuine Index
-        # positions on My Trades' "Index Trades" table.
-        assert portfolio_service.classify_underlying_bucket("NIFTYBEES", {"NIFTYBEES": CompanyType.ETF}) == "stock"
+        # positions on My Trades' "Index Trades" table; a later fix moved
+        # them to "Stock Trades" instead, which was also wrong on a live
+        # request -- an ETF belongs in Other Trades.
+        assert portfolio_service.classify_underlying_bucket("NIFTYBEES", {"NIFTYBEES": CompanyType.ETF}) == "other"
 
-    def test_fund_is_stock_not_index(self):
-        assert portfolio_service.classify_underlying_bucket("LIQUIDCASE", {"LIQUIDCASE": CompanyType.FUND}) == "stock"
+    def test_fund_is_other_not_index_or_stock(self):
+        assert portfolio_service.classify_underlying_bucket("LIQUIDCASE", {"LIQUIDCASE": CompanyType.FUND}) == "other"
 
     def test_index_company_type_is_index(self):
         assert portfolio_service.classify_underlying_bucket("NIFTY", {"NIFTY": CompanyType.INDEX}) == "index"
@@ -418,14 +420,15 @@ class TestGroupIntoTrades:
         assert trades[0]["bucket"] == "index"
         assert trades[0]["total_pnl"] is None
 
-    def test_etf_bucket_defaults_to_stock_not_index(self):
-        # A real bug this guards against: an ETF holding used to land in
-        # "Index Trades" purely because of its company_type.
+    def test_etf_bucket_defaults_to_other(self):
+        # An ETF holding used to land in "Index Trades" purely because of
+        # its company_type, then "Stock Trades" after an incomplete fix --
+        # it belongs in Other Trades by default.
         legs = [self._leg(raw_name="NIFTYBEES", broker="Zerodha", symbol="NIFTYBEES", leg_type="Holding", pnl=None)]
         trades = portfolio_service.group_into_trades(
             legs, overrides={}, trade_meta={}, company_type_by_symbol={"NIFTYBEES": CompanyType.ETF}
         )
-        assert trades[0]["bucket"] == "stock"
+        assert trades[0]["bucket"] == "other"
 
     def test_mixed_bucket_legs_fall_to_other(self):
         legs = [
@@ -456,7 +459,7 @@ class TestGroupIntoTrades:
         trades = portfolio_service.group_into_trades(
             legs, overrides={}, trade_meta=trade_meta, company_type_by_symbol={"NIFTYBEES": CompanyType.ETF}
         )
-        assert trades[0]["bucket"] == "stock"
+        assert trades[0]["bucket"] == "other"
 
     def test_no_resolved_symbol_is_other_bucket(self):
         legs = [self._leg(raw_name="WEIRD FORMAT 123", broker="Zerodha", symbol=None, leg_type="Position", pnl=None)]

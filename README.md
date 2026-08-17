@@ -946,17 +946,17 @@ touches symbol/raw_name/broker, so it works identically for holding legs
 and position legs) and grouped into three tables:
 
 - **Stock Trades** -- every leg whose underlying resolves to
-  `company_type = Equity`, `ETF`, or `Fund` (or an unresolved/unknown
-  symbol, same fallback My Holdings' old ETF/Stocks split used).
+  `company_type = Equity` (or an unresolved/unknown symbol, same fallback
+  My Holdings' old ETF/Stocks split used).
 - **Index Trades** -- every leg whose underlying resolves to
-  `company_type = Index` only (NIFTY, BANKNIFTY, FINNIFTY, ...) -- an ETF
-  no longer counts, even a gilt/liquid/gold one, so BANKBEES/GILT5YBEES/
-  GOLDBEES/LIQUIDCASE-style holdings default to Stock Trades instead of
-  being lumped in here.
-- **Other Trades** -- a leg with no resolved symbol at all (an undecoded
-  F&O contract, or an unmatched holding), or a *manually merged* Trade
-  whose legs' underlyings don't all agree on one bucket. Present even
-  when empty, as a placeholder for the case above.
+  `company_type = Index` only (NIFTY, BANKNIFTY, FINNIFTY, ...).
+- **Other Trades** -- everything that doesn't cleanly belong in the other
+  two: a leg with no resolved symbol at all (an undecoded F&O contract,
+  or an unmatched holding); a `company_type = ETF`/`Fund` leg
+  (BANKBEES/GILT5YBEES/GOLDBEES/LIQUIDCASE-style holdings -- neither a
+  real equity trade nor a genuine index, on a live request after this
+  first defaulted to Stock Trades); or a *manually merged* Trade whose
+  legs' underlyings don't all agree on one bucket.
 
 **Manually pin a Trade's table.** If a Trade's auto-computed table isn't
 what you want -- e.g. an index ETF you'd rather see alongside Index

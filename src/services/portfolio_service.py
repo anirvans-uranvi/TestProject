@@ -498,24 +498,31 @@ def assign_trade_ids(positions: list[dict], overrides: dict[tuple[str, str], str
 
 def classify_underlying_bucket(symbol: str | None, company_type_by_symbol: dict[str, CompanyType]) -> str:
     """Which of the three "My Trades" tables a leg's underlying sorts
-    into -- "stock" (the default -- includes an unknown/unclassified
-    symbol, plus ETF/Fund, same fallback convention pages/6_Portfolio.py's
-    now-retired _is_etf_or_fund helper used for the Holdings ETF/MF split),
-    "index" (company_type Index only), or "other" (symbol is None -- an
-    undecoded F&O contract or an unmatched holding, nothing to classify
-    by).
+    into -- "stock" (the default -- an unknown/unclassified symbol, or a
+    real `Equity`, same fallback convention pages/6_Portfolio.py's
+    now-retired _is_etf_or_fund helper used for the Holdings ETF/MF
+    split), "index" (company_type `Index` only), or "other" (symbol is
+    `None` -- an undecoded F&O contract or an unmatched holding, nothing
+    to classify by -- **or** company_type `ETF`/`Fund`, which don't
+    belong in either Stock or Index Trades).
 
-    **A real bug this fixed**: ETF/Fund used to be lumped in with Index
-    here, so gilt/liquid/gold ETFs (BANKBEES, GILT5YBEES, GOLDBEES,
-    LIQUIDCASE, ...) showed up in "Index Trades" alongside genuine index
-    positions (NIFTY, FINNIFTY) -- confirmed live against a real
-    portfolio. An ETF someone deliberately wants shown alongside Index
-    Trades still can be, via PortfolioTradeMeta.bucket_override (see
-    group_into_trades) -- this function only decides the *default*."""
+    **Two real bugs this fixed, in sequence**: ETF/Fund first got lumped
+    in with Index here, so gilt/liquid/gold ETFs (BANKBEES, GILT5YBEES,
+    GOLDBEES, LIQUIDCASE, ...) showed up in "Index Trades" alongside
+    genuine index positions (NIFTY, FINNIFTY). Moving them to "stock"
+    instead was itself wrong on a live request -- an ETF isn't a real
+    equity trade either, so it belongs in Other Trades, not Stock Trades.
+    An ETF someone deliberately wants shown alongside Index Trades (or
+    Stock Trades) can still be pinned there via
+    PortfolioTradeMeta.bucket_override (see group_into_trades) -- this
+    function only decides the *default*."""
     if symbol is None:
         return "other"
-    if company_type_by_symbol.get(symbol) == CompanyType.INDEX:
+    company_type = company_type_by_symbol.get(symbol)
+    if company_type == CompanyType.INDEX:
         return "index"
+    if company_type in (CompanyType.ETF, CompanyType.FUND):
+        return "other"
     return "stock"
 
 
