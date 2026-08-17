@@ -225,18 +225,38 @@ export interface FoundBhavcopy {
 
 /** Walks back from `onOrBefore` up to `maxLookback` days to the most
  * recent published bhavcopy for the given exchange, skipping
- * weekends/holidays. */
+ * weekends/holidays.
+ *
+ * `fetchBhavcopyText` throws (rather than returning null) when a day's
+ * response is implausible for a real bhavcopy -- e.g. BSE serving its own
+ * homepage (HTTP 200, text/html) instead of a 404 for a file that simply
+ * isn't published yet. **A real bug this caught**: `onOrBefore` is always
+ * today's date, and BSE does exactly that for today's not-yet-published
+ * file while the market is still open -- the walk-back used to propagate
+ * that throw immediately, aborting on day one and never reaching the
+ * genuinely available bhavcopy from a few days earlier (which is what NSE
+ * did successfully, since NSE cleanly 404s for the same not-yet-published
+ * case instead of serving a fake-200 page). A single day's hard error is
+ * now swallowed and the walk continues; the error is only re-thrown if
+ * every day in the lookback window fails, so a genuine persistent block
+ * is still reported instead of silently degrading to "not found". */
 export async function findLatestAvailableBhavcopy(
   onOrBefore: string,
   maxLookback = 7,
   exchange: Exchange = "NSE",
 ): Promise<FoundBhavcopy | null> {
   let d = onOrBefore;
+  let lastError: unknown = null;
   for (let i = 0; i < maxLookback; i++) {
-    const csvText = await fetchBhavcopyText(d, exchange);
-    if (csvText !== null) return { isoDate: d, csvText };
+    try {
+      const csvText = await fetchBhavcopyText(d, exchange);
+      if (csvText !== null) return { isoDate: d, csvText };
+    } catch (err) {
+      lastError = err;
+    }
     d = isoDateMinusDays(d, 1);
   }
+  if (lastError !== null) throw lastError;
   return null;
 }
 

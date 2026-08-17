@@ -1,7 +1,7 @@
 // Tests for bhavcopy.ts's zip reader + CSV parser. Run with:
 //   deno test supabase/functions/fo-refresh/bhavcopy.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { bhavcopyUrl, extractFirstZipEntry, fetchBhavcopyText, looksLikeZipContentType, parseFoBhavcopy, sourceName } from "./bhavcopy.ts";
+import { bhavcopyUrl, extractFirstZipEntry, fetchBhavcopyText, findLatestAvailableBhavcopy, looksLikeZipContentType, parseFoBhavcopy, sourceName } from "./bhavcopy.ts";
 
 const NSE_SOURCE = sourceName("NSE");
 
@@ -224,6 +224,53 @@ Deno.test("fetchBhavcopyText - BSE: a near-empty body returns null (not a throw)
   try {
     const result = await fetchBhavcopyText("2026-08-11", "BSE");
     assertEquals(result, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// --- walk-back tolerance (real bug: BSE serves its own homepage, HTTP
+// 200 text/html, instead of a 404 for today's not-yet-published file --
+// findLatestAvailableBhavcopy's onOrBefore is always today, so this used
+// to throw on day one and never reach an earlier, genuinely available
+// bhavcopy) -----------------------------------------------------------
+
+Deno.test("findLatestAvailableBhavcopy - BSE: a blocked/HTML today doesn't stop the walk-back from finding an earlier real CSV", async () => {
+  const originalFetch = globalThis.fetch;
+  const blockedPage = "<html><body>BSE homepage</body></html>" + " ".repeat(500);
+  const realCsv = "TradDt,BizDt,Sgmt\n2026-08-14,2026-08-14,FO\n" + "x".repeat(500);
+  globalThis.fetch = ((input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("20260817") || url.includes("20260816") || url.includes("20260815")) {
+      return Promise.resolve(new Response(blockedPage, { status: 200 }));
+    }
+    if (url.includes("20260814")) {
+      return Promise.resolve(new Response(realCsv, { status: 200 }));
+    }
+    return Promise.resolve(new Response("", { status: 404 }));
+  }) as typeof fetch;
+  try {
+    const found = await findLatestAvailableBhavcopy("2026-08-17", 7, "BSE");
+    assertEquals(found?.isoDate, "2026-08-14");
+    assertEquals(found?.csvText, realCsv);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("findLatestAvailableBhavcopy - BSE: re-throws the diagnostic error only once the whole lookback window is exhausted", async () => {
+  const originalFetch = globalThis.fetch;
+  const blockedPage = "<html><body>BSE homepage</body></html>" + " ".repeat(500);
+  globalThis.fetch = (() => Promise.resolve(new Response(blockedPage, { status: 200 }))) as typeof fetch;
+  try {
+    let message = "";
+    try {
+      await findLatestAvailableBhavcopy("2026-08-17", 3, "BSE");
+      throw new Error("expected findLatestAvailableBhavcopy to reject");
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    assert(message.includes("did not return a bhavcopy CSV"), `unexpected error message: ${message}`);
   } finally {
     globalThis.fetch = originalFetch;
   }

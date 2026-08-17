@@ -141,12 +141,33 @@ def latest_available_bhavcopy(
     session: requests.Session | None = None,
 ) -> FOBhavcopy | None:
     """Walk back from `on_or_before` (default today) up to `max_lookback` days
-    to the most recent published F&O bhavcopy, skipping weekends/holidays."""
+    to the most recent published F&O bhavcopy, skipping weekends/holidays.
+
+    `download_bhavcopy_csv` raises `ProviderError` (rather than returning
+    None) when a day's response is implausible for a real bhavcopy -- e.g.
+    BSE serving its own homepage (HTTP 200, text/html) instead of a 404 for
+    a file that simply isn't published yet. **A real bug this caught**:
+    `on_or_before` defaults to today, and BSE does exactly that for today's
+    not-yet-published file while the market is still open -- this loop used
+    to let that exception propagate immediately, aborting on day one and
+    never reaching the genuinely available bhavcopy from a few days earlier.
+    A single day's hard error is now swallowed and the walk continues; the
+    error is only re-raised if every day in the lookback window fails, so a
+    genuine persistent block is still surfaced instead of silently
+    degrading to "no data found"."""
     sess = session or requests.Session()
     d = on_or_before or date.today()
+    last_error: ProviderError | None = None
     for _ in range(max_lookback):
-        parsed = fetch_fo_bhavcopy(d, universe=universe, session=sess)
+        try:
+            parsed = fetch_fo_bhavcopy(d, universe=universe, session=sess)
+        except ProviderError as exc:
+            last_error = exc
+            d -= timedelta(days=1)
+            continue
         if parsed is not None and not parsed.is_empty:
             return parsed
         d -= timedelta(days=1)
+    if last_error is not None:
+        raise last_error
     return None

@@ -511,6 +511,21 @@ same bug) stuck on that date even after new index-option rows landed in
 `option_daily_prices`. Fixed by checking both tables and taking the newer
 date, everywhere this watermark is read.
 
+**A third real bug**: a BSE refresh could fail outright with `"Could not
+reach BSE: BSE did not return a bhavcopy CSV for <today>..."` even when
+BSE's actual data (a few days back) was perfectly reachable. The walk-back
+(`findLatestAvailableBhavcopy`) always starts from *today*, and BSE
+redirects a request for today's not-yet-published file to its own
+homepage (HTTP 200, `text/html`) instead of 404ing like NSE does for the
+same case -- `fetchBhavcopyText` correctly throws a diagnostic error for
+that one day, but the walk-back used to let the throw propagate
+immediately instead of trying the previous day, aborting before it ever
+reached the genuinely available earlier bhavcopy. Fixed by having the
+walk-back catch a single day's error and keep going, only re-throwing once
+every day in the lookback window has failed -- see `bhavcopy.ts`'s and
+`src/data_providers/bse_fo_provider.py`'s docstrings for
+`findLatestAvailableBhavcopy`/`latest_available_bhavcopy`.
+
 Also recomputes `dashboard_fo_metrics` as its last step whenever it
 actually ingests a newer bhavcopy (skipped on the "already up to date"
 no-op path, since nothing changed) -- same reasoning and shared

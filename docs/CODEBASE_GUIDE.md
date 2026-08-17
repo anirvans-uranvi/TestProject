@@ -1829,6 +1829,39 @@ Structurally it's a check-then-maybe-ingest, not an unconditional refresh:
   any deployment context, not just this one. `bhavcopy.test.ts` and
   `tests/test_bse_fo_provider.py` both cover a non-CSV body past the size
   guard raising instead of silently returning "0 rows".
+
+  **A fourth real bug, once the third's fix had been live a few days**: a
+  BSE F&O refresh started failing outright with `"Could not reach BSE: BSE
+  did not return a bhavcopy CSV for <today> (likely blocked the
+  request)..."`, even on days when BSE's actual data (from a few days
+  earlier) was perfectly reachable. Root cause: `findLatestAvailableBhavcopy`
+  always starts its walk-back from *today's* date, and BSE — unlike NSE,
+  which cleanly 404s for a file that isn't published yet — instead
+  redirects a request for today's not-yet-published bhavcopy to its own
+  homepage with an HTTP 200 `text/html` response. The third bug's fix made
+  `fetchBhavcopyText` correctly detect that this isn't real CSV and throw a
+  diagnostic error — the right behavior for a *single day* — but
+  `findLatestAvailableBhavcopy`'s loop let that throw propagate immediately
+  instead of catching it and trying the previous day, so the walk-back
+  aborted on day one and never reached the genuinely available bhavcopy
+  from a few days back (the same file NSE's walk-back had no trouble
+  reaching, since NSE's 404 for the same not-yet-published case returns
+  `null` rather than throwing). Fixed by having the loop catch a single
+  day's error, remember it, and keep walking back; the error is only
+  re-thrown once the entire `maxLookback` window is exhausted with nothing
+  found, so a genuine persistent block is still surfaced (not silently
+  swallowed into a bare "not found"), while a routine same-day "not
+  published yet" no longer blocks discovery of an earlier, real trading
+  day. Mirrored in `src/data_providers/bse_fo_provider.py::
+  latest_available_bhavcopy`, which has the identical bug shape (its
+  `on_or_before` also defaults to today) — NSE's Python/TS providers were
+  left alone here since neither raises a diagnostic error for a
+  not-yet-published day today (NSE cleanly resolves to `null`/404 either
+  way), so this specific failure mode doesn't apply to them.
+  `bhavcopy.test.ts` and `tests/test_bse_fo_provider.py` both cover a
+  blocked/HTML "today" not stopping the walk-back from finding an earlier
+  real CSV, and the diagnostic error still surfacing once every day in the
+  lookback window fails.
 - **`index.ts`** — reads `exchange` from the request's JSON body
   (`{"exchange": "NSE"}` / `{"exchange": "BSE"}`; missing/unparseable body
   defaults to `"NSE"`, so an old caller with no body still works). Same

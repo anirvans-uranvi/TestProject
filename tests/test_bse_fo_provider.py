@@ -125,3 +125,49 @@ class TestDownloadBhavcopyCsv:
         session = _FakeSession(_FakeResponse(200, blocked_page.encode("utf-8")))
         with pytest.raises(ProviderError, match="did not return a bhavcopy CSV"):
             bse_fo_provider.download_bhavcopy_csv(date(2026, 8, 11), session=session)
+
+
+class _FakeDateAwareSession:
+    """Maps each day's URL to its own canned response, so
+    latest_available_bhavcopy's walk-back can be exercised across
+    multiple days in one test -- unlike `_FakeSession`, which returns the
+    same response for every date and can't test the walk-back at all."""
+
+    def __init__(self, response_by_yyyymmdd: dict[str, _FakeResponse], default: _FakeResponse | None = None):
+        self._response_by_yyyymmdd = response_by_yyyymmdd
+        self._default = default or _FakeResponse(404, b"")
+
+    def get(self, url, headers=None, timeout=None):
+        for yyyymmdd, response in self._response_by_yyyymmdd.items():
+            if yyyymmdd in url:
+                return response
+        return self._default
+
+
+class TestLatestAvailableBhavcopy:
+    def test_blocked_today_does_not_stop_the_walk_back_from_finding_an_earlier_real_csv(self):
+        # Real bug this catches: on_or_before defaults to today, and BSE
+        # serves its own homepage (HTTP 200, text/html) instead of a 404
+        # for today's not-yet-published file -- download_bhavcopy_csv
+        # correctly raises ProviderError for that, but the walk-back used
+        # to let that exception propagate immediately instead of trying
+        # the previous day, so it never reached 2026-08-14's real data.
+        blocked_page = "<html><body>BSE homepage</body></html>" + " " * 500
+        real_content = (SAMPLE_CSV + "," * 500).encode("utf-8")
+        session = _FakeDateAwareSession(
+            {
+                "20260817": _FakeResponse(200, blocked_page.encode("utf-8")),
+                "20260816": _FakeResponse(200, blocked_page.encode("utf-8")),
+                "20260815": _FakeResponse(200, blocked_page.encode("utf-8")),
+                "20260814": _FakeResponse(200, real_content),
+            }
+        )
+        result = bse_fo_provider.latest_available_bhavcopy(on_or_before=date(2026, 8, 17), session=session)
+        assert result is not None
+        assert result.trade_date == date(2026, 8, 14)  # the day the walk-back landed on, not SAMPLE_CSV's own TradDt
+
+    def test_raises_the_diagnostic_error_only_once_the_whole_lookback_window_is_exhausted(self):
+        blocked_page = "<html><body>BSE homepage</body></html>" + " " * 500
+        session = _FakeDateAwareSession({}, default=_FakeResponse(200, blocked_page.encode("utf-8")))
+        with pytest.raises(ProviderError, match="did not return a bhavcopy CSV"):
+            bse_fo_provider.latest_available_bhavcopy(on_or_before=date(2026, 8, 17), max_lookback=3, session=session)
