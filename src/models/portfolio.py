@@ -99,13 +99,23 @@ class PortfolioTradeMeta(BaseModel):
 
 class BrokerConnection(BaseModel):
     """Saved API credentials letting one portfolio pull holdings/positions
-    directly from a broker's API (see src/data_providers/dhan_provider.py
-    and pages/6_My_Broker.py's "Connect Dhan account" flow) instead of a
-    CSV upload. `access_token` is stored as given -- see
-    supabase/migrations/0017_broker_connections.sql's docstring for the
-    plaintext/RLS-only trade-off this implies. `token_saved_at` is set only
-    when credentials are saved/updated (not on every sync), so the UI can
-    warn once it's old enough that Dhan's 24-hour token is likely expired."""
+    directly from a broker's API (see src/data_providers/dhan_provider.py/
+    zerodha_provider.py and pages/6_My_Broker.py's "Connect Dhan account"/
+    "Connect Zerodha account" flows) instead of a CSV upload. `client_id`
+    holds Dhan's actual client ID for a Dhan row, or Zerodha's `api_key`
+    for a Zerodha row -- both are "this connection's primary identifying
+    credential", so one column serves both brokers. `access_token` is
+    stored as given -- see supabase/migrations/0017_broker_connections.sql's
+    docstring for the plaintext/RLS-only trade-off this implies -- and is
+    `None` for a Zerodha row that has saved its api_key/api_secret but not
+    yet completed the Kite Connect login redirect (see
+    supabase/migrations/0022_broker_connections_api_secret.sql). `api_secret`
+    is Zerodha-only (Dhan's flow needs no third credential); always `None`
+    for a Dhan row. `token_saved_at` is set only when credentials are
+    saved/updated (not on every sync), so the UI can warn once it's old
+    enough that Dhan's 24-hour token is likely expired -- for Zerodha,
+    whose token instead expires at a fixed daily time (~6am IST) rather
+    than a rolling window, the UI checks against that fixed time instead."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -113,5 +123,6 @@ class BrokerConnection(BaseModel):
     portfolio_name: str
     broker: str
     client_id: str
-    access_token: str
+    access_token: str | None = None
+    api_secret: str | None = None
     token_saved_at: datetime | None = None

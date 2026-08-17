@@ -1,0 +1,21 @@
+-- 0022_broker_connections_api_secret.sql
+-- Wires up the Zerodha "Connect Zerodha account" flow (Kite Connect API)
+-- migration 0017 explicitly left unimplemented ("Zerodha's API needs a
+-- separate paid Kite Connect subscription and isn't wired up").
+--
+-- Adds a nullable api_secret column -- Dhan's flow needs only a
+-- client_id + access_token pair (both already columns), so Dhan rows
+-- leave this null. Zerodha's checksum-based session exchange
+-- (sha256(api_key + request_token + api_secret) -> access_token, see
+-- src/data_providers/zerodha_provider.py) needs this third credential.
+-- The existing `client_id` column is reused to hold Zerodha's `api_key`
+-- -- semantically "this connection's primary identifying credential"
+-- already, so no rename was needed.
+--
+-- Also relaxes access_token to nullable: Zerodha's flow saves api_key +
+-- api_secret first (so the "Log in to Zerodha" button has credentials to
+-- build a login URL from), *before* any access_token exists -- unlike
+-- Dhan, where the user always has a token in hand before saving anything
+-- here at all.
+alter table broker_connections add column if not exists api_secret text;
+alter table broker_connections alter column access_token drop not null;

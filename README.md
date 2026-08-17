@@ -674,7 +674,8 @@ is either decodable from the string or it isn't.
 "Dhan" as the broker offers a choice: "Upload CSV" (as above) or "Connect
 Dhan account". The latter asks for a Dhan Client ID and Access Token
 (generate one on `web.dhan.co` -> Profile -> "DhanHQ Trading APIs"; it's
-valid for 24 hours), saves them to `broker_connections` (migration `0017`),
+valid for 24 hours), saves them to `broker_connections` (migration `0017`,
+widened by `0022` to also hold Zerodha's third credential -- see below),
 and a "Sync now" button then pulls holdings + positions straight from
 Dhan's API (`GET /v2/holdings`, `GET /v2/positions`, and `POST
 /v2/marketfeed/ltp` for position LTPs) via
@@ -708,6 +709,58 @@ per-user table in this app relies on -- not separately encrypted. This
 app's own code only ever calls the read-only endpoints above. "Disconnect"
 removes the saved credentials only; previously synced holdings/positions
 are left as-is, same as switching away from CSV upload.
+
+**Zerodha can also be connected directly** (`src/data_providers/zerodha_provider.py`),
+but through a genuinely different mechanism than Dhan's -- Zerodha's Kite
+Connect API is a paid, app-based platform, not a self-service token page:
+
+1. **One-time setup, on Zerodha's own site, before this works at all**:
+   register a Kite Connect app at developers.kite.trade (**₹2,000+GST/month
+   subscription, billed by Zerodha, separate from this project**), which
+   gives you an **API Key** and **API Secret**. Set that app's **Redirect
+   URL** to this app's own My Broker page --
+   `{your app's base URL}/My_Broker` (the exact `/My_Broker` path is
+   pinned in `app.py` so it stays stable regardless of the underlying
+   filename).
+2. In this app, pick "Zerodha" as the broker, "Connect Zerodha account",
+   and enter that API Key + API Secret once ("Save").
+3. Click **"Log in to Zerodha"** -- this opens Zerodha's own login page in
+   a **new browser tab** (standard OAuth-style redirect; this app never
+   sees your Zerodha password or TOTP code). If that new tab isn't
+   already signed into *this* app, you'll be asked to sign in here first
+   -- do so, and the Zerodha connection still completes normally
+   afterward. After logging into Zerodha, it redirects back to this app's
+   My Broker page with a one-time `request_token`; pick which portfolio
+   to save the connection to and click "Save & Sync" to complete it and
+   pull your first sync.
+4. From then on, "Sync now" pulls holdings + positions straight from
+   Kite Connect (`GET /portfolio/holdings`, `GET /portfolio/positions`),
+   translated into the same shape the CSV parsers produce
+   (`portfolio_service.zerodha_holdings_from_api`/`zerodha_positions_from_api`)
+   and saved through the same `replace_broker_holdings`/
+   `replace_broker_positions` calls -- indistinguishable from a CSV
+   upload once synced. Zerodha's own `tradingsymbol` for an F&O position
+   is in the exact same format as the CSV positions export's
+   `Instrument` column, so the existing
+   `parse_zerodha_option_instrument` decoder (weekly index options only
+   -- see above) is reused as-is; Kite's holdings/positions responses
+   also include `last_price` directly, so unlike Dhan there's no
+   separate LTP call or fallback step needed.
+
+**Kite Connect's session expires at a fixed daily time (~6am IST the
+next day), not on a rolling 24-hour window like Dhan's** -- there's no
+way around logging in again through step 3 above every trading day you
+want to sync. The page detects this (comparing the saved session's start
+time against the most recent 6am IST boundary, not a simple hours-old
+check) and shows "Log in to Zerodha" again instead of "Sync now" once
+that boundary has passed.
+
+**Security trade-off, same model as Dhan's:** the API Secret and access
+token are stored as entered, protected only by `broker_connections`' RLS
+policy -- not separately encrypted. This app's own code only ever calls
+the read-only Holdings/Positions endpoints. "Disconnect" removes the
+saved credentials only; previously synced holdings/positions are left
+as-is.
 
 Both holdings and positions are saved per-user (`portfolio_holdings`,
 migrations `0012`/`0014`; `portfolio_positions`, migration `0016`;

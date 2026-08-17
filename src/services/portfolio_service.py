@@ -363,6 +363,72 @@ def dhan_positions_from_api(rows: list[dict], ltp_by_security_id: dict[str, floa
     return positions
 
 
+def zerodha_holdings_from_api(rows: list[dict]) -> list[dict]:
+    """Translates GET /portfolio/holdings rows (src/data_providers/
+    zerodha_provider.py's get_holdings()) into the same holding-dict shape
+    parse_zerodha_csv/parse_dhan_csv produce, so holdings_to_records/
+    merge_holdings/compute_portfolio_view are reused unchanged regardless
+    of source. `tradingsymbol` is already the exact NSE trading symbol --
+    same as the CSV export's own `Instrument` column -- so it's trusted
+    directly, no match_symbol() fuzzy matching needed. Skips rows with no
+    quantity (a holding fully sold off today)."""
+    holdings = []
+    for row in rows:
+        qty = row.get("quantity") or 0
+        symbol = str(row.get("tradingsymbol") or "").strip().upper()
+        if not qty or not symbol:
+            continue
+        avg_price = float(row.get("average_price") or 0)
+        holdings.append(
+            {
+                "raw_name": symbol,
+                "symbol": symbol,
+                "qty": float(qty),
+                "avg_price": avg_price,
+                "investment": float(qty) * avg_price,
+            }
+        )
+    return holdings
+
+
+def zerodha_positions_from_api(rows: list[dict]) -> list[dict]:
+    """Translates GET /portfolio/positions (`net`) rows into the same
+    position-dict shape parse_zerodha_positions_csv produces. Kite
+    Connect's own `tradingsymbol` is in the *exact same format* as the
+    CSV positions export's `Instrument` column, so the existing
+    parse_zerodha_option_instrument decoder is reused as-is -- no new
+    regex needed here, unlike Dhan, whose API and CSV paths needed
+    separate decoders. `quantity` is already signed (positive long,
+    negative short), matching this app's convention. `last_price` comes
+    straight from the row -- unlike Dhan, whose positions response omits
+    LTP without a separate "Data APIs" subscription, Kite's response
+    already includes it, so no fallback-LTP step is needed for this
+    broker. Skips closed (quantity == 0) rows -- Kite still lists those
+    for the trading day."""
+    positions = []
+    for row in rows:
+        qty = row.get("quantity") or 0
+        if not qty:
+            continue
+        raw_name = str(row.get("tradingsymbol") or "").strip()
+        avg_price = float(row.get("average_price") or 0)
+        ltp = row.get("last_price")
+        decoded = parse_zerodha_option_instrument(raw_name) or {}
+        positions.append(
+            {
+                "raw_name": raw_name,
+                "symbol": decoded.get("symbol"),
+                "expiry_date": decoded.get("expiry_date"),
+                "strike_price": decoded.get("strike_price"),
+                "option_type": decoded.get("option_type"),
+                "qty": float(qty),
+                "avg_price": avg_price,
+                "ltp": float(ltp) if ltp is not None else None,
+            }
+        )
+    return positions
+
+
 def apply_fallback_option_ltp(
     positions: list[dict], option_chains: dict[tuple[str, date], list[dict]]
 ) -> list[dict]:

@@ -176,7 +176,7 @@ three `Index` rows, and redefines `latest_screener_view` a third time;
 - `notification_log` — alert-fired history, deduped via a unique `dedupe_key`
 - `portfolio_holdings` — broker-CSV-uploaded holdings (migration `0012`, `portfolio_name` added in `0014`), keyed `(user_id, portfolio_name, broker, raw_name)` -- a user can maintain multiple independently-named portfolios that all coexist. `symbol` is nullable and deliberately **not** FK'd to `companies` -- a resolved symbol may not exist there yet (an ETF/fund or non-Nifty50 stock the screener doesn't otherwise track); see the Portfolio pages section below for how it gets registered.
 - `portfolio_positions` — broker-CSV-uploaded F&O positions (migration `0016`), same keying/RLS shape as `portfolio_holdings`. `symbol`/`expiry_date`/`strike_price`/`option_type` are nullable together (an undecoded instrument format), and `qty` keeps its broker-reported sign (negative = short). See the Portfolio pages section's My Positions subsection.
-- `broker_connections` — saved Dhan API credentials per `(user_id, portfolio_name, broker)` (migration `0017`), letting a portfolio sync holdings/positions directly from Dhan's API instead of a CSV upload. `access_token` is stored as entered, protected only by this table's own RLS policy -- no application-level encryption. See the Portfolio pages section's "Connect Dhan account" subsection.
+- `broker_connections` — saved Dhan/Zerodha API credentials per `(user_id, portfolio_name, broker)` (migration `0017`, `api_secret` + nullable `access_token` added by `0022` for Zerodha), letting a portfolio sync holdings/positions directly from a broker's API instead of a CSV upload. Credentials are stored as entered, protected only by this table's own RLS policy -- no application-level encryption. See the Portfolio pages section's "Connect Dhan account" / "Connect Zerodha account" subsections.
 - `portfolio_trade_groups` — manual "Trade" grouping overrides for one holding or F&O position leg (migration `0020`), keyed `(user_id, portfolio_name, broker, raw_name)` -- the leg's own natural identity, not a `portfolio_holdings`/`portfolio_positions` row id, so it survives those tables' delete-then-insert replace semantics. See the Portfolio pages section's My Trades subsection.
 - `portfolio_trade_meta` — trade-*level* underlying-label/trade-type overrides (migration `0021`), keyed `(user_id, portfolio_name, trade_id)` -- a different grain from `portfolio_trade_groups` above (many legs share one `trade_id`). See the Portfolio pages section's My Trades subsection.
 
@@ -1475,6 +1475,102 @@ hours (a Dhan platform limit, not a choice made here), so there is no
 background/scheduled sync in this version — `token_saved_at` only tracks
 when credentials were last saved, purely so the page can warn once it's
 old enough to likely be expired.
+
+**Connect Zerodha account (`broker_connections.api_secret`, migration
+`0022`)** — Zerodha's Kite Connect API is architecturally nothing like
+Dhan's: no self-service "generate a token" page, a paid per-app
+subscription (₹2,000+GST/month, on Zerodha's side), and a proper
+OAuth-style login redirect instead of a pasted credential.
+`src/data_providers/zerodha_provider.py::ZerodhaProvider` is deliberately
+**not** a `PriceDataProvider` (unlike `DhanProvider`, which doubles as
+this app's own equity price-pipeline source) -- Zerodha isn't and isn't
+planned to be that (`config.py`'s `market_data_provider` stays
+`Literal["dhan", "yfinance", "mock"]`), so this class only implements
+what the connect flow needs: `login_url()`, `generate_session()`,
+`get_holdings()`, `get_positions()`.
+
+The session exchange: `login_url()` sends the browser to
+`kite.zerodha.com/connect/login?v=3&api_key=...`; Zerodha's own login
+page handles the actual authentication (this app never sees the
+password/TOTP) and redirects to whatever **Redirect URL is configured on
+the Kite Connect app itself** (not something this app's code controls
+per-request) with `?request_token=...&action=login&status=success`
+appended. `generate_session(request_token)` computes
+`sha256(api_key + request_token + api_secret)` and `POST`s it to
+`/session/token` -- the checksum is what proves the exchange request
+came from whoever holds `api_secret`, not just anyone who happened to
+observe a `request_token` value (e.g. in browser history or a proxy
+log). This is safe to do directly in `pages/6_My_Broker.py`'s own code
+because Streamlit page scripts run **server-side** (unlike a browser
+SPA), so `api_secret` is never sent to or exposed in the browser.
+
+**`app.py` pins `url_path="My_Broker"`** on that page's `st.Page(...)`
+entry specifically so the URL to register as the Kite Connect app's
+Redirect URL (`{app_base_url}/My_Broker`) doesn't silently change if the
+underlying filename is ever renamed -- Streamlit's default `url_path`
+inference is filename-derived, which would otherwise be an easy way to
+quietly break every existing user's Zerodha connection.
+
+**Handling the redirect back is deliberately not session-state-
+dependent.** `st.link_button` (used for "Log in to Zerodha") always
+opens a **new browser tab** -- confirmed from Streamlit's own docstring:
+"When clicked, a new tab will be opened to the specified URL. This will
+create a new session for the user if directed within the app." That new
+tab is a fresh Streamlit session, so `st.session_state["zerodha_connect_pending"]`
+(set right before rendering the login link, remembering which
+`portfolio_name` initiated it) is not guaranteed to survive into the tab
+that lands back with `request_token`. Two consequences designed around
+explicitly: (1) since `require_login()` gates every page purely on
+`st.session_state`, a fresh session in the new tab means the user likely
+has to sign back into *this app* (not Zerodha again) before reaching the
+`request_token`-handling code -- annoying but not broken, since
+`st.query_params` survives `require_login()`'s own internal reruns, so
+the pending Zerodha exchange is still there once they're signed in; (2)
+the `request_token`-handling block (near the top of
+`pages/6_My_Broker.py`, before the tabs render) shows a **portfolio
+picker**, defaulting to the remembered pending portfolio *if* it
+survived, but never requiring it to -- selecting the wrong portfolio (or
+one with no saved `api_key`/`api_secret` for Zerodha yet) just shows a
+clear error pointing back to where to fix it, rather than silently
+misattributing the connection. `st.query_params.clear()` runs right
+after a successful exchange so a page refresh can't try to re-spend the
+same (single-use) `request_token`.
+
+**Kite Connect's access_token expires at a fixed daily time (~6am IST
+the next day), not a rolling window** -- `_zerodha_token_is_fresh()`
+compares `token_saved_at` against the most recent 6am IST boundary
+(`src/utils/timezones.py::now_ist`/`to_ist`), not an "hours old" check
+like Dhan's `_hours_since()`/23-hour warning. This is stated as an
+approximation in its own docstring -- the exact invalidation time isn't
+published to the minute, and (same caveat as the rest of this feature)
+hasn't been verified against a real Kite Connect account, only against
+Zerodha's own published documentation.
+
+**Reuse worth noting**: `portfolio_service.zerodha_positions_from_api`
+decodes each position's `tradingsymbol` via the *already-existing*
+`parse_zerodha_option_instrument` (built for the CSV positions export) --
+Kite Connect's own `tradingsymbol` field is in the exact same format, so
+no new regex was needed, unlike Dhan's API/CSV paths which needed two
+separate decoders (`_dhan_underlying_symbol` vs. the CSV path's own
+column mapping). Kite's holdings/positions responses also both include
+`last_price` directly, so unlike `dhan_positions_from_api` (which needs
+a separate `get_ltp_by_security_id` call, and `apply_fallback_option_ltp`
+as a fallback for accounts without Dhan's "Data APIs" subscription),
+`zerodha_positions_from_api` needs neither -- `_sync_zerodha` is
+correspondingly simpler than `_sync_dhan`.
+
+`BrokerConnection.access_token` was relaxed to nullable (`0022`, same
+migration that added `api_secret`) because Zerodha's flow legitimately
+has an intermediate state Dhan's never does: `api_key`/`api_secret`
+saved, but no `access_token` yet (before the first login completes).
+`portfolio_repo.upsert_broker_connection`'s `model_dump(exclude_none=True)`
+already made this safe without any repo changes -- omitting
+`access_token` from a save's payload (because the model field is `None`)
+means the upsert leaves any existing value untouched rather than nulling
+it out, which is exactly "don't touch the token" for the
+credentials-only save and "update the tabs' cached copy of api_key
+without disturbing a still-valid session" for the "Update API Key /
+Secret" form.
 
 **Holdings split by `company_type` (ETFs & Mutual Funds vs Stocks)** — the
 old single "My Holdings" table became two, `_render_holdings_table` (a

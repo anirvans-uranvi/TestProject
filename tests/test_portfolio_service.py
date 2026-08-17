@@ -564,6 +564,63 @@ class TestDhanPositionsFromApi:
         assert portfolio_service.dhan_positions_from_api(rows, {}) == []
 
 
+class TestZerodhaHoldingsFromApi:
+    def test_translates_holdings_endpoint_rows(self):
+        rows = [{"tradingsymbol": "sbin", "exchange": "NSE", "quantity": 10, "average_price": 900.0, "last_price": 1021.1}]
+        holdings = portfolio_service.zerodha_holdings_from_api(rows)
+        assert holdings == [
+            {"raw_name": "SBIN", "symbol": "SBIN", "qty": 10.0, "avg_price": 900.0, "investment": 9000.0}
+        ]
+
+    def test_skips_rows_with_zero_or_missing_quantity(self):
+        rows = [
+            {"tradingsymbol": "SOLDOFF", "quantity": 0, "average_price": 100.0},
+            {"tradingsymbol": "", "quantity": 5, "average_price": 100.0},
+        ]
+        assert portfolio_service.zerodha_holdings_from_api(rows) == []
+
+
+class TestZerodhaPositionsFromApi:
+    def test_translates_short_weekly_index_option_using_ltp_from_the_row(self):
+        # tradingsymbol is Zerodha's own weekly-option format -- the exact
+        # same string shape parse_zerodha_option_instrument already
+        # decodes for the CSV positions export, so it's reused as-is here.
+        rows = [
+            {
+                "tradingsymbol": "NIFTY2681123000PE",
+                "quantity": -75,
+                "average_price": 10.15,
+                "last_price": 1.1,
+            }
+        ]
+        positions = portfolio_service.zerodha_positions_from_api(rows)
+        assert len(positions) == 1
+        p = positions[0]
+        assert p["raw_name"] == "NIFTY2681123000PE"
+        assert p["symbol"] == "NIFTY"
+        assert p["expiry_date"] == date(2026, 8, 11)
+        assert p["strike_price"] == 23000.0
+        assert p["option_type"] == OptionType.PE
+        assert p["qty"] == -75.0
+        assert p["avg_price"] == 10.15
+        assert p["ltp"] == 1.1
+
+    def test_undecoded_monthly_stock_option_format_keeps_raw_name_with_no_contract_detail(self):
+        rows = [{"tradingsymbol": "SBIN25AUG970PE", "quantity": 1, "average_price": 5.0, "last_price": 4.5}]
+        positions = portfolio_service.zerodha_positions_from_api(rows)
+        assert positions[0]["symbol"] is None
+        assert positions[0]["expiry_date"] is None
+        assert positions[0]["raw_name"] == "SBIN25AUG970PE"
+
+    def test_missing_last_price_leaves_ltp_none(self):
+        rows = [{"tradingsymbol": "NIFTY2681123000PE", "quantity": -75, "average_price": 10.15}]
+        assert portfolio_service.zerodha_positions_from_api(rows)[0]["ltp"] is None
+
+    def test_skips_closed_positions_with_zero_quantity(self):
+        rows = [{"tradingsymbol": "CLOSED", "quantity": 0, "average_price": 1.0}]
+        assert portfolio_service.zerodha_positions_from_api(rows) == []
+
+
 class TestApplyFallbackOptionLtp:
     def _position(self, **overrides):
         base = {

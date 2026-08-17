@@ -11,7 +11,11 @@ pages = [
     st.Page("pages/1_Dashboard.py", title="Screener", default=True),
     st.Page("pages/2_Stock_Detail.py", title="Equity"),
     st.Page("pages/5_Options.py", title="Options"),
-    st.Page("pages/6_My_Broker.py", title="My Broker"),
+    # url_path pinned explicitly (not left to Streamlit's filename-derived
+    # default) so the URL to register as this app's Kite Connect "Redirect
+    # URL" (Zerodha's "Connect Zerodha account" flow, pages/6_My_Broker.py)
+    # stays stable even if this file is ever renamed.
+    st.Page("pages/6_My_Broker.py", title="My Broker", url_path="My_Broker"),
     st.Page("pages/7_My_Trades.py", title="My Trades"),
     st.Page("pages/8_My_Holdings.py", title="My Holdings"),
     st.Page("pages/9_My_Positions.py", title="My Positions"),
