@@ -1989,11 +1989,20 @@ this table).
   the CSV-upload path (`_render_positions_upload_section`), only the two
   live "Sync now" flows.
 - `portfolio_service.csp_target_pnl(max_credit, trade_date, expiry_date,
-  as_of=None)` — `max_credit * duration_held / duration_to_expiry`
-  (`as_of` defaults to `date.today()`, explicit for testability, same
-  convention `screener_service`/`refresh_service` use). A linear
-  time-decay rule of thumb, not a pricing model. `None` until a Trade
-  Date is entered (nothing to compute a duration against), or if
+  as_of=None)` — `min(max_credit * 0.95, max_credit *
+  (duration_held / duration_to_expiry) * 1.2)` (`as_of` defaults to
+  `date.today()`, explicit for testability, same convention
+  `screener_service`/`refresh_service` use). **Two terms, on request** —
+  the accelerated term (`* 1.2`) runs 20% faster than plain linear,
+  changing every day as `duration_held` grows, so it reads as "is
+  today's decay running ahead of or behind a slightly-faster-than-linear
+  expectation"; the `0.95 * max_credit` term is a hard ceiling the
+  accelerated term will eventually exceed (past `duration_held /
+  duration_to_expiry` ≈ 0.79), at which point `min()` locks the target
+  at 95% of max credit for the rest of the position's life, including
+  well past expiry if it's still open — chasing the last 5% isn't worth
+  the assignment/gamma risk of holding to the very end. `None` until a
+  Trade Date is entered (nothing to compute a duration against), or if
   `duration_to_expiry` isn't positive (expiry on/before the trade date).
 - `portfolio_service.csp_stop_loss(existing_stop_loss, max_credit,
   pnl_pct)` — the one genuinely stateful calculation on these pages:

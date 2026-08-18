@@ -42,7 +42,9 @@ render_global_refresh_bar(client)
 st.caption(
     'Every position leg from a Trade whose Trade Type is "CSP". Go to My Trades, select a trade, click '
     '"Analyse Trade", and rename its Trade Type to "CSP" to have it show up here. Set each leg\'s Trade Date '
-    "below to unlock Target P&L; Stop Loss ratchets up automatically as P&L% improves and is saved on every visit."
+    "below to unlock Target P&L; Stop Loss ratchets up automatically as P&L% improves and is saved on every visit. "
+    "Target P&L changes every day to reflect whether there has been higher-than-average decay in the option "
+    "premium, but it never crosses 95% of Max Credit."
 )
 
 ensure_cache_bust()

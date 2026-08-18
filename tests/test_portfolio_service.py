@@ -449,11 +449,30 @@ class TestCspMaxCredit:
 
 
 class TestCspTargetPnl:
-    def test_halfway_through_duration_targets_half_max_credit(self):
+    def test_before_cap_uses_the_accelerated_linear_target(self):
+        # 50% of the way through -- accelerated target (1.2x pace) is
+        # 0.6 * max_credit, well under the 0.95 * max_credit cap.
         trade_date = date(2026, 8, 1)
         expiry_date = date(2026, 8, 21)  # 20 days to expiry
         as_of = date(2026, 8, 11)  # 10 days held
-        assert portfolio_service.csp_target_pnl(3375.0, trade_date, expiry_date, as_of) == pytest.approx(1687.5)
+        assert portfolio_service.csp_target_pnl(3375.0, trade_date, expiry_date, as_of) == pytest.approx(2025.0)
+
+    def test_past_the_crossover_point_is_capped_at_95_pct(self):
+        # 80% of the way through -- accelerated target (0.8 * 1.2 = 0.96
+        # * max_credit) would exceed the 0.95 cap, so the cap wins.
+        max_credit = 1000.0
+        trade_date = date(2026, 8, 1)
+        expiry_date = date(2026, 11, 9)  # 100 days to expiry
+        as_of = trade_date + timedelta(days=80)  # 80 days held
+        assert portfolio_service.csp_target_pnl(max_credit, trade_date, expiry_date, as_of) == pytest.approx(950.0)
+
+    def test_held_past_expiry_stays_capped_at_95_pct(self):
+        # Never crosses 95% of max credit, no matter how long held.
+        max_credit = 1000.0
+        trade_date = date(2026, 8, 1)
+        expiry_date = date(2026, 8, 21)  # 20 days to expiry
+        as_of = date(2026, 9, 20)  # 50 days held -- well past expiry
+        assert portfolio_service.csp_target_pnl(max_credit, trade_date, expiry_date, as_of) == pytest.approx(950.0)
 
     def test_trade_date_equal_to_expiry_is_none(self):
         d = date(2026, 8, 21)

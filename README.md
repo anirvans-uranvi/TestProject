@@ -1048,13 +1048,18 @@ and are silently skipped. Columns, left to right:
 - **Underlying**, **Expiry**, **Strike**, **Qty** (signed -- negative is
   short), **Avg Price**, **LTP**, **P&L**, **P&L%** -- the same fields
   My Positions shows for an option leg.
-- **Target P&L** -- a linear time-decay target: `Max Credit * Duration
-  Held / Duration to Expiry`, where `Max Credit = Avg Price * |Qty|`
+- **Target P&L** -- `min(Max Credit * 0.95, Max Credit * (Duration Held
+  / Duration to Expiry) * 1.2)`, where `Max Credit = Avg Price * |Qty|`
   (the total premium collected), `Duration to Expiry = Expiry - Trade
-  Date`, and `Duration Held = Today - Trade Date`. A rule-of-thumb
-  gauge for "is theta decay running ahead of or behind schedule", not a
-  precise pricing model. Blank until Trade Date is set (no duration to
-  compute against).
+  Date`, and `Duration Held = Today - Trade Date`. Changes every day as
+  `Duration Held` grows -- the `* 1.2` runs the target 20% faster than
+  plain linear, reflecting that theta decay tends to accelerate as
+  expiry nears (a "higher than average decay" expectation, not a
+  straight-line one) -- but it's capped so it never crosses 95% of Max
+  Credit no matter how long the position is held, even well past expiry
+  (chasing the last 5% isn't worth the assignment/gamma risk of holding
+  to the very end). A rule-of-thumb gauge, not a precise pricing model.
+  Blank until Trade Date is set (no duration to compute against).
 - **Stop Loss** -- ratchets up automatically as the position becomes
   more profitable, and is saved on every visit so it never resets: a
   brand-new leg (nothing saved yet) starts at `-Max Credit` (willing to
