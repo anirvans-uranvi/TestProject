@@ -313,7 +313,23 @@ with clear_col:
 # (get_dashboard_fo_metrics returns raw dict rows, not a parsed model) --
 # sorting/equality-comparing them as strings works fine (ISO format sorts
 # chronologically), and format_func below only parses one for display.
-available_expiries = sorted({r["expiry_date"] for r in dashboard_fo_metrics_rows if r.get("expiry_date")})
+#
+# dashboard_fo_metrics_rows spans every symbol with F&O data, which
+# includes the seeded Index rows (NIFTY, BANKNIFTY, BANKEX, ...) used
+# for the BSE index-options feed (bse_fo_provider is index-only, see
+# migration 0019 era). Pooling expiries across ALL of those would leak
+# an index's own expiry (e.g. BANKEX's BSE Aug expiry) into this
+# dropdown even though no Nifty 50 STOCK actually has data for that
+# month -- restrict to expiries that belong to a symbol actually shown
+# in the screener below.
+_screener_symbols = set(df["symbol"])
+available_expiries = sorted(
+    {
+        r["expiry_date"]
+        for r in dashboard_fo_metrics_rows
+        if r.get("expiry_date") and r.get("symbol") in _screener_symbols
+    }
+)
 if available_expiries:
     if st.session_state.get("dashboard_options_month") not in available_expiries:
         st.session_state["dashboard_options_month"] = available_expiries[0]

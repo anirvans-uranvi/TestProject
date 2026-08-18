@@ -739,6 +739,27 @@ data from `latest_screener_view`** -- reach for `get_latest_prices` (or
 a raw `daily_screener_snapshots` query) instead; the view's widening is
 correct only when the caller's own `auth.uid()` is the relevant user.
 
+**A third bug, this one in the Dashboard page itself rather than the
+recompute pipeline**: `recompute_dashboard_metrics` sources `all_symbols`
+from `companies_repo.list_all_companies`, which includes the seeded
+Index rows (NIFTY, BANKNIFTY, BANKEX, ...; see the `company_type`
+section above) alongside the 50 Nifty50 stocks -- so `dashboard_fo_metrics`
+can carry rows for those index symbols too, sourced from the BSE
+index-options feed (`bse_fo_provider`, restricted to index options only
+-- see "BSE F&O provider" below). The Dashboard's "Options month"
+dropdown originally built its choices from every distinct `expiry_date`
+across the **whole** `dashboard_fo_metrics` table, with no symbol
+filter -- so an index's own BSE expiry (e.g. BANKEX's, which need not
+line up with any NSE monthly stock-options expiry) leaked into the
+dropdown as an extra entry, even though the screener below only ever
+lists Nifty50 stocks and not one of them had a `dashboard_fo_metrics`
+row for that month. Fixed in `pages/1_Dashboard.py` by restricting
+`available_expiries` to rows whose `symbol` is one of the screener's own
+`df["symbol"]` values, before taking the distinct set of expiry dates --
+the same "the cache spans a wider universe than what this specific view
+displays" shape as the Hindustan Zinc bug above, just filtering down
+instead of widening up.
+
 `dashboard_fo_metrics` was originally one row per symbol (migration
 `0009`, holding only the nearest expiry); migration `0010` dropped and
 recreated it keyed by `(symbol, expiry_date)` instead once a per-month
