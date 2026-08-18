@@ -57,6 +57,11 @@ def load_trade_meta(_client, _user_id: str, _cache_bust: int):
     return portfolio_repo.list_trade_meta(_client, _user_id)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def load_position_meta(_client, _user_id: str, _cache_bust: int):
+    return portfolio_repo.list_position_meta(_client, _user_id)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_all_companies(_client, _cache_bust: int):
     return companies_repo.list_all_companies(_client)

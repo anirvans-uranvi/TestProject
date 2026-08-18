@@ -7,7 +7,14 @@ from __future__ import annotations
 
 from supabase import Client
 
-from src.models.portfolio import BrokerConnection, PortfolioHolding, PortfolioPosition, PortfolioTradeGroup, PortfolioTradeMeta
+from src.models.portfolio import (
+    BrokerConnection,
+    PortfolioHolding,
+    PortfolioPosition,
+    PortfolioPositionMeta,
+    PortfolioTradeGroup,
+    PortfolioTradeMeta,
+)
 
 
 def list_holdings(client: Client, user_id: str) -> list[PortfolioHolding]:
@@ -65,6 +72,7 @@ def delete_portfolio(client: Client, user_id: str, portfolio_name: str) -> None:
     client.table("broker_connections").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
     client.table("portfolio_trade_groups").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
     client.table("portfolio_trade_meta").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
+    client.table("portfolio_position_meta").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
 
 
 def list_positions(client: Client, user_id: str) -> list[PortfolioPosition]:
@@ -224,3 +232,54 @@ def set_trade_meta(
         }
     ]
     client.table("portfolio_trade_meta").upsert(payload, on_conflict="user_id,portfolio_name,trade_id").execute()
+
+
+def list_position_meta(client: Client, user_id: str) -> list[PortfolioPositionMeta]:
+    """Every leg's trade_date/stop_loss override across every one of the
+    user's portfolios -- same shape as list_trade_groups (keyed by
+    (portfolio_name, broker, raw_name)), for My CSP. A leg with no row
+    here has no trade_date entered yet and no stop_loss computed yet --
+    see src.services.portfolio_service.csp_target_pnl/csp_stop_loss."""
+    resp = client.table("portfolio_position_meta").select("*").eq("user_id", user_id).execute()
+    return [PortfolioPositionMeta.model_validate(r) for r in (resp.data or [])]
+
+
+def set_position_trade_date(
+    client: Client, user_id: str, portfolio_name: str, broker: str, raw_name: str, trade_date
+) -> None:
+    """Saves (upserts) one leg's Trade Date -- My CSP's own edit form.
+    Only touches `trade_date`; any already-saved `stop_loss` for this leg
+    is left untouched (omitted from the payload entirely, not sent as
+    None -- same partial-upsert convention `upsert_broker_connection`
+    already relies on)."""
+    payload = [
+        {
+            "user_id": user_id,
+            "portfolio_name": portfolio_name,
+            "broker": broker,
+            "raw_name": raw_name,
+            "trade_date": trade_date.isoformat() if trade_date else None,
+        }
+    ]
+    client.table("portfolio_position_meta").upsert(payload, on_conflict="user_id,portfolio_name,broker,raw_name").execute()
+
+
+def set_position_stop_loss(
+    client: Client, user_id: str, portfolio_name: str, broker: str, raw_name: str, stop_loss: float | None
+) -> None:
+    """Saves (upserts) one leg's ratcheted Stop Loss -- called by My CSP
+    on every render once it recomputes a leg's stop loss
+    (`portfolio_service.csp_stop_loss`), so the next render's "existing
+    stop loss" reflects it. Only touches `stop_loss`; any already-saved
+    `trade_date` is left untouched, same partial-upsert convention as
+    set_position_trade_date above."""
+    payload = [
+        {
+            "user_id": user_id,
+            "portfolio_name": portfolio_name,
+            "broker": broker,
+            "raw_name": raw_name,
+            "stop_loss": stop_loss,
+        }
+    ]
+    client.table("portfolio_position_meta").upsert(payload, on_conflict="user_id,portfolio_name,broker,raw_name").execute()

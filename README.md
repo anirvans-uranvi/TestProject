@@ -1057,6 +1057,38 @@ with what the Dashboard would show for the same underlying. Like the other Portf
 tab per portfolio; a portfolio with no "CSP"-tagged Trades shows a plain
 caption rather than an empty table.
 
+Three more columns track the trade over its life, each leg's own value
+saved to a new table, `portfolio_position_meta` (migration `0025`),
+keyed by the leg's natural identity `(portfolio_name, broker, raw_name)`:
+
+- **Trade Date** -- when the position was actually entered. No broker
+  export or API this app talks to reliably carries this for an
+  already-open position, so it's entered manually: pick the instrument
+  and date in the "Set Trade Date" form below the table and save.
+  **Defaults to today automatically** the first time a "Sync now" click
+  (Connect Dhan/Zerodha account -- CSV uploads don't do this) brings in
+  a position leg that has no Trade Date yet, so Target P&L never sits
+  stuck at N/A just because nobody's visited the form -- change it
+  anytime afterward if the real entry date was earlier; an already-set
+  date (whether you entered it or a prior sync defaulted it) is never
+  overwritten by a later sync.
+- **Target P&L** -- a linear time-decay target: `Max Credit * Duration
+  Held / Duration to Expiry`, where `Max Credit = Avg Price * |Qty|`
+  (the total premium collected), `Duration to Expiry = Expiry - Trade
+  Date`, and `Duration Held = Today - Trade Date`. A rule-of-thumb
+  gauge for "is theta decay running ahead of or behind schedule", not a
+  precise pricing model. Blank until Trade Date is set (no duration to
+  compute against).
+- **Stop Loss** -- ratchets up automatically as the position becomes
+  more profitable, and is saved on every visit so it never resets: a
+  brand-new leg (nothing saved yet) starts at `-Max Credit` (willing to
+  give back the full premium collected before stopping out); once P&L%
+  clears 25% the stop moves up to at least breakeven (₹0); once P&L%
+  clears 50% it moves up to at least half the max credit locked in.
+  Never moves down -- if P&L% later drops back below a threshold it just
+  crossed, the stop stays where it already ratcheted to. Doesn't need a
+  Trade Date (Max Credit and P&L% are enough).
+
 ## Docker
 
 ```bash

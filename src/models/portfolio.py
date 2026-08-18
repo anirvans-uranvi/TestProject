@@ -105,6 +105,32 @@ class PortfolioTradeMeta(BaseModel):
     updated_at: datetime | None = None
 
 
+class PortfolioPositionMeta(BaseModel):
+    """Per-LEG metadata for My CSP (pages/11_My_CSP.py) -- keyed by the
+    same natural leg identity `(portfolio_name, broker, raw_name)`
+    PortfolioTradeGroup uses, not PortfolioTradeMeta's per-*trade*
+    `trade_id` (a Trade's default grouping is one Trade per underlying
+    symbol, so two CSPs on the same underlying at different strikes/entry
+    dates would otherwise be forced to share one trade date and one stop
+    loss -- see supabase/migrations/0025_portfolio_position_meta.sql).
+    `trade_date` is user-entered (no broker export/API this app talks to
+    reliably carries the original entry date for an already-open
+    position); `stop_loss` is computed and saved back by the app itself
+    on every My CSP render (`portfolio_service.csp_stop_loss` -- a
+    ratchet that only ever tightens, never loosens, as the position
+    becomes more profitable)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    user_id: str
+    portfolio_name: str
+    broker: str
+    raw_name: str
+    trade_date: date | None = None
+    stop_loss: float | None = None
+    updated_at: datetime | None = None
+
+
 class BrokerConnection(BaseModel):
     """Saved API credentials letting one portfolio pull holdings/positions
     directly from a broker's API (see src/data_providers/dhan_provider.py/

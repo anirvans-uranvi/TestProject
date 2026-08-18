@@ -3,7 +3,7 @@ name-to-symbol matching, cross-broker merging, and valuation math. The
 sample CSV bodies below are the real Zerodha/Dhan export shapes this
 feature was built against."""
 import io
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -430,6 +430,88 @@ class TestCspBreakevenPct:
 
     def test_zero_underlying_ltp_is_none(self):
         assert portfolio_service.csp_breakeven_pct(23455.0, 0.0) is None
+
+
+class TestCspMaxCredit:
+    def test_short_position_uses_absolute_qty(self):
+        # A short put's qty is negative (this app's convention) -- max
+        # credit is still a positive amount.
+        assert portfolio_service.csp_max_credit(45.0, -75.0) == 3375.0
+
+    def test_long_position(self):
+        assert portfolio_service.csp_max_credit(45.0, 75.0) == 3375.0
+
+    def test_none_avg_price_is_none(self):
+        assert portfolio_service.csp_max_credit(None, -75.0) is None
+
+    def test_none_qty_is_none(self):
+        assert portfolio_service.csp_max_credit(45.0, None) is None
+
+
+class TestCspTargetPnl:
+    def test_halfway_through_duration_targets_half_max_credit(self):
+        trade_date = date(2026, 8, 1)
+        expiry_date = date(2026, 8, 21)  # 20 days to expiry
+        as_of = date(2026, 8, 11)  # 10 days held
+        assert portfolio_service.csp_target_pnl(3375.0, trade_date, expiry_date, as_of) == pytest.approx(1687.5)
+
+    def test_trade_date_equal_to_expiry_is_none(self):
+        d = date(2026, 8, 21)
+        assert portfolio_service.csp_target_pnl(3375.0, d, d, date(2026, 8, 25)) is None
+
+    def test_expiry_before_trade_date_is_none(self):
+        assert portfolio_service.csp_target_pnl(3375.0, date(2026, 8, 21), date(2026, 8, 1), date(2026, 8, 25)) is None
+
+    def test_none_max_credit_is_none(self):
+        assert portfolio_service.csp_target_pnl(None, date(2026, 8, 1), date(2026, 8, 21)) is None
+
+    def test_none_trade_date_is_none(self):
+        assert portfolio_service.csp_target_pnl(3375.0, None, date(2026, 8, 21)) is None
+
+    def test_none_expiry_date_is_none(self):
+        assert portfolio_service.csp_target_pnl(3375.0, date(2026, 8, 1), None) is None
+
+    def test_defaults_as_of_to_today(self):
+        # No as_of passed -- shouldn't raise, and since trade_date is
+        # today, duration_held is 0 so the target is 0.
+        today = date.today()
+        assert portfolio_service.csp_target_pnl(3375.0, today, today + timedelta(days=1)) == 0.0
+
+
+class TestCspStopLoss:
+    def test_no_existing_stop_loss_is_negative_max_credit(self):
+        assert portfolio_service.csp_stop_loss(None, 3375.0, None) == -3375.0
+
+    def test_none_max_credit_is_none(self):
+        assert portfolio_service.csp_stop_loss(None, None, 10.0) is None
+
+    def test_negative_pnl_pct_keeps_existing_unchanged(self):
+        assert portfolio_service.csp_stop_loss(-3375.0, 3375.0, -10.0) == -3375.0
+
+    def test_none_pnl_pct_keeps_existing_unchanged(self):
+        assert portfolio_service.csp_stop_loss(-3375.0, 3375.0, None) == -3375.0
+
+    def test_pnl_pct_below_25_keeps_existing_unchanged(self):
+        assert portfolio_service.csp_stop_loss(-3375.0, 3375.0, 10.0) == -3375.0
+
+    def test_pnl_pct_between_25_and_50_ratchets_to_breakeven(self):
+        assert portfolio_service.csp_stop_loss(-3375.0, 3375.0, 30.0) == 0.0
+
+    def test_pnl_pct_between_25_and_50_never_loosens_an_already_better_stop(self):
+        # Existing stop loss (500) is already better than breakeven (0).
+        assert portfolio_service.csp_stop_loss(500.0, 3375.0, 30.0) == 500.0
+
+    def test_pnl_pct_above_50_ratchets_to_half_max_credit(self):
+        assert portfolio_service.csp_stop_loss(0.0, 3375.0, 60.0) == 1687.5
+
+    def test_pnl_pct_above_50_never_loosens_an_already_better_stop(self):
+        assert portfolio_service.csp_stop_loss(2000.0, 3375.0, 60.0) == 2000.0
+
+    def test_pnl_pct_exactly_25_ratchets_to_breakeven(self):
+        assert portfolio_service.csp_stop_loss(-3375.0, 3375.0, 25.0) == 0.0
+
+    def test_pnl_pct_exactly_50_ratchets_to_half_max_credit(self):
+        assert portfolio_service.csp_stop_loss(0.0, 3375.0, 50.0) == 1687.5
 
 
 class TestClassifyPositionBucket:

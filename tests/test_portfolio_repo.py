@@ -8,7 +8,14 @@ import types
 from datetime import date
 
 from src.models.enums import OptionType
-from src.models.portfolio import BrokerConnection, PortfolioHolding, PortfolioPosition, PortfolioTradeGroup, PortfolioTradeMeta
+from src.models.portfolio import (
+    BrokerConnection,
+    PortfolioHolding,
+    PortfolioPosition,
+    PortfolioPositionMeta,
+    PortfolioTradeGroup,
+    PortfolioTradeMeta,
+)
 from src.repositories import portfolio_repo
 
 
@@ -261,6 +268,20 @@ class TestDeletePortfolio:
         remaining = client.store["portfolio_trade_meta"]
         assert len(remaining) == 1
         assert remaining[0]["trade_id"] == "KEEP"
+
+    def test_also_deletes_position_meta_within_the_named_portfolio_only(self):
+        client = _FakeClient()
+        client.store["portfolio_holdings"] = [_row("Portfolio 1", "Zerodha", "SBIN")]
+        client.store["portfolio_position_meta"] = [
+            _position_meta_row("Portfolio 1", "Zerodha", "SBIN"),
+            _position_meta_row("Portfolio 2", "Zerodha", "KEEP"),
+        ]
+
+        portfolio_repo.delete_portfolio(client, "u1", "Portfolio 1")
+
+        remaining = client.store["portfolio_position_meta"]
+        assert len(remaining) == 1
+        assert remaining[0]["raw_name"] == "KEEP"
 
     def test_does_not_touch_other_users_portfolio_of_the_same_name(self):
         client = _FakeClient()
@@ -608,3 +629,69 @@ class TestTradeMeta:
         rows = client.store["portfolio_trade_meta"]
         assert len(rows) == 1
         assert rows[0]["trade_type"] == "Hedge"
+
+
+def _position_meta_row(portfolio_name, broker, raw_name, trade_date=None, stop_loss=None, user_id="u1"):
+    return {
+        "user_id": user_id,
+        "portfolio_name": portfolio_name,
+        "broker": broker,
+        "raw_name": raw_name,
+        "trade_date": trade_date,
+        "stop_loss": stop_loss,
+        "updated_at": None,
+    }
+
+
+class TestPositionMeta:
+    def test_list_returns_only_the_requested_users_rows_as_models(self):
+        client = _FakeClient()
+        client.store["portfolio_position_meta"] = [
+            _position_meta_row("Portfolio 1", "Zerodha", "NIFTY26AUG23100PE", trade_date="2026-08-01", stop_loss=-3375.0),
+            {**_position_meta_row("Portfolio 1", "Zerodha", "OTHER"), "user_id": "u2"},
+        ]
+
+        result = portfolio_repo.list_position_meta(client, "u1")
+
+        assert len(result) == 1
+        assert isinstance(result[0], PortfolioPositionMeta)
+        assert result[0].trade_date == date(2026, 8, 1)
+        assert result[0].stop_loss == -3375.0
+
+    def test_set_position_trade_date_upserts_a_new_row(self):
+        client = _FakeClient()
+
+        portfolio_repo.set_position_trade_date(client, "u1", "Portfolio 1", "Zerodha", "NIFTY26AUG23100PE", date(2026, 8, 1))
+
+        rows = client.store["portfolio_position_meta"]
+        assert len(rows) == 1
+        assert rows[0]["trade_date"] == "2026-08-01"
+
+    def test_set_position_trade_date_none_clears_it(self):
+        client = _FakeClient()
+
+        portfolio_repo.set_position_trade_date(client, "u1", "Portfolio 1", "Zerodha", "NIFTY26AUG23100PE", None)
+
+        rows = client.store["portfolio_position_meta"]
+        assert rows[0]["trade_date"] is None
+
+    def test_set_position_stop_loss_upserts_a_new_row(self):
+        client = _FakeClient()
+
+        portfolio_repo.set_position_stop_loss(client, "u1", "Portfolio 1", "Zerodha", "NIFTY26AUG23100PE", -3375.0)
+
+        rows = client.store["portfolio_position_meta"]
+        assert len(rows) == 1
+        assert rows[0]["stop_loss"] == -3375.0
+
+    def test_set_position_stop_loss_overwrites_the_existing_value_for_the_same_leg(self):
+        client = _FakeClient()
+        client.store["portfolio_position_meta"] = [
+            _position_meta_row("Portfolio 1", "Zerodha", "NIFTY26AUG23100PE", stop_loss=-3375.0)
+        ]
+
+        portfolio_repo.set_position_stop_loss(client, "u1", "Portfolio 1", "Zerodha", "NIFTY26AUG23100PE", 0.0)
+
+        rows = client.store["portfolio_position_meta"]
+        assert len(rows) == 1
+        assert rows[0]["stop_loss"] == 0.0

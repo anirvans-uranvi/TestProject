@@ -1936,6 +1936,69 @@ so each half is independently unit-testable without a live Supabase
 connection, same reasoning every other calculation on these pages
 follows.
 
+**Trade Date / Target P&L / Stop Loss (migration
+`0025_portfolio_position_meta.sql`, new table `portfolio_position_meta`)**
+— a real request after CSP tracking existed: gauge whether a CSP is
+"ahead of schedule" on theta decay, and auto-manage a trailing stop.
+Deliberately a **separate table from `portfolio_trade_meta`, keyed
+per-LEG** `(portfolio_name, broker, raw_name)` rather than per-*trade*
+`(portfolio_name, trade_id)`: a Trade's default grouping is one Trade
+per underlying symbol (`assign_trade_ids`), so two CSPs on the same
+underlying at different strikes/expiries/entry dates would otherwise
+collide on one `trade_id` and be forced to share a single trade date and
+stop loss — keying per-leg instead matches My CSP's own row granularity
+exactly (`src/utils/portfolio_page.py::load_position_meta`,
+`portfolio_repo.list_position_meta`/`set_position_trade_date`/
+`set_position_stop_loss`, and `delete_portfolio` extended to also clear
+this table).
+
+- `portfolio_service.csp_max_credit(avg_price, qty)` — `avg_price *
+  abs(qty)`. `abs()` because `qty` is signed (negative for a short
+  position), but "credit received" is inherently positive.
+- **Trade Date** is user-entered via a small `st.form` below the table
+  (an instrument `st.selectbox` + `st.date_input` + Save) — there's no
+  broker export or API this app talks to that reliably carries the
+  original entry date for an already-open position, so unlike every
+  other value on this page, this one simply can't be derived.
+  `portfolio_repo.set_position_trade_date` only touches the `trade_date`
+  column (any already-saved `stop_loss` for that leg is omitted from the
+  payload entirely, not sent as `None` — same partial-upsert convention
+  `upsert_broker_connection` already relies on, see its own docstring).
+  **`pages/6_My_Broker.py`'s `_default_new_position_trade_dates`** (called
+  from both `_sync_dhan`/`_sync_zerodha`, right after
+  `replace_broker_positions`) defaults every just-synced leg with no
+  `trade_date` yet to `date.today()` — a real request: without this, a
+  brand-new CSP synced today would show a blank Target P&L until the
+  user separately remembered to visit the Trade Date form. Looks up
+  every leg's current `trade_date` via `portfolio_repo.list_position_meta`
+  first and only calls `set_position_trade_date` for a leg that has
+  none — never overwrites one already set (whether entered by the user
+  or defaulted by an earlier sync), and deliberately **not** wired into
+  the CSV-upload path (`_render_positions_upload_section`), only the two
+  live "Sync now" flows.
+- `portfolio_service.csp_target_pnl(max_credit, trade_date, expiry_date,
+  as_of=None)` — `max_credit * duration_held / duration_to_expiry`
+  (`as_of` defaults to `date.today()`, explicit for testability, same
+  convention `screener_service`/`refresh_service` use). A linear
+  time-decay rule of thumb, not a pricing model. `None` until a Trade
+  Date is entered (nothing to compute a duration against), or if
+  `duration_to_expiry` isn't positive (expiry on/before the trade date).
+- `portfolio_service.csp_stop_loss(existing_stop_loss, max_credit,
+  pnl_pct)` — the one genuinely stateful calculation on these pages:
+  called fresh on **every render** of My CSP, and whatever it returns is
+  immediately saved back (`set_position_stop_loss`) so the *next*
+  render's `existing_stop_loss` reflects it. A pure ratchet, tightens
+  only, never loosens: no `existing_stop_loss` yet → `-max_credit`;
+  `pnl_pct < 0` → unchanged; `25 <= pnl_pct < 50` →
+  `max(existing_stop_loss, 0)`; `pnl_pct >= 50` →
+  `max(existing_stop_loss, 0.5 * max_credit)`; `0 <= pnl_pct < 25` →
+  unchanged (no rule specified for that band). Doesn't need a Trade
+  Date — `max_credit` and `pnl_pct` (already computed by
+  `compute_positions_view` for the P&L% column) are enough. The page
+  only issues the upsert when the freshly-computed value actually
+  differs from what's stored (a small float-tolerance check), so a
+  render where nothing crossed a new band writes nothing.
+
 ## Auth: a non-obvious quirk
 
 **Password reset does not use Supabase's email link.** This was tried

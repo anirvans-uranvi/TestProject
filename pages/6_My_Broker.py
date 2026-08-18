@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import streamlit as st
 from postgrest.exceptions import APIError
@@ -251,6 +251,27 @@ def _fetch_fallback_option_chains(positions: list[dict]) -> dict[tuple[str, obje
     return {(symbol, expiry_date): fo_repo.get_option_chain(client, symbol, expiry_date) for symbol, expiry_date in needed}
 
 
+def _default_new_position_trade_dates(*, portfolio_name: str, broker: str, positions: list[dict]) -> None:
+    """Tags every just-synced position leg that has no Trade Date yet
+    with today's date -- so My CSP's Target P&L (which needs a Trade
+    Date to compute a duration) never gets stuck at N/A for a user who
+    never visits its "Set Trade Date" form. Never overwrites an
+    already-set trade_date, whether that was entered by the user or
+    defaulted by an earlier sync -- only a leg with *no* trade_date at
+    all gets today's date. CSV uploads deliberately don't get this
+    treatment (only the live "Sync now" flows) -- see
+    portfolio_service.csp_target_pnl / portfolio_repo.set_position_trade_date."""
+    existing_dates = {
+        (m.broker, m.raw_name): m.trade_date
+        for m in portfolio_repo.list_position_meta(client, user_id)
+        if m.portfolio_name == portfolio_name
+    }
+    today = date.today()
+    for p in positions:
+        if existing_dates.get((broker, p["raw_name"])) is None:
+            portfolio_repo.set_position_trade_date(client, user_id, portfolio_name, broker, p["raw_name"], today)
+
+
 def _sync_dhan(*, portfolio_name: str, broker: str, connection: BrokerConnection) -> None:
     """Pulls holdings + positions straight from Dhan's API and replaces
     this portfolio's Dhan-sourced rows -- the exact same repo calls the
@@ -291,6 +312,7 @@ def _sync_dhan(*, portfolio_name: str, broker: str, connection: BrokerConnection
     position_records = portfolio_service.positions_to_records(user_id, portfolio_name, broker, positions)
     portfolio_repo.replace_broker_holdings(client, user_id, portfolio_name, broker, holding_records)
     portfolio_repo.replace_broker_positions(client, user_id, portfolio_name, broker, position_records)
+    _default_new_position_trade_dates(portfolio_name=portfolio_name, broker=broker, positions=positions)
     st.session_state["portfolio_cache_bust"] += 1
     st.cache_data.clear()
     st.success(
@@ -334,6 +356,7 @@ def _sync_zerodha(*, portfolio_name: str, broker: str, connection: BrokerConnect
     position_records = portfolio_service.positions_to_records(user_id, portfolio_name, broker, positions)
     portfolio_repo.replace_broker_holdings(client, user_id, portfolio_name, broker, holding_records)
     portfolio_repo.replace_broker_positions(client, user_id, portfolio_name, broker, position_records)
+    _default_new_position_trade_dates(portfolio_name=portfolio_name, broker=broker, positions=positions)
     st.session_state["portfolio_cache_bust"] += 1
     st.cache_data.clear()
     st.success(

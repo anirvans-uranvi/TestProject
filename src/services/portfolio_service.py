@@ -607,6 +607,69 @@ def csp_breakeven_pct(breakeven_price: float | None, underlying_ltp: float | Non
     return (breakeven_price / underlying_ltp - 1) * 100
 
 
+def csp_max_credit(avg_price: float | None, qty: float | None) -> float | None:
+    """Total premium collected for writing a CSP leg -- `avg_price *
+    abs(qty)`. `abs()` because `qty` is signed (negative for a short
+    position, this app's convention -- see PortfolioPosition), but
+    "credit received" is inherently a positive amount. `None` when
+    either input is missing."""
+    if avg_price is None or qty is None:
+        return None
+    return avg_price * abs(qty)
+
+
+def csp_target_pnl(
+    max_credit: float | None, trade_date: date | None, expiry_date: date | None, as_of: date | None = None
+) -> float | None:
+    """My CSP's "Target P&L" -- a linear time-decay target: as a CSP
+    approaches expiry, theta decay should carry its P&L from 0 toward the
+    full `max_credit` roughly linearly with time elapsed (a common rule
+    of thumb for premium sellers, not a precise pricing model). `as_of`
+    defaults to `date.today()`, explicit for testability, same
+    convention `screener_service`/`refresh_service` already use. `None`
+    when `max_credit`/`trade_date`/`expiry_date` is missing, or the
+    duration to expiry isn't positive (expiry on or before the trade
+    date -- division by zero, or nonsensical for a same-day/already-past
+    expiry)."""
+    if max_credit is None or trade_date is None or expiry_date is None:
+        return None
+    duration_to_expiry = (expiry_date - trade_date).days
+    if duration_to_expiry <= 0:
+        return None
+    duration_held = ((as_of or date.today()) - trade_date).days
+    return max_credit * duration_held / duration_to_expiry
+
+
+def csp_stop_loss(existing_stop_loss: float | None, max_credit: float | None, pnl_pct: float | None) -> float | None:
+    """My CSP's "Stop Loss" -- a ratchet that only ever tightens (moves
+    up), computed fresh on every render and saved back
+    (`portfolio_repo.set_position_stop_loss`) so the next render's
+    `existing_stop_loss` reflects it:
+    - No `existing_stop_loss` yet (nothing saved for this leg before --
+      a "new trade") -> `-max_credit`: willing to give back the entire
+      premium collected before stopping out.
+    - `pnl_pct` negative -> unchanged (never tighten while the position
+      is already underwater).
+    - `25 <= pnl_pct < 50` -> `max(existing_stop_loss, 0)` -- move the
+      stop to breakeven once a quarter of the max credit is captured.
+    - `pnl_pct >= 50` -> `max(existing_stop_loss, 0.5 * max_credit)` --
+      lock in at least half the max credit once captured.
+    - `0 <= pnl_pct < 25` -> unchanged (no rule specified for this band).
+    `None` (nothing to save) when `max_credit` is missing -- there's
+    nothing to compute a ratchet against."""
+    if max_credit is None:
+        return None
+    if existing_stop_loss is None:
+        return -max_credit
+    if pnl_pct is None or pnl_pct < 0:
+        return existing_stop_loss
+    if pnl_pct >= 50:
+        return max(existing_stop_loss, 0.5 * max_credit)
+    if pnl_pct >= 25:
+        return max(existing_stop_loss, 0.0)
+    return existing_stop_loss
+
+
 def classify_position_bucket(
     option_type: OptionType | None, symbol: str | None, company_type_by_symbol: dict[str, CompanyType]
 ) -> str:

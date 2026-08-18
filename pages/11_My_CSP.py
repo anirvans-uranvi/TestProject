@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 import streamlit as st
 from postgrest.exceptions import APIError
 from pydantic import ValidationError
 
 from src.calculations.classification import criterion_b
-from src.repositories import settings_repo
+from src.repositories import portfolio_repo, settings_repo
 from src.services import portfolio_service
 from src.utils.formatting import format_inr, pass_fail_icon
 from src.utils.portfolio_page import (
@@ -15,6 +17,7 @@ from src.utils.portfolio_page import (
     load_all_companies,
     load_holdings,
     load_latest_prices,
+    load_position_meta,
     load_positions,
     load_returns_and_pe,
     load_trade_groups,
@@ -38,7 +41,8 @@ render_disclaimer()
 render_global_refresh_bar(client)
 st.caption(
     'Every position leg from a Trade whose Trade Type is "CSP". Go to My Trades, select a trade, click '
-    '"Analyse Trade", and rename its Trade Type to "CSP" to have it show up here.'
+    '"Analyse Trade", and rename its Trade Type to "CSP" to have it show up here. Set each leg\'s Trade Date '
+    "below to unlock Target P&L; Stop Loss ratchets up automatically as P&L% improves and is saved on every visit."
 )
 
 ensure_cache_bust()
@@ -74,6 +78,13 @@ except APIError:
     # "no Trade Type saved yet", which just means nothing is tagged "CSP".
     saved_trade_meta = []
 
+try:
+    saved_position_meta = load_position_meta(client, user_id, st.session_state["portfolio_cache_bust"])
+except APIError:
+    # portfolio_position_meta doesn't exist yet (migration 0025) -- degrade
+    # to "no Trade Date entered / Stop Loss computed yet" for every leg.
+    saved_position_meta = []
+
 
 def _fmt_breakeven(breakeven_price: float | None, breakeven_pct: float | None) -> str:
     """"₹22,455.00 (-2.27%)" -- the CSP breakeven price (Strike - Avg
@@ -91,6 +102,7 @@ def _render_csp_tab(
     positions_for_portfolio: list,
     trade_groups_for_portfolio: list,
     trade_meta_for_portfolio: list,
+    position_meta_for_portfolio: list,
     company_type_by_symbol: dict,
 ) -> None:
     legs = build_trade_legs(client, st.session_state["portfolio_cache_bust"], holdings_for_portfolio, positions_for_portfolio)
@@ -123,6 +135,7 @@ def _render_csp_tab(
     symbols = tuple(sorted({leg["symbol"] for leg in csp_legs if leg["symbol"]}))
     ltp_by_symbol = load_latest_prices(client, symbols, st.session_state["portfolio_cache_bust"])
     returns_by_symbol = load_returns_and_pe(client, symbols, st.session_state["portfolio_cache_bust"])
+    position_meta_by_leg = {(m.broker, m.raw_name): m for m in position_meta_for_portfolio}
 
     table_rows = []
     for leg in csp_legs:
@@ -133,6 +146,17 @@ def _render_csp_tab(
         underlying_ltp = ltp_by_symbol.get(leg["symbol"]) if leg["symbol"] else None
         breakeven_price = portfolio_service.csp_breakeven_price(leg["strike_price"], leg["avg_price"])
         breakeven_pct = portfolio_service.csp_breakeven_pct(breakeven_price, underlying_ltp)
+
+        leg_meta = position_meta_by_leg.get((leg["broker"], leg["raw_name"]))
+        trade_date = leg_meta.trade_date if leg_meta else None
+        existing_stop_loss = leg_meta.stop_loss if leg_meta else None
+
+        max_credit = portfolio_service.csp_max_credit(leg["avg_price"], leg["qty"])
+        target_pnl = portfolio_service.csp_target_pnl(max_credit, trade_date, leg["expiry_date"])
+        new_stop_loss = portfolio_service.csp_stop_loss(existing_stop_loss, max_credit, leg["pnl_pct"])
+        if new_stop_loss is not None and (existing_stop_loss is None or abs(new_stop_loss - existing_stop_loss) > 1e-9):
+            portfolio_repo.set_position_stop_loss(client, user_id, portfolio_name, leg["broker"], leg["raw_name"], new_stop_loss)
+
         table_rows.append(
             {
                 "Instrument": leg["raw_name"],
@@ -155,6 +179,9 @@ def _render_csp_tab(
                 # criterion_b) so this column always agrees with what the
                 # Dashboard would show for the same underlying.
                 "Momentum": pass_fail_icon(criterion_b(return_1d, return_5d, return_20d)),
+                "Trade Date": trade_date.strftime("%d %b %Y") if trade_date else None,
+                "Target P&L": target_pnl,
+                "Stop Loss": new_stop_loss,
             }
         )
 
@@ -173,8 +200,37 @@ def _render_csp_tab(
             "1D": st.column_config.NumberColumn(format="%+.2f%%"),
             "5D": st.column_config.NumberColumn(format="%+.2f%%"),
             "20D": st.column_config.NumberColumn(format="%+.2f%%"),
+            "Target P&L": st.column_config.NumberColumn(format="₹%,.2f"),
+            "Stop Loss": st.column_config.NumberColumn(format="₹%,.2f"),
         },
     )
+
+    st.markdown("**Set Trade Date**")
+    st.caption(
+        "Target P&L needs this (there's no reliable \"entry date\" in any broker export/API for an "
+        "already-open position, so it's entered here manually)."
+    )
+    instrument_options = [leg["raw_name"] for leg in csp_legs]
+    with st.form(f"csp_trade_date_form_{slug(portfolio_name)}"):
+        selected_instrument = st.selectbox(
+            "Instrument", instrument_options, key=f"csp_trade_date_select_{slug(portfolio_name)}"
+        )
+        selected_leg = next(leg for leg in csp_legs if leg["raw_name"] == selected_instrument)
+        existing_meta = position_meta_by_leg.get((selected_leg["broker"], selected_leg["raw_name"]))
+        new_trade_date = st.date_input(
+            "Trade Date",
+            value=existing_meta.trade_date if existing_meta else date.today(),
+            key=f"csp_trade_date_input_{slug(portfolio_name)}",
+        )
+        save_submitted = st.form_submit_button("Save")
+    if save_submitted:
+        portfolio_repo.set_position_trade_date(
+            client, user_id, portfolio_name, selected_leg["broker"], selected_leg["raw_name"], new_trade_date
+        )
+        st.session_state["portfolio_cache_bust"] += 1
+        st.cache_data.clear()
+        st.success(f'Trade Date saved for "{selected_instrument}".')
+        st.rerun()
 
 
 portfolio_names = sorted({h.portfolio_name for h in saved_holdings} | {p.portfolio_name for p in saved_positions})
@@ -194,5 +250,6 @@ else:
                 [p for p in saved_positions if p.portfolio_name == name],
                 [g for g in saved_trade_groups if g.portfolio_name == name],
                 [m for m in saved_trade_meta if m.portfolio_name == name],
+                [m for m in saved_position_meta if m.portfolio_name == name],
                 company_type_by_symbol,
             )
