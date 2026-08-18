@@ -33,7 +33,13 @@ class PortfolioPosition(BaseModel):
     long -- since option P&L direction depends on it. `symbol`/`expiry_date`/
     `strike_price`/`option_type` are None when the instrument string couldn't
     be decoded (e.g. a contract format not covered by the parser); the row
-    is still saved and shown, just with no contract detail."""
+    is still saved and shown, just with no contract detail. `ltp_as_of` is
+    None for a live LTP (Zerodha's own `last_price`, a successful Dhan
+    Market Quote call, or a CSV upload's own LTP column) -- set only when
+    `ltp` came from this app's own end-of-day F&O data instead
+    (`portfolio_service.apply_fallback_option_ltp`, e.g. a Dhan sync whose
+    Market Quote call 401'd -- see migration `0026`), so the UI can show
+    "(as of <date>)" next to a stale fallback LTP."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -48,6 +54,7 @@ class PortfolioPosition(BaseModel):
     qty: float
     avg_price: float
     ltp: float | None = None
+    ltp_as_of: date | None = None
     uploaded_at: datetime | None = None
 
 

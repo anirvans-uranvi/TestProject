@@ -1528,6 +1528,33 @@ positions resolve once `fetch_fo_data.py` has actually run against the
 widened universe; only a SENSEX position or a strike/expiry genuinely
 outside the tracked chain would still fall back to N/A.
 
+**A real bug this eventually caused (migration `0026_portfolio_positions_ltp_as_of.sql`)**:
+a fallback LTP looked visually identical to a live one everywhere it was
+shown — confirmed live: a JioFin CSP showed LTP 3.30 on My CSP (the
+previous NSE F&O refresh's close) while Dhan's own app showed a live
+4.40 for the exact same contract, with nothing in this app distinguishing
+"live" from "yesterday's close" a full trading day apart. Fixed by
+threading the fallback chain row's own `trade_date` through as
+`ltp_as_of` on `PortfolioPosition` (`None` = live/as-given — Zerodha's
+own `last_price`, a successful Dhan Market Quote call, or a CSV upload's
+own LTP column; a date = this fallback fired). `apply_fallback_option_ltp`
+now returns `(price, trade_date)` pairs from its lookup table instead of
+just `price`, and only ever sets `ltp_as_of` on the same branch that
+already only-ever-fills-a-gap (never touches a position whose `ltp` a
+broker/CSV already supplied). `positions_to_records` reads it via
+`p.get("ltp_as_of")`, not `p["ltp_as_of"]`, since every other
+position-parsing path (CSV, Zerodha API) never sets that key at all —
+same "missing key means live" convention the `None` default already
+implies. My CSP's `LTP` column shows `"₹4.40"` for a live quote or
+`"₹3.30 (as of 17 Aug 2026)"` for a fallback one (`_fmt_ltp`, same
+"value (extra info)" string-column convention `_fmt_breakeven` already
+uses on that page) — same idea as the Dashboard's own `"(as of <date>)"`
+suffix for a stale screener price, just sourced from a different table.
+My Positions doesn't need the equivalent treatment: it dropped its own
+`LTP` column entirely on an earlier request (only used internally to
+compute P&L/P&L%, never displayed), so there's no live-vs-fallback
+distinction to surface there.
+
 **Security trade-off, stated in the UI itself, not just here:** the
 access token can also place trades — Dhan has no read-only scope for an
 individual account — and it's stored in `broker_connections` as entered,

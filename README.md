@@ -724,7 +724,13 @@ NSE, migration `0018`) and SENSEX/BANKEX index options (via BSE, migration
 `0019`) alike; only a strike/expiry genuinely outside the tracked chain
 stays N/A. A *stock* option position, though, only ever falls back to
 NSE's chain -- BSE is index-options-only (see the F&O Data Refresh
-buttons section above).
+buttons section above). **A fallback LTP is flagged, not silent**:
+`portfolio_positions.ltp_as_of` (migration `0026`) is set to that chain
+row's own trade date whenever the fallback fires, `None` for a live
+quote -- My CSP shows `"(as of <date>)"` next to a fallback LTP so it's
+never mistaken for a live one (confirmed live: a JioFin CSP showed LTP
+3.30 on My CSP against a live 4.40 in Dhan's own app, with nothing in
+this app distinguishing the two before this).
 **Security trade-off:** the access token can also place trades (Dhan
 has no read-only scope for individual accounts), and it's stored as
 entered, protected only by the same row-level security every other
@@ -1047,7 +1053,13 @@ and are silently skipped. Columns, left to right:
   overwritten by a later sync.
 - **Underlying**, **Expiry**, **Strike**, **Qty** (signed -- negative is
   short), **Avg Price**, **LTP**, **P&L**, **P&L%** -- the same fields
-  My Positions shows for an option leg.
+  My Positions shows for an option leg. `LTP` shows `"(as of <date>)"`
+  next to the price when it came from this app's own end-of-day F&O
+  data rather than a live broker quote (`portfolio_positions.ltp_as_of`,
+  migration `0026`) -- most commonly a Dhan sync whose Market Quote call
+  failed (e.g. the account lacks the separate "Data APIs" subscription),
+  which otherwise silently shows a stale close with nothing
+  distinguishing it from a live tick.
 - **Target P&L** -- `min(Max Credit * 0.95, Max Credit * (Duration Held
   / Duration to Expiry) * 1.2)`, where `Max Credit = Avg Price * |Qty|`
   (the total premium collected), `Duration to Expiry = Expiry - Trade

@@ -502,11 +502,22 @@ def apply_fallback_option_ltp(
     Only ever fills gaps; never overwrites an `ltp` a broker already gave.
     Positions with no matching chain entry (most commonly index options --
     NIFTY/BANKNIFTY/SENSEX aren't tracked by this app at all) are left as
-    they were."""
-    lookups: dict[tuple[str, date], dict[tuple[float, str], float]] = {}
+    they were.
+
+    Also sets `ltp_as_of` to the fallback row's own `trade_date` whenever
+    it fills a gap -- confirmed as a real, user-visible bug: without this,
+    a JioFin CSP showed LTP 3.30 on My CSP (this app's own EOD close from
+    the last F&O refresh) while Dhan's own app showed a live 4.40 for the
+    same contract, with no indication in this app that the number wasn't
+    live. `ltp_as_of` lets the UI show "(as of <date>)" next to it, same
+    convention the Dashboard already uses for a stale screener price. A
+    position whose `ltp` a broker/CSV already supplied keeps
+    `ltp_as_of=None` (that number is trusted as live/as-given, per this
+    function's own "only ever fills gaps" rule above)."""
+    lookups: dict[tuple[str, date], dict[tuple[float, str], tuple[float, date | None]]] = {}
     for key, rows in option_chains.items():
         lookups[key] = {
-            (round(float(r["strike_price"]), 4), r["option_type"]): price
+            (round(float(r["strike_price"]), 4), r["option_type"]): (price, r.get("trade_date"))
             for r in rows
             if (price := r.get("last_price") or r.get("close")) is not None
         }
@@ -514,9 +525,10 @@ def apply_fallback_option_ltp(
     for p in positions:
         if p["ltp"] is None and p["symbol"] and p["expiry_date"] and p["option_type"] and p["strike_price"] is not None:
             lookup = lookups.get((p["symbol"], p["expiry_date"]), {})
-            ltp = lookup.get((round(p["strike_price"], 4), p["option_type"].value))
-            if ltp is not None:
-                p = {**p, "ltp": ltp}
+            found = lookup.get((round(p["strike_price"], 4), p["option_type"].value))
+            if found is not None:
+                ltp, trade_date = found
+                p = {**p, "ltp": ltp, "ltp_as_of": trade_date}
         filled.append(p)
     return filled
 
@@ -794,7 +806,10 @@ def positions_to_records(
     user_id: str, portfolio_name: str, broker: str, positions: list[dict]
 ) -> list[PortfolioPosition]:
     """Converts parsed position dicts into PortfolioPosition rows ready
-    for portfolio_repo.replace_broker_positions."""
+    for portfolio_repo.replace_broker_positions. `ltp_as_of` is read via
+    `.get()`, not `[...]` -- only apply_fallback_option_ltp's output ever
+    carries that key; every other position-parsing path (CSV, Zerodha
+    API) never sets it at all, meaning "this LTP is live/as-given"."""
     return [
         PortfolioPosition(
             user_id=user_id,
@@ -808,6 +823,7 @@ def positions_to_records(
             qty=p["qty"],
             avg_price=p["avg_price"],
             ltp=p["ltp"],
+            ltp_as_of=p.get("ltp_as_of"),
         )
         for p in positions
     ]

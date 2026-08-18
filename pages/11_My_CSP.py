@@ -98,6 +98,21 @@ def _fmt_breakeven(breakeven_price: float | None, breakeven_pct: float | None) -
     return f"{format_inr(breakeven_price)} ({breakeven_pct:+.2f}%)"
 
 
+def _fmt_ltp(ltp: float | None, ltp_as_of) -> str:
+    """"₹4.40" for a live LTP, or "₹3.30 (as of 17 Aug 2026)" when it
+    came from this app's own end-of-day F&O data instead of a live
+    broker quote -- e.g. a Dhan sync whose Market Quote call 401'd
+    (commonly a missing "Data APIs" subscription), which otherwise
+    silently shows a stale close with nothing distinguishing it from a
+    live tick. Same "(as of <date>)" convention the Dashboard already
+    uses for a stale screener price."""
+    if ltp is None:
+        return "—"
+    if ltp_as_of is None:
+        return format_inr(ltp)
+    return f"{format_inr(ltp)} (as of {ltp_as_of.strftime('%d %b %Y')})"
+
+
 def _render_csp_tab(
     portfolio_name: str,
     holdings_for_portfolio: list,
@@ -167,7 +182,7 @@ def _render_csp_tab(
                 "Strike": leg["strike_price"],
                 "Qty": leg["qty"],
                 "Avg Price": leg["avg_price"],
-                "LTP": leg["ltp"],
+                "LTP": _fmt_ltp(leg["ltp"], leg.get("ltp_as_of")),
                 "P&L": leg["pnl"],
                 "P&L %": leg["pnl_pct"],
                 "Target P&L": target_pnl,
@@ -194,7 +209,6 @@ def _render_csp_tab(
         column_config={
             "Qty": st.column_config.NumberColumn(format="%+,.0f"),
             "Avg Price": st.column_config.NumberColumn(format="₹%,.2f"),
-            "LTP": st.column_config.NumberColumn(format="₹%,.2f"),
             "P&L": st.column_config.NumberColumn(format="₹%,.2f"),
             "P&L %": st.column_config.NumberColumn(format="%+.2f%%"),
             "LTP Underlying": st.column_config.NumberColumn(format="₹%,.2f"),

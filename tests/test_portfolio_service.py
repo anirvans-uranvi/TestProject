@@ -683,6 +683,24 @@ class TestPositionsToRecords:
         assert records[0].symbol == "ONGC"
         assert records[0].option_type == OptionType.PE
         assert records[0].qty == -2250
+        assert records[0].ltp_as_of is None
+
+    def test_carries_ltp_as_of_through_when_present(self):
+        positions = [
+            {
+                "raw_name": "ONGC 25 AUG 230 PUT",
+                "symbol": "ONGC",
+                "expiry_date": date(2026, 8, 25),
+                "strike_price": 230.0,
+                "option_type": OptionType.PE,
+                "qty": -2250,
+                "avg_price": 1.24,
+                "ltp": 1.5,
+                "ltp_as_of": date(2026, 8, 17),
+            }
+        ]
+        records = portfolio_service.positions_to_records("u1", "Portfolio 1", "Dhan", positions)
+        assert records[0].ltp_as_of == date(2026, 8, 17)
 
 
 class TestHoldingsToRecords:
@@ -931,6 +949,27 @@ class TestApplyFallbackOptionLtp:
         chains = {("HDFCBANK", date(2026, 8, 25)): [{"strike_price": 700.0, "option_type": "PE", "last_price": 5.2}]}
         positions = portfolio_service.apply_fallback_option_ltp([self._position(ltp=9.9)], chains)
         assert positions[0]["ltp"] == 9.9
+
+    def test_sets_ltp_as_of_to_the_chain_rows_trade_date_when_filling(self):
+        # A real bug this guards against: a fallback LTP looked
+        # identical to a live one on My CSP, with nothing distinguishing
+        # a Dhan sync's stale EOD close from an actual live quote.
+        chains = {
+            ("HDFCBANK", date(2026, 8, 25)): [
+                {"strike_price": 700.0, "option_type": "PE", "last_price": 5.2, "trade_date": date(2026, 8, 17)},
+            ]
+        }
+        positions = portfolio_service.apply_fallback_option_ltp([self._position()], chains)
+        assert positions[0]["ltp_as_of"] == date(2026, 8, 17)
+
+    def test_never_sets_ltp_as_of_when_broker_already_supplied_ltp(self):
+        chains = {
+            ("HDFCBANK", date(2026, 8, 25)): [
+                {"strike_price": 700.0, "option_type": "PE", "last_price": 5.2, "trade_date": date(2026, 8, 17)},
+            ]
+        }
+        positions = portfolio_service.apply_fallback_option_ltp([self._position(ltp=9.9)], chains)
+        assert positions[0].get("ltp_as_of") is None
 
     def test_leaves_ltp_none_when_no_chain_for_that_symbol_and_expiry(self):
         # e.g. NIFTY index options -- this app tracks no F&O data for indices.

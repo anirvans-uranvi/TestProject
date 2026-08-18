@@ -119,6 +119,7 @@ def build_trade_legs(client, cache_bust: int, holdings_for_portfolio: list, posi
             "qty": p.qty,
             "avg_price": p.avg_price,
             "ltp": p.ltp,
+            "ltp_as_of": p.ltp_as_of,
         }
         for p in positions_for_portfolio
     ]
