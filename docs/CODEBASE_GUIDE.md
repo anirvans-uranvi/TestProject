@@ -1885,14 +1885,22 @@ Other) is irrelevant here and ignored — a CSP is filtered purely by
 its Trade Type, regardless of which My Trades table it'd otherwise
 sort into.
 
-Columns beyond what My Positions already shows (Underlying/Expiry/
-Strike/Qty/Avg Price/LTP/P&L/P&L% -- **`Instrument` dropped on
-request**, redundant with Underlying/Expiry/Strike for a single-leg CSP
-and just ate table width; the "Set Trade Date" instrument picker below
-the table still shows it, since that's the one spot it's still useful
-for telling legs apart) are **Breakeven**, **LTP
-Underlying**, **1D/5D/20D**, and **Momentum**: `LTP Underlying` is the
-underlying stock's own current price (`snapshot_repo.get_latest_prices`,
+**Column order, left to right (rearranged twice on request since this
+page first shipped)**: `Trade Date`, then what My Positions already
+shows (`Underlying`/`Expiry`/`Strike`/`Qty`/`Avg Price`/`LTP`/`P&L`/
+`P&L%` -- **`Instrument` dropped on request**, redundant with
+`Underlying`/`Expiry`/`Strike` for a single-leg CSP and just ate table
+width; the "Set Trade Date" instrument picker below the table still
+shows it, since that's the one spot it's still useful for telling legs
+apart), then `Target P&L`, `Stop Loss`, `Breakeven`, `LTP Underlying`,
+`Momentum`, `1D`, `5D`, `20D`. `Trade Date` leads (everything else on
+the row can depend on it); `Target P&L`/`Stop Loss` sit right after
+`P&L%` since they're the other P&L-shaped numbers; `Momentum` was moved
+to sit just before `1D`/`5D`/`20D` (the returns it's computed from) —
+see the dict literal in `_render_csp_tab` for the exact order, which
+`pd.DataFrame` preserves as column order.
+
+`LTP Underlying` is the underlying stock's own current price (`snapshot_repo.get_latest_prices`,
 the same call My Holdings uses for its Cur Val column — a direct
 `daily_screener_snapshots` query, not `latest_screener_view`, so it still
 resolves for a portfolio-only symbol not in `nifty50_constituents`);

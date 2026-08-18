@@ -159,6 +159,7 @@ def _render_csp_tab(
 
         table_rows.append(
             {
+                "Trade Date": trade_date.strftime("%d %b %Y") if trade_date else None,
                 "Underlying": leg["symbol"],
                 "Expiry": leg["expiry_date"].strftime("%d %b %Y") if leg["expiry_date"] else None,
                 "Strike": leg["strike_price"],
@@ -167,20 +168,19 @@ def _render_csp_tab(
                 "LTP": leg["ltp"],
                 "P&L": leg["pnl"],
                 "P&L %": leg["pnl_pct"],
+                "Target P&L": target_pnl,
+                "Stop Loss": new_stop_loss,
                 "Breakeven": _fmt_breakeven(breakeven_price, breakeven_pct),
                 "LTP Underlying": underlying_ltp,
-                "1D": return_1d,
-                "5D": return_5d,
-                "20D": return_20d,
                 # Same "Momentum" criterion (B) the Dashboard's screener
                 # classifies every stock on -- 1D, 5D, AND 20D returns all
                 # positive -- reused as-is (src.calculations.classification.
                 # criterion_b) so this column always agrees with what the
                 # Dashboard would show for the same underlying.
                 "Momentum": pass_fail_icon(criterion_b(return_1d, return_5d, return_20d)),
-                "Trade Date": trade_date.strftime("%d %b %Y") if trade_date else None,
-                "Target P&L": target_pnl,
-                "Stop Loss": new_stop_loss,
+                "1D": return_1d,
+                "5D": return_5d,
+                "20D": return_20d,
             }
         )
 

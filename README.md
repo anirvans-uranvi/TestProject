@@ -1031,37 +1031,10 @@ it the same way you'd rename any Trade Type on Analyse Trade (see My
 Trades above), just using the exact word "CSP". A Trade with no
 position legs (e.g. accidentally renamed on a pure-holding Trade) simply
 contributes nothing here -- Holding legs have no expiry/strike to show
-and are silently skipped. Columns: **Underlying**, **Expiry**, **Strike**,
-**Qty** (signed -- negative is short), **Avg Price**, **LTP**, **P&L**,
-**P&L%**,
-then six more that don't appear on My Positions: **Breakeven** -- the
-CSP breakeven price (`Strike - Avg Price`, the premium collected)
-followed by how far that sits from the underlying's current price in
-parentheses (`(Breakeven / LTP Underlying - 1)` as a %), e.g.
-`"₹23,455.00 (-2.27%)"` -- negative means breakeven sits below the
-current price (cushion: the underlying would need to fall that far
-before the position loses money past the premium collected), positive
-means it's already fallen through breakeven; **LTP Underlying** (the
-underlying stock's own current price, from `daily_screener_snapshots` --
-the same source My Holdings' Current Value already reads); **1D/5D/20D**
-(that stock's own 1-day/5-day/20-day percentage return, the same
-`return_1d`/`return_5d`/`return_20d` fields My Holdings' "1D/5D/20D
-Change" columns are derived from -- shown here as a plain percentage,
-not converted to a rupee amount, since there's no "value" of the
-underlying itself to apply it to); and **Momentum** -- the exact same
-"Momentum" criterion (B) the Dashboard's screener classifies every stock
-on (`src.calculations.classification.criterion_b`: 1D, 5D, AND 20D
-returns all positive), shown with the same ✅/❌/— icon
-(`src.utils.formatting.pass_fail_icon`) the Dashboard uses, so this always agrees
-with what the Dashboard would show for the same underlying. Like the other Portfolio pages, one
-tab per portfolio; a portfolio with no "CSP"-tagged Trades shows a plain
-caption rather than an empty table.
+and are silently skipped. Columns, left to right:
 
-Three more columns track the trade over its life, each leg's own value
-saved to a new table, `portfolio_position_meta` (migration `0025`),
-keyed by the leg's natural identity `(portfolio_name, broker, raw_name)`:
-
-- **Trade Date** -- when the position was actually entered. No broker
+- **Trade Date** -- when the position was actually entered, first
+  column since everything else on the row can depend on it. No broker
   export or API this app talks to reliably carries this for an
   already-open position, so it's entered manually: pick the instrument
   and date in the "Set Trade Date" form below the table and save.
@@ -1072,6 +1045,9 @@ keyed by the leg's natural identity `(portfolio_name, broker, raw_name)`:
   anytime afterward if the real entry date was earlier; an already-set
   date (whether you entered it or a prior sync defaulted it) is never
   overwritten by a later sync.
+- **Underlying**, **Expiry**, **Strike**, **Qty** (signed -- negative is
+  short), **Avg Price**, **LTP**, **P&L**, **P&L%** -- the same fields
+  My Positions shows for an option leg.
 - **Target P&L** -- a linear time-decay target: `Max Credit * Duration
   Held / Duration to Expiry`, where `Max Credit = Avg Price * |Qty|`
   (the total premium collected), `Duration to Expiry = Expiry - Trade
@@ -1088,6 +1064,34 @@ keyed by the leg's natural identity `(portfolio_name, broker, raw_name)`:
   Never moves down -- if P&L% later drops back below a threshold it just
   crossed, the stop stays where it already ratcheted to. Doesn't need a
   Trade Date (Max Credit and P&L% are enough).
+- **Breakeven** -- the CSP breakeven price (`Strike - Avg Price`, the
+  premium collected) followed by how far that sits from the underlying's
+  current price in parentheses (`(Breakeven / LTP Underlying - 1)` as a
+  %), e.g. `"₹23,455.00 (-2.27%)"` -- negative means breakeven sits
+  below the current price (cushion: the underlying would need to fall
+  that far before the position loses money past the premium collected),
+  positive means it's already fallen through breakeven.
+- **LTP Underlying** -- the underlying stock's own current price, from
+  `daily_screener_snapshots` -- the same source My Holdings' Current
+  Value already reads.
+- **Momentum** -- the exact same "Momentum" criterion (B) the
+  Dashboard's screener classifies every stock on
+  (`src.calculations.classification.criterion_b`: 1D, 5D, AND 20D
+  returns all positive), shown with the same ✅/❌/— icon
+  (`src.utils.formatting.pass_fail_icon`) the Dashboard uses, so this
+  always agrees with what the Dashboard would show for the same
+  underlying.
+- **1D/5D/20D** -- that stock's own 1-day/5-day/20-day percentage
+  return, the same `return_1d`/`return_5d`/`return_20d` fields My
+  Holdings' "1D/5D/20D Change" columns are derived from -- shown here as
+  a plain percentage, not converted to a rupee amount, since there's no
+  "value" of the underlying itself to apply it to.
+
+Trade Date/Target P&L/Stop Loss are saved to a new table,
+`portfolio_position_meta` (migration `0025`), keyed by the leg's natural
+identity `(portfolio_name, broker, raw_name)`. Like the other Portfolio
+pages, one tab per portfolio; a portfolio with no "CSP"-tagged Trades
+shows a plain caption rather than an empty table.
 
 ## Docker
 
