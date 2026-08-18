@@ -210,17 +210,32 @@ def _render_csp_tab(
         "Target P&L needs this (there's no reliable \"entry date\" in any broker export/API for an "
         "already-open position, so it's entered here manually)."
     )
+    # The Instrument picker lives OUTSIDE the form, deliberately: widgets
+    # inside an st.form only report their new value to the rest of the
+    # script on Submit, not on every interaction -- so if the date_input
+    # below were also inside the form, picking a different Instrument
+    # would never actually update the date field to that leg's own saved
+    # Trade Date (it'd keep showing whatever was on screen from the
+    # previously-selected leg, or Streamlit's own default of "keep the
+    # widget's last value" once a `key` has already been used once --
+    # confirmed live: switching Instrument silently left the old date in
+    # place, making it look like the form couldn't actually target a
+    # different CSP at all). Outside the form, this selectbox reruns the
+    # script immediately on change, so the date_input's `value=` -- and
+    # its `key`, which also varies per instrument so Streamlit treats it
+    # as a genuinely fresh widget rather than reusing stale state -- are
+    # freshly recomputed for whichever leg is now selected.
     instrument_options = [leg["raw_name"] for leg in csp_legs]
-    with st.form(f"csp_trade_date_form_{slug(portfolio_name)}"):
-        selected_instrument = st.selectbox(
-            "Instrument", instrument_options, key=f"csp_trade_date_select_{slug(portfolio_name)}"
-        )
-        selected_leg = next(leg for leg in csp_legs if leg["raw_name"] == selected_instrument)
-        existing_meta = position_meta_by_leg.get((selected_leg["broker"], selected_leg["raw_name"]))
+    selected_instrument = st.selectbox(
+        "Instrument", instrument_options, key=f"csp_trade_date_select_{slug(portfolio_name)}"
+    )
+    selected_leg = next(leg for leg in csp_legs if leg["raw_name"] == selected_instrument)
+    existing_meta = position_meta_by_leg.get((selected_leg["broker"], selected_leg["raw_name"]))
+    with st.form(f"csp_trade_date_form_{slug(portfolio_name)}_{slug(selected_instrument)}"):
         new_trade_date = st.date_input(
             "Trade Date",
             value=existing_meta.trade_date if existing_meta else date.today(),
-            key=f"csp_trade_date_input_{slug(portfolio_name)}",
+            key=f"csp_trade_date_input_{slug(portfolio_name)}_{slug(selected_instrument)}",
         )
         save_submitted = st.form_submit_button("Save")
     if save_submitted:
