@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import date
-
 import pandas as pd
 import streamlit as st
 from postgrest.exceptions import APIError
@@ -42,9 +40,9 @@ render_global_refresh_bar(client)
 st.caption(
     'Every position leg from a Trade whose Trade Type is "CSP". Go to My Trades, select a trade, click '
     '"Analyse Trade", and rename its Trade Type to "CSP" to have it show up here. Set each leg\'s Trade Date '
-    "below to unlock Target P&L; Stop Loss ratchets up automatically as P&L% improves and is saved on every visit. "
-    "Target P&L changes every day to reflect whether there has been higher-than-average decay in the option "
-    "premium, but it never crosses 95% of Max Credit."
+    'on that same "Analyse Trade" page to unlock Target P&L; Stop Loss ratchets up automatically as P&L% '
+    "improves and is saved on every visit. Target P&L changes every day to reflect whether there has been "
+    "higher-than-average decay in the option premium, but it never crosses 95% of Max Credit."
 )
 
 ensure_cache_bust()
@@ -219,48 +217,6 @@ def _render_csp_tab(
             "Stop Loss": st.column_config.NumberColumn(format="₹%,.2f"),
         },
     )
-
-    st.markdown("**Set Trade Date**")
-    st.caption(
-        "Target P&L needs this (there's no reliable \"entry date\" in any broker export/API for an "
-        "already-open position, so it's entered here manually)."
-    )
-    # The Instrument picker lives OUTSIDE the form, deliberately: widgets
-    # inside an st.form only report their new value to the rest of the
-    # script on Submit, not on every interaction -- so if the date_input
-    # below were also inside the form, picking a different Instrument
-    # would never actually update the date field to that leg's own saved
-    # Trade Date (it'd keep showing whatever was on screen from the
-    # previously-selected leg, or Streamlit's own default of "keep the
-    # widget's last value" once a `key` has already been used once --
-    # confirmed live: switching Instrument silently left the old date in
-    # place, making it look like the form couldn't actually target a
-    # different CSP at all). Outside the form, this selectbox reruns the
-    # script immediately on change, so the date_input's `value=` -- and
-    # its `key`, which also varies per instrument so Streamlit treats it
-    # as a genuinely fresh widget rather than reusing stale state -- are
-    # freshly recomputed for whichever leg is now selected.
-    instrument_options = [leg["raw_name"] for leg in csp_legs]
-    selected_instrument = st.selectbox(
-        "Instrument", instrument_options, key=f"csp_trade_date_select_{slug(portfolio_name)}"
-    )
-    selected_leg = next(leg for leg in csp_legs if leg["raw_name"] == selected_instrument)
-    existing_meta = position_meta_by_leg.get((selected_leg["broker"], selected_leg["raw_name"]))
-    with st.form(f"csp_trade_date_form_{slug(portfolio_name)}_{slug(selected_instrument)}"):
-        new_trade_date = st.date_input(
-            "Trade Date",
-            value=existing_meta.trade_date if existing_meta else date.today(),
-            key=f"csp_trade_date_input_{slug(portfolio_name)}_{slug(selected_instrument)}",
-        )
-        save_submitted = st.form_submit_button("Save")
-    if save_submitted:
-        portfolio_repo.set_position_trade_date(
-            client, user_id, portfolio_name, selected_leg["broker"], selected_leg["raw_name"], new_trade_date
-        )
-        st.session_state["portfolio_cache_bust"] += 1
-        st.cache_data.clear()
-        st.success(f'Trade Date saved for "{selected_instrument}".')
-        st.rerun()
 
 
 portfolio_names = sorted({h.portfolio_name for h in saved_holdings} | {p.portfolio_name for p in saved_positions})

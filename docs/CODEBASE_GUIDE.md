@@ -2004,9 +2004,9 @@ page first shipped)**: `Trade Date`, then what My Positions already
 shows (`Underlying`/`Expiry`/`Strike`/`Qty`/`Avg Price`/`LTP`/`P&L`/
 `P&L%` -- **`Instrument` dropped on request**, redundant with
 `Underlying`/`Expiry`/`Strike` for a single-leg CSP and just ate table
-width; the "Set Trade Date" instrument picker below the table still
-shows it, since that's the one spot it's still useful for telling legs
-apart), then `Target P&L`, `Stop Loss`, `Breakeven`, `LTP Underlying`,
+width; Analyse Trade's own legs table still shows it, since that's the
+one spot it's still useful for telling legs apart), then `Target P&L`,
+`Stop Loss`, `Breakeven`, `LTP Underlying`,
 `Momentum`, `1D`, `5D`, `20D`. `Trade Date` leads (everything else on
 the row can depend on it); `Target P&L`/`Stop Loss` sit right after
 `P&L%` since they're the other P&L-shaped numbers; `Momentum` was moved
@@ -2081,13 +2081,30 @@ this table).
 - `portfolio_service.csp_max_credit(avg_price, qty)` — `avg_price *
   abs(qty)`. `abs()` because `qty` is signed (negative for a short
   position), but "credit received" is inherently positive.
-- **Trade Date** is user-entered via a small `st.form` below the table
-  (an instrument `st.selectbox` + `st.date_input` + Save) — there's no
-  broker export or API this app talks to that reliably carries the
-  original entry date for an already-open position, so unlike every
-  other value on this page, this one simply can't be derived.
-  `portfolio_repo.set_position_trade_date` only touches the `trade_date`
-  column (any already-saved `stop_loss` for that leg is omitted from the
+- **Trade Date** is user-entered on **Analyse Trade**
+  (`pages/10_Analyse_Trade.py`), not on My CSP itself — folded into the
+  same `st.form` as the underlying/trade-type/table edits, as a single
+  `st.date_input` placed right after "Underlying Instrument" (gated
+  behind `if position_legs:` so a pure-Holding Trade shows none). One
+  date represents the whole Trade: on Save, it's written via
+  `portfolio_repo.set_position_trade_date` to **every** `Position` leg
+  in the Trade, not just one — multi-leg Trades (e.g. a strangle) are
+  near-always entered as one package on a single day, so per-leg
+  precision isn't worth the extra UI. The field's own `value=` shows the
+  first Position leg's already-saved `trade_date`, if any (an earlier
+  version had per-leg dates disagree only in the edge case of a Trade
+  built by merging legs that were dated separately before the merge —
+  Save reconciles them to one value going forward). Originally lived
+  directly below My CSP's table with its own instrument-picker sub-form,
+  scoped to that one Trade's CSP legs; moved and simplified on request
+  so it applies to any Trade being analysed (not just ones already
+  tagged "CSP" — useful for setting it *before* renaming a Trade Type to
+  "CSP") and needs one Save instead of a picker-then-form two-step.
+  There's no broker export or API this app talks to that reliably
+  carries the original entry date for an already-open position, so
+  unlike every other value derived on these pages, this one simply can't
+  be. `set_position_trade_date` only touches the `trade_date` column
+  (any already-saved `stop_loss` for that leg is omitted from the
   payload entirely, not sent as `None` — same partial-upsert convention
   `upsert_broker_connection` already relies on, see its own docstring).
   **`pages/6_My_Broker.py`'s `_default_new_position_trade_dates`** (called

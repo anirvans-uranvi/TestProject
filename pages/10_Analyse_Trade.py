@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 import streamlit as st
 from postgrest.exceptions import APIError
@@ -12,6 +14,7 @@ from src.utils.portfolio_page import (
     ensure_cache_bust,
     load_all_companies,
     load_holdings,
+    load_position_meta,
     load_positions,
     load_trade_groups,
     load_trade_meta,
@@ -132,17 +135,45 @@ legs_event = st.dataframe(
 
 st.divider()
 
-# --- Edit underlying / trade type / table --------------------------------
+# --- Edit underlying / trade date / trade type / table ---------------------
 st.markdown("**Correct the underlying, rename the trade type, or pin the table**")
 _BUCKET_LABELS = {None: "Auto (based on underlying)", "stock": "Stock Trades", "index": "Index Trades", "other": "Other Trades"}
 _BUCKET_VALUES = {label: value for value, label in _BUCKET_LABELS.items()}
 current_bucket_override = trade_meta_by_id.get(trade_id, {}).get("bucket_override")
+
+position_legs = [leg for leg in trade_legs if leg["leg_type"] == "Position"]
+try:
+    saved_position_meta = load_position_meta(client, user_id, st.session_state["portfolio_cache_bust"])
+except APIError:
+    # portfolio_position_meta doesn't exist yet (migration 0025) -- degrade
+    # to "no Trade Date entered yet" for every leg.
+    saved_position_meta = []
+position_meta_by_leg = {(m.broker, m.raw_name): m for m in saved_position_meta if m.portfolio_name == portfolio_name}
+# One Trade Date for the whole Trade, applied to every Position leg in it
+# on Save -- multi-leg Trades (e.g. a strangle) are near-always entered as
+# one package on one day, so this is simpler than picking a leg first.
+# Shows the first leg's already-saved date, if any (they're expected to
+# agree; if they don't yet, Save reconciles them to one value).
+existing_trade_date = next(
+    (position_meta_by_leg[(leg["broker"], leg["raw_name"])].trade_date for leg in position_legs
+     if (leg["broker"], leg["raw_name"]) in position_meta_by_leg and position_meta_by_leg[(leg["broker"], leg["raw_name"])].trade_date),
+    None,
+)
+
 with st.form(f"analyse_trade_edit_form_{slug(portfolio_name)}_{slug(trade_id)}"):
     edited_underlying = st.text_input(
         "Underlying Instrument",
         value=trade["underlying_label"],
         help='Free text -- e.g. correct a resolved "Tata Motors" to the real post-demerger underlying.',
     )
+    if position_legs:
+        edited_trade_date = st.date_input(
+            "Trade Date",
+            value=existing_trade_date or date.today(),
+            help="Feeds My CSP's Target P&L calculation (there's no reliable \"entry date\" in any broker "
+            "export/API for an already-open position, so it's entered here manually). Applied to every "
+            "Position leg in this Trade.",
+        )
     edited_trade_type = st.text_input("Trade Type", value=trade["trade_type"])
     edited_bucket_label = st.selectbox(
         "Table (on My Trades)",
@@ -166,6 +197,9 @@ if save_submitted:
         trade_type=edited_trade_type.strip() or "Trade",
         bucket_override=_BUCKET_VALUES[edited_bucket_label],
     )
+    if position_legs:
+        for leg in position_legs:
+            portfolio_repo.set_position_trade_date(client, user_id, portfolio_name, leg["broker"], leg["raw_name"], edited_trade_date)
     st.session_state["portfolio_cache_bust"] += 1
     st.cache_data.clear()
     st.success("Saved.")

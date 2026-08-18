@@ -997,17 +997,28 @@ appears as its own sidebar link). There you can:
 
 - See every leg in the Trade (type, broker, instrument, expiry/strike/
   option type where applicable, qty, avg price, LTP, P&L).
-- **Correct the underlying, or rename the Trade Type.** Both are free
+- **Correct the underlying, set the Trade Date, or rename the Trade
+  Type** -- one form. Underlying Instrument and Trade Type are free
   text, not constrained to a known symbol or a fixed list -- e.g.
   correcting a resolved "Tata Motors" to the real post-demerger
   underlying "Tata Motors Passenger Vehicle", or renaming "Trade" to
-  something meaningful like "Covered Call" or "Aug Iron Condor". Saved to
-  a new table, `portfolio_trade_meta` (migration `0021`), keyed by
+  something meaningful like "Covered Call" or "Aug Iron Condor". Saved
+  to `portfolio_trade_meta` (migration `0021`), keyed by
   `(portfolio_name, trade_id)` -- a different grain from
   `portfolio_trade_groups`' per-*leg* key, since a label/type applies to
   the whole Trade, not one leg. Leaving the underlying field unchanged
   from its computed default doesn't write an override -- only an actual
-  correction is stored.
+  correction is stored. **Trade Date** (shown only when the Trade has at
+  least one Position leg -- a pure-Holding Trade has nothing to date)
+  sits right after Underlying Instrument, and on Save is applied to
+  *every* Position leg in the Trade at once (multi-leg Trades like a
+  strangle are near-always entered as one package on one day) --
+  writes `portfolio_position_meta.trade_date` the same way My CSP's own
+  "Set Trade Date" form used to before this moved here, so it applies to
+  any Trade you're analysing, not just ones already tagged "CSP"; My
+  CSP's Target P&L reads it back for CSP-tagged Trades specifically. See
+  My CSP below for what it's used for and the "defaults to today on
+  sync" behavior.
 - **Merge** other Trades into this one (multiselect of this portfolio's
   other Trade IDs), or **split** selected legs out of this Trade -- either
   back to their own default per-underlying Trade, or into a brand-new
@@ -1051,9 +1062,10 @@ and are silently skipped. Columns, left to right:
 - **Trade Date** -- when the position was actually entered, first
   column since everything else on the row can depend on it. No broker
   export or API this app talks to reliably carries this for an
-  already-open position, so it's entered manually: pick the instrument
-  and date in the "Set Trade Date" form below the table and save.
-  **Defaults to today automatically** the first time a "Sync now" click
+  already-open position, so it's entered manually: go to My Trades,
+  select the trade, click "Analyse Trade", and use the "Set Trade Date"
+  form there (pick the instrument leg and date, then save) -- see
+  Analyse Trade below. **Defaults to today automatically** the first time a "Sync now" click
   (Connect Dhan/Zerodha account -- CSV uploads don't do this) brings in
   a position leg that has no Trade Date yet, so Target P&L never sits
   stuck at N/A just because nobody's visited the form -- change it
