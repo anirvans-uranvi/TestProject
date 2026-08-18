@@ -1031,9 +1031,9 @@ it the same way you'd rename any Trade Type on Analyse Trade (see My
 Trades above), just using the exact word "CSP". A Trade with no
 position legs (e.g. accidentally renamed on a pure-holding Trade) simply
 contributes nothing here -- Holding legs have no expiry/strike to show
-and are silently skipped. Columns: **Instrument** (the broker's raw
-contract string), **Underlying**, **Expiry**, **Strike**, **Qty**
-(signed -- negative is short), **Avg Price**, **LTP**, **P&L**, **P&L%**,
+and are silently skipped. Columns: **Underlying**, **Expiry**, **Strike**,
+**Qty** (signed -- negative is short), **Avg Price**, **LTP**, **P&L**,
+**P&L%**,
 then six more that don't appear on My Positions: **Breakeven** -- the
 CSP breakeven price (`Strike - Avg Price`, the premium collected)
 followed by how far that sits from the underlying's current price in

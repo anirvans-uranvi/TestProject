@@ -159,7 +159,6 @@ def _render_csp_tab(
 
         table_rows.append(
             {
-                "Instrument": leg["raw_name"],
                 "Underlying": leg["symbol"],
                 "Expiry": leg["expiry_date"].strftime("%d %b %Y") if leg["expiry_date"] else None,
                 "Strike": leg["strike_price"],
