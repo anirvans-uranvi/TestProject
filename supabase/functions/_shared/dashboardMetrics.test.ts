@@ -18,6 +18,7 @@ function leg(overrides: Partial<OptionLegRow>): OptionLegRow {
     lastPrice: null,
     close: null,
     settlementPrice: null,
+    source: null,
     ...overrides,
   };
 }
@@ -240,4 +241,25 @@ Deno.test("dashboardMetricsRows: multiple symbols each get their own rows", () =
   const result = dashboardMetricsRows(rows, { RELIANCE: 1000.0, TCS: 1000.0 });
   const symbols = new Set(result.map((r) => r.symbol));
   assertEquals(symbols, new Set(["RELIANCE", "TCS"]));
+});
+
+Deno.test("dashboardMetricsRows: BSE-sourced legs are excluded", () => {
+  // A stale, pre-restriction BSE contract for a real stock symbol, a few
+  // days off its real NSE monthly expiry -- BSE's F&O feed is
+  // index-options only, so this leg should never produce a row.
+  const bseRows = rowsForExpiry("2026-07-31").map((r) => ({ ...r, source: "bse_fo_bhavcopy" }));
+  const nseRows = rowsForExpiry("2026-07-28").map((r) => ({ ...r, source: "nse_fo_bhavcopy" }));
+  const result = dashboardMetricsRows([...bseRows, ...nseRows], { RELIANCE: 1000.0 });
+  assertEquals(new Set(result.map((r) => r.expiryDate)), new Set(["2026-07-28"]));
+});
+
+Deno.test("dashboardMetricsRows: BSE-sourced legs excluded even with _edge suffix", () => {
+  const bseRows = rowsForExpiry("2026-07-28").map((r) => ({ ...r, source: "bse_fo_bhavcopy_edge" }));
+  const result = dashboardMetricsRows(bseRows, { RELIANCE: 1000.0 });
+  assertEquals(result, []);
+});
+
+Deno.test("dashboardMetricsRows: rows without a source pass through unaffected", () => {
+  const result = dashboardMetricsRows(rowsForExpiry("2026-07-28"), { RELIANCE: 1000.0 });
+  assertEquals(result.length, 1);
 });

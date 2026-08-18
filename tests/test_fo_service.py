@@ -499,3 +499,24 @@ class TestDashboardMetricsRows:
         result = fo_service.dashboard_metrics_rows(rows, {"RELIANCE": 1000.0, "TCS": 1000.0})
         symbols = {r["symbol"] for r in result}
         assert symbols == {"RELIANCE", "TCS"}
+
+    def test_bse_sourced_legs_are_excluded(self):
+        # A stale, pre-restriction BSE contract for a real stock symbol,
+        # a few days off its real NSE monthly expiry -- BSE's F&O feed is
+        # index-options only, so this leg should never produce a row (it
+        # was the cause of a duplicate same-month dropdown entry).
+        bse_rows = [{**r, "source": "bse_fo_bhavcopy"} for r in self._rows_for_expiry("RELIANCE", "2026-07-31")]
+        nse_rows = [{**r, "source": "nse_fo_bhavcopy"} for r in self._rows_for_expiry("RELIANCE", "2026-07-28")]
+        result = fo_service.dashboard_metrics_rows(bse_rows + nse_rows, {"RELIANCE": 1000.0})
+        assert {r["expiry_date"] for r in result} == {"2026-07-28"}
+
+    def test_bse_sourced_legs_excluded_even_with_edge_suffix(self):
+        bse_rows = [{**r, "source": "bse_fo_bhavcopy_edge"} for r in self._rows_for_expiry("RELIANCE", "2026-07-28")]
+        assert fo_service.dashboard_metrics_rows(bse_rows, {"RELIANCE": 1000.0}) == []
+
+    def test_rows_without_a_source_key_pass_through_unaffected(self):
+        # Older fixtures / the mock provider's single "mock_fo" source
+        # never set "source" to a BSE-prefixed value -- must not be
+        # accidentally excluded.
+        result = fo_service.dashboard_metrics_rows(self._rows_for_expiry("RELIANCE", "2026-07-28"), {"RELIANCE": 1000.0})
+        assert len(result) == 1

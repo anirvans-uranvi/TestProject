@@ -430,11 +430,25 @@ def dashboard_metrics_rows(option_rows: list[dict], spot_by_symbol: dict[str, fl
     NOT cached here -- the Dashboard only ever displays `cc_pct`; the
     Options screen's "Assignment Profit" figure is computed live instead
     (see `pages/5_Options.py`).
+
+    BSE-sourced legs (`source` starting with "bse_fo_bhavcopy", see
+    `bse_fo_provider.py`) are excluded entirely -- BSE's F&O feed is
+    index-options only, and this cache backs a Nifty50 **stock** screener,
+    so a BSE leg is either an index (irrelevant to any screener row) or a
+    pre-restriction stale stock contract that happens to still be
+    `is_open` because its own expiry hasn't passed yet. Confirmed live: a
+    stock symbol's stale BSE monthly expiry, a few days off its real NSE
+    one, produced a second same-month entry in the Dashboard's "Options
+    month" dropdown. `option_rows` without a `source` key (e.g. older test
+    fixtures, or the mock provider's single "mock_fo" source) pass through
+    unaffected -- only an explicit BSE prefix is excluded.
     """
     legs_by_symbol: dict[str, list[dict]] = {}
     for r in option_rows:
         symbol = r.get("symbol")
         if not symbol:
+            continue
+        if str(r.get("source") or "").startswith("bse_fo_bhavcopy"):
             continue
         legs_by_symbol.setdefault(symbol, []).append(r)
 

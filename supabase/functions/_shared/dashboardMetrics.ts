@@ -34,6 +34,7 @@ export interface OptionLegRow {
   lastPrice: number | null;
   close: number | null;
   settlementPrice: number | null;
+  source: string | null;
 }
 
 // Mirrors Python's `a or b or c` chain exactly, including falsy-zero
@@ -176,13 +177,25 @@ export interface DashboardMetricsRow {
  * when either calculation has no priceable result for that specific
  * expiry. ccFivePct's assignmentProfitPct is deliberately NOT cached
  * here -- the Dashboard only ever displays ccPct; the Options screen's
- * "Assignment Profit" figure is computed live instead. */
+ * "Assignment Profit" figure is computed live instead.
+ *
+ * BSE-sourced legs (source starting with "bse_fo_bhavcopy") are excluded
+ * entirely -- BSE's F&O feed is index-options only, and this cache backs
+ * a Nifty50 *stock* screener, so a BSE leg is either an index (irrelevant
+ * to any screener row) or a pre-restriction stale stock contract that
+ * happens to still be open because its own expiry hasn't passed yet.
+ * Confirmed live: a stock symbol's stale BSE monthly expiry, a few days
+ * off its real NSE one, produced a second same-month entry in the
+ * Dashboard's "Options month" dropdown. Rows without a source (older
+ * fixtures, or the mock provider's single "mock_fo" source) pass through
+ * unaffected. */
 export function dashboardMetricsRows(
   optionRows: OptionLegRow[],
   spotBySymbol: Record<string, number | null>,
 ): DashboardMetricsRow[] {
   const legsBySymbol = new Map<string, OptionLegRow[]>();
   for (const r of optionRows) {
+    if ((r.source ?? "").startsWith("bse_fo_bhavcopy")) continue;
     if (!legsBySymbol.has(r.symbol)) legsBySymbol.set(r.symbol, []);
     legsBySymbol.get(r.symbol)!.push(r);
   }
@@ -234,7 +247,7 @@ async function fetchAllOpenOptionLegs(serviceClient: AnyClient): Promise<OptionL
   for (;;) {
     const { data, error } = await serviceClient
       .from("latest_option_chain_view")
-      .select("symbol,expiry_date,strike_price,option_type,trade_date,last_price,close,settlement_price")
+      .select("symbol,expiry_date,strike_price,option_type,trade_date,last_price,close,settlement_price,source")
       .range(offset, offset + PAGE_SIZE - 1);
     if (error) throw new Error(`latest_option_chain_view read: ${error.message}`);
     const page = (data ?? []) as any[];
@@ -248,6 +261,7 @@ async function fetchAllOpenOptionLegs(serviceClient: AnyClient): Promise<OptionL
         lastPrice: r.last_price === null || r.last_price === undefined ? null : Number(r.last_price),
         close: r.close === null || r.close === undefined ? null : Number(r.close),
         settlementPrice: r.settlement_price === null || r.settlement_price === undefined ? null : Number(r.settlement_price),
+        source: r.source ?? null,
       });
     }
     if (page.length < PAGE_SIZE) break;

@@ -760,6 +760,44 @@ the same "the cache spans a wider universe than what this specific view
 displays" shape as the Hindustan Zinc bug above, just filtering down
 instead of widening up.
 
+**That symbol filter turned out necessary but not sufficient**: the
+dropdown still showed duplicate same-month entries afterward, confirmed
+live -- e.g. Aug 2026 twice, Sep 2026 twice. The remaining source wasn't
+an index symbol at all; it was a **stale, pre-restriction BSE contract
+for a real Nifty50 stock**. `bse_fo_provider.py` was restricted to index
+options only (see "BSE provider: restrict to index options only"
+below), but that restriction only governs *new* ingestion -- any stock-
+symbol `option_contracts` row BSE wrote before the restriction stays
+`is_open = true` for as long as its own (real, once-valid) expiry date
+hasn't passed, since `fo_repo.refresh_open_flags` only re-derives
+`is_open` against the calendar, with no concept of "still a valid source
+for this symbol". So `latest_option_chain_view` kept serving these
+alongside the correct NSE leg for the same stock and month -- two
+distinct `expiry_date`s a few days apart (BSE's own monthly expiry
+convention isn't the same day as NSE's), both `dashboard_fo_metrics`
+rows for a symbol that legitimately belongs in the screener, so the
+earlier symbol filter couldn't tell them apart.
+
+Fixed at the source instead of the display layer: migration `0027`
+adds `source` to `latest_option_chain_view` (previously selected
+everything *except* that column, even though the underlying
+`option_daily_prices.source` has always distinguished
+`"nse_fo_bhavcopy"`/`"nse_fo_bhavcopy_edge"` from
+`"bse_fo_bhavcopy"`/`"bse_fo_bhavcopy_edge"` -- see
+`get_latest_fo_trade_date`'s `source_prefix` param above). With `source`
+now visible, `dashboard_metrics_rows` (and its TypeScript mirror in
+`dashboardMetrics.ts`) drops any leg whose `source` starts with
+`"bse_fo_bhavcopy"` before grouping legs by symbol -- BSE has no
+legitimate role in this cache at all now, since `dashboard_fo_metrics`
+is Dashboard-only (no other page reads `get_dashboard_fo_metrics`) and
+the Dashboard is purely a Nifty50 *stock* screener. Rows with no
+`source` key at all (older fixtures, or the mock provider's single
+`"mock_fo"` source used for local dev) pass through unaffected -- only
+an explicit BSE prefix is excluded. The underlying stale BSE
+`option_contracts` rows are left alone (harmless once excluded here, and
+still legitimately readable by other consumers of the view, e.g. a
+portfolio's own BANKEX position).
+
 `dashboard_fo_metrics` was originally one row per symbol (migration
 `0009`, holding only the nearest expiry); migration `0010` dropped and
 recreated it keyed by `(symbol, expiry_date)` instead once a per-month

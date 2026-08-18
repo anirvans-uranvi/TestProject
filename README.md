@@ -597,13 +597,16 @@ step, so it's never more than one refresh out of date. An **"Options
 month" dropdown** lets you pick which of the 3 cached months feeds those
 two columns -- purely a re-render over already-cached rows, no new
 fetch. The dropdown's choices are restricted to expiries that belong to
-a symbol actually shown in the screener below (Nifty 50 stocks) --
-`dashboard_fo_metrics` also carries rows for the seeded Index symbols
-(NIFTY, BANKNIFTY, BANKEX, ...) used by the BSE index-options feed, and
-without that filter an index's own expiry (e.g. BANKEX's BSE expiry)
-would show up as a mostly-empty extra month even though no Nifty 50
-stock has any data for it. See `docs/CODEBASE_GUIDE.md`'s Futures &
-Options section ("Dashboard cache") for the full pipeline.
+a symbol actually shown in the screener below (Nifty 50 stocks), and the
+underlying cache itself excludes BSE-sourced option legs entirely --
+BSE's F&O feed is index-options only (the Dashboard is a **stock**
+screener), so a BSE leg is either an unrelated index (e.g. BANKEX) or a
+pre-restriction stale stock contract still technically "open" only
+because its own expiry hasn't passed yet. Without both fixes, a stock's
+old BSE monthly expiry (a few days off its real NSE one) could show up
+as a duplicate same-month entry in the dropdown. See
+`docs/CODEBASE_GUIDE.md`'s Futures & Options section ("Dashboard cache")
+for the full pipeline.
 
 **Data source:** the NSE F&O UDiFF **bhavcopy** (one zip per trading day),
 the only reliable free source for NSE derivatives — yfinance has none, and
