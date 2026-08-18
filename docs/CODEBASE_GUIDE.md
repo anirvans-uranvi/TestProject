@@ -2018,20 +2018,42 @@ Other) is irrelevant here and ignored — a CSP is filtered purely by
 its Trade Type, regardless of which My Trades table it'd otherwise
 sort into.
 
-**Column order, left to right (rearranged twice on request since this
-page first shipped)**: `Trade Date`, then what My Positions already
-shows (`Underlying`/`Expiry`/`Strike`/`Qty`/`Avg Price`/`LTP`/`P&L`/
-`P&L%` -- **`Instrument` dropped on request**, redundant with
+**Column order, left to right (rearranged several times on request
+since this page first shipped)**: `Trade Date`, then what My Positions
+already shows (`Underlying`/`Expiry`/`Strike`/`Qty`/`Avg Price` --
+**`Instrument` dropped on request**, redundant with
 `Underlying`/`Expiry`/`Strike` for a single-leg CSP and just ate table
 width; Analyse Trade's own legs table still shows it, since that's the
-one spot it's still useful for telling legs apart), then `Target P&L`,
-`Stop Loss`, `Breakeven`, `LTP Underlying`,
+one spot it's still useful for telling legs apart), then `Max Credit`,
+`LTP`, `P&L`, `Target P&L`, `Stop Loss`, `Breakeven`, `LTP Underlying`,
 `Momentum`, `1D`, `5D`, `20D`. `Trade Date` leads (everything else on
-the row can depend on it); `Target P&L`/`Stop Loss` sit right after
-`P&L%` since they're the other P&L-shaped numbers; `Momentum` was moved
-to sit just before `1D`/`5D`/`20D` (the returns it's computed from) —
-see the dict literal in `_render_csp_tab` for the exact order, which
-`pd.DataFrame` preserves as column order.
+the row can depend on it); `Max Credit` sits right after `Avg Price` on
+request (it's `Avg Price * |Qty|`, so reads naturally as "what Avg
+Price actually adds up to"); `Target P&L`/`Stop Loss` sit right after
+`P&L` since they're the other P&L-shaped numbers; `Momentum` sits just
+before `1D`/`5D`/`20D` (the returns it's computed from) — see the dict
+literal in `_render_csp_tab` for the exact order, which `pd.DataFrame`
+preserves as column order.
+
+**`P&L%` was folded into `P&L` itself, on request** — there's no
+separate `P&L%` column anymore. `_fmt_pnl(pnl, pnl_pct, target_pnl,
+stop_loss)` renders one combined cell, `"₹1,234.56 (+12.34%)"`, the same
+"value (pct%)" shape `Breakeven`/`Target P&L` already use — and prefixes
+it with **✅** once `pnl > target_pnl` or **❌** once `pnl < stop_loss`
+(both `>`/`<`, not `>=`/`<=`), no marker at all when neither threshold
+is crossed, including whenever `target_pnl`/`stop_loss` themselves
+aren't computable yet (no Trade Date, no saved Stop Loss row). Compares
+against `new_stop_loss` — the freshly ratcheted value about to be shown
+in the `Stop Loss` column and upserted this render — not the
+`existing_stop_loss` read from the database, so the marker always
+agrees with what's actually displayed. Similarly, **`Target P&L` now
+shows what % of `Max Credit` it represents in parentheses**,
+`_fmt_target_pnl(target_pnl, max_credit)` → `"₹4,275.00 (85.00%)"`, an
+em dash before Trade Date is set. Both `_fmt_pnl`/`_fmt_target_pnl` are
+page-local (not unit-tested, matching `_fmt_breakeven`/`_fmt_ltp`
+alongside them) — coverage here is the `AppTest` import-level smoke
+check plus manual verification, the same tradeoff every other
+page-local formatter on this page already accepts.
 
 `LTP Underlying` is the underlying stock's own current price (`snapshot_repo.get_latest_prices`,
 the same call My Holdings uses for its Cur Val column — a direct

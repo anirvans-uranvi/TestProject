@@ -42,7 +42,8 @@ st.caption(
     '"Analyse Trade", and rename its Trade Type to "CSP" to have it show up here. Set each leg\'s Trade Date '
     'on that same "Analyse Trade" page to unlock Target P&L; Stop Loss ratchets up automatically as P&L% '
     "improves and is saved on every visit. Target P&L changes every day to reflect whether there has been "
-    "higher-than-average decay in the option premium, but it never crosses 95% of Max Credit."
+    "higher-than-average decay in the option premium, but it never crosses 95% of Max Credit. P&L shows a "
+    "✅ once it clears Target P&L, or a ❌ once it falls through Stop Loss."
 )
 
 ensure_cache_bust()
@@ -109,6 +110,35 @@ def _fmt_ltp(ltp: float | None, ltp_as_of) -> str:
     if ltp_as_of is None:
         return format_inr(ltp)
     return f"{format_inr(ltp)} (as of {ltp_as_of.strftime('%d %b %Y')})"
+
+
+def _fmt_target_pnl(target_pnl: float | None, max_credit: float | None) -> str:
+    """"₹4,275.00 (85.00%)" -- Target P&L with what % of Max Credit it
+    represents in parentheses, or an em dash before a Trade Date is set
+    (Target P&L itself is None then)."""
+    if target_pnl is None:
+        return "—"
+    if not max_credit:
+        return format_inr(target_pnl)
+    return f"{format_inr(target_pnl)} ({target_pnl / max_credit * 100:+.2f}%)"
+
+
+def _fmt_pnl(pnl: float | None, pnl_pct: float | None, target_pnl: float | None, stop_loss: float | None) -> str:
+    """"✅ ₹1,234.56 (+12.34%)" once P&L has cleared Target P&L, "❌
+    ₹1,234.56 (-8.00%)" once P&L has fallen through Stop Loss, or just
+    the plain value with no marker when neither threshold is crossed
+    (or there's nothing to compare against yet, e.g. no Trade Date)."""
+    if pnl is None:
+        return "—"
+    if target_pnl is not None and pnl > target_pnl:
+        marker = "✅ "
+    elif stop_loss is not None and pnl < stop_loss:
+        marker = "❌ "
+    else:
+        marker = ""
+    if pnl_pct is None:
+        return f"{marker}{format_inr(pnl)}"
+    return f"{marker}{format_inr(pnl)} ({pnl_pct:+.2f}%)"
 
 
 def _render_csp_tab(
@@ -180,10 +210,10 @@ def _render_csp_tab(
                 "Strike": leg["strike_price"],
                 "Qty": leg["qty"],
                 "Avg Price": leg["avg_price"],
+                "Max Credit": max_credit,
                 "LTP": _fmt_ltp(leg["ltp"], leg.get("ltp_as_of")),
-                "P&L": leg["pnl"],
-                "P&L %": leg["pnl_pct"],
-                "Target P&L": target_pnl,
+                "P&L": _fmt_pnl(leg["pnl"], leg["pnl_pct"], target_pnl, new_stop_loss),
+                "Target P&L": _fmt_target_pnl(target_pnl, max_credit),
                 "Stop Loss": new_stop_loss,
                 "Breakeven": _fmt_breakeven(breakeven_price, breakeven_pct),
                 "LTP Underlying": underlying_ltp,
@@ -207,13 +237,11 @@ def _render_csp_tab(
         column_config={
             "Qty": st.column_config.NumberColumn(format="%+,.0f"),
             "Avg Price": st.column_config.NumberColumn(format="₹%,.2f"),
-            "P&L": st.column_config.NumberColumn(format="₹%,.2f"),
-            "P&L %": st.column_config.NumberColumn(format="%+.2f%%"),
+            "Max Credit": st.column_config.NumberColumn(format="₹%,.2f"),
             "LTP Underlying": st.column_config.NumberColumn(format="₹%,.2f"),
             "1D": st.column_config.NumberColumn(format="%+.2f%%"),
             "5D": st.column_config.NumberColumn(format="%+.2f%%"),
             "20D": st.column_config.NumberColumn(format="%+.2f%%"),
-            "Target P&L": st.column_config.NumberColumn(format="₹%,.2f"),
             "Stop Loss": st.column_config.NumberColumn(format="₹%,.2f"),
         },
     )

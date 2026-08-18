@@ -1063,9 +1063,9 @@ and are silently skipped. Columns, left to right:
   column since everything else on the row can depend on it. No broker
   export or API this app talks to reliably carries this for an
   already-open position, so it's entered manually: go to My Trades,
-  select the trade, click "Analyse Trade", and use the "Set Trade Date"
-  form there (pick the instrument leg and date, then save) -- see
-  Analyse Trade below. **Defaults to today automatically** the first time a "Sync now" click
+  select the trade, click "Analyse Trade", and set it there (folded
+  into the same form as the underlying/trade-type edits) -- see Analyse
+  Trade above. **Defaults to today automatically** the first time a "Sync now" click
   (Connect Dhan/Zerodha account -- CSV uploads don't do this) brings in
   a position leg that has no Trade Date yet, so Target P&L never sits
   stuck at N/A just because nobody's visited the form -- change it
@@ -1073,26 +1073,38 @@ and are silently skipped. Columns, left to right:
   date (whether you entered it or a prior sync defaulted it) is never
   overwritten by a later sync.
 - **Underlying**, **Expiry**, **Strike**, **Qty** (signed -- negative is
-  short), **Avg Price**, **LTP**, **P&L**, **P&L%** -- the same fields
-  My Positions shows for an option leg. `LTP` shows `"(as of <date>)"`
-  next to the price when it came from this app's own end-of-day F&O
-  data rather than a live broker quote (`portfolio_positions.ltp_as_of`,
-  migration `0026`) -- most commonly a Dhan sync whose Market Quote call
-  failed (e.g. the account lacks the separate "Data APIs" subscription),
-  which otherwise silently shows a stale close with nothing
-  distinguishing it from a live tick.
+  short), **Avg Price** -- the same fields My Positions shows for an
+  option leg.
+- **Max Credit** -- `Avg Price * |Qty|`, the total premium collected for
+  the leg (what Target P&L and Stop Loss are both expressed as a
+  fraction of).
+- **LTP** -- shows `"(as of <date>)"` next to the price when it came
+  from this app's own end-of-day F&O data rather than a live broker
+  quote (`portfolio_positions.ltp_as_of`, migration `0026`) -- most
+  commonly a Dhan sync whose Market Quote call failed (e.g. the account
+  lacks the separate "Data APIs" subscription), which otherwise
+  silently shows a stale close with nothing distinguishing it from a
+  live tick.
+- **P&L** -- the leg's own P&L with its P&L% in parentheses, e.g.
+  `"₹1,234.56 (+12.34%)"` (a combined value+percentage cell, same shape
+  as Breakeven below -- there's no separate P&L% column). Prefixed with
+  **✅** once P&L has cleared Target P&L, or **❌** once it's fallen
+  through Stop Loss -- no marker at all when neither threshold is
+  crossed (including whenever Target P&L/Stop Loss themselves aren't
+  computable yet, e.g. no Trade Date).
 - **Target P&L** -- `min(Max Credit * 0.95, Max Credit * (Duration Held
-  / Duration to Expiry) * 1.2)`, where `Max Credit = Avg Price * |Qty|`
-  (the total premium collected), `Duration to Expiry = Expiry - Trade
-  Date`, and `Duration Held = Today - Trade Date`. Changes every day as
-  `Duration Held` grows -- the `* 1.2` runs the target 20% faster than
-  plain linear, reflecting that theta decay tends to accelerate as
-  expiry nears (a "higher than average decay" expectation, not a
-  straight-line one) -- but it's capped so it never crosses 95% of Max
-  Credit no matter how long the position is held, even well past expiry
-  (chasing the last 5% isn't worth the assignment/gamma risk of holding
-  to the very end). A rule-of-thumb gauge, not a precise pricing model.
-  Blank until Trade Date is set (no duration to compute against).
+  / Duration to Expiry) * 1.2)`, where `Duration to Expiry = Expiry -
+  Trade Date`, and `Duration Held = Today - Trade Date`, shown with what
+  % of Max Credit it represents in parentheses, e.g. `"₹4,275.00
+  (85.00%)"`. Changes every day as `Duration Held` grows -- the `* 1.2`
+  runs the target 20% faster than plain linear, reflecting that theta
+  decay tends to accelerate as expiry nears (a "higher than average
+  decay" expectation, not a straight-line one) -- but it's capped so it
+  never crosses 95% of Max Credit no matter how long the position is
+  held, even well past expiry (chasing the last 5% isn't worth the
+  assignment/gamma risk of holding to the very end). A rule-of-thumb
+  gauge, not a precise pricing model. Blank until Trade Date is set (no
+  duration to compute against).
 - **Stop Loss** -- ratchets up automatically as the position becomes
   more profitable, and is saved on every visit so it never resets: a
   brand-new leg (nothing saved yet) starts at `-Max Credit` (willing to
