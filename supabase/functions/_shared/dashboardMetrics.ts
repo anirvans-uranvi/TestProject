@@ -284,14 +284,17 @@ async function upsertChunked(client: AnyClient, table: string, rows: unknown[], 
   }
 }
 
-/** dashboardMetricsRows only ever emits a symbol's *current* up-to-3
- * nearest expiries -- a month that just expired stops being emitted, but
- * its old cached row from a previous run is never otherwise deleted, so
- * it would linger in the Dashboard's "Options month" dropdown forever.
- * Mirrors fo_repo.py::delete_expired_dashboard_fo_metrics. */
-async function deleteExpiredDashboardMetrics(serviceClient: AnyClient, asOfIso: string): Promise<void> {
-  const { error } = await serviceClient.from("dashboard_fo_metrics").delete().lt("expiry_date", asOfIso);
-  if (error) throw new Error(`dashboard_fo_metrics prune: ${error.message}`);
+/** Deletes every row in the cache -- called at the *start* of
+ * recomputeDashboardMetrics, immediately followed by upserting the
+ * freshly computed full set back (a true replace, not an incremental
+ * upsert). Mirrors fo_repo.py::clear_dashboard_fo_metrics; see its
+ * docstring for why this replaced an expiry-only prune (a row can stop
+ * belonging in the cache for reasons other than its own expiry passing
+ * -- e.g. dashboardMetricsRows excluding a BSE-sourced leg -- and an
+ * expiry-only prune left such rows lingering forever). */
+async function clearDashboardMetrics(serviceClient: AnyClient): Promise<void> {
+  const { error } = await serviceClient.from("dashboard_fo_metrics").delete().gte("expiry_date", "1900-01-01");
+  if (error) throw new Error(`dashboard_fo_metrics clear: ${error.message}`);
 }
 
 /** Spot prices for every registered company, read directly from
@@ -355,7 +358,7 @@ export async function recomputeDashboardMetrics(serviceClient: AnyClient): Promi
     cc_trade_date: r.ccTradeDate,
   }));
 
+  await clearDashboardMetrics(serviceClient);
   await upsertChunked(serviceClient, "dashboard_fo_metrics", payload, "symbol,expiry_date");
-  await deleteExpiredDashboardMetrics(serviceClient, new Date().toISOString().slice(0, 10));
   return payload.length;
 }

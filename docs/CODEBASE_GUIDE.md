@@ -562,7 +562,7 @@ log line is `F&O ingest complete: ...`) before assuming it's a data bug.
   Options screen and tests run offline.
 - `src/repositories/fo_repo.py` — natural-key upserts (chunked, since one
   day is ~9k option rows), `refresh_open_flags`,
-  `delete_expired_dashboard_fo_metrics` (see "A real bug this caused"
+  `clear_dashboard_fo_metrics` (see "A real bug this caused"
   below), and reads off the views.
 - `src/services/fo_service.py` — `ingest_fo_day(client, book)` persists a
   parsed day; `option_chain_summary` / `futures_term_structure` are pure
@@ -707,12 +707,15 @@ cached row. Left unchecked, the Dashboard's "Options month" dropdown
 kept offering already-expired months forever -- confirmed live: the
 dropdown still listed "Jul 2026" a day after that expiry had passed,
 even though the Options screen (which reads live contracts, gated on
-`is_open`, not this cache) had already stopped showing it. Fixed by
-`fo_repo.delete_expired_dashboard_fo_metrics(client, as_of)` (and its
-TypeScript mirror in `dashboardMetrics.ts`), called at the end of every
-`recompute_dashboard_metrics` run -- same finalization pattern as
-`refresh_open_flags` above, just a straight delete rather than a
+`is_open`, not this cache) had already stopped showing it. Fixed (at the
+time) by `fo_repo.delete_expired_dashboard_fo_metrics(client, as_of)`
+(and its TypeScript mirror in `dashboardMetrics.ts`), called at the end
+of every `recompute_dashboard_metrics` run -- same finalization pattern
+as `refresh_open_flags` above, just a straight delete rather than a
 two-way flag flip since this cache has no `is_open` column of its own.
+**This expiry-only prune was later replaced by a full clear-then-insert
+(`fo_repo.clear_dashboard_fo_metrics`) -- see the BSE-exclusion bug
+further below for why an expiry-only prune wasn't general enough.**
 
 **A second, more subtle real bug found right after fixing the above**:
 even after fixing the stale-row issue, a portfolio-only symbol (e.g.
@@ -797,6 +800,31 @@ an explicit BSE prefix is excluded. The underlying stale BSE
 `option_contracts` rows are left alone (harmless once excluded here, and
 still legitimately readable by other consumers of the view, e.g. a
 portfolio's own BANKEX position).
+
+**A fifth bug, confirmed live immediately after applying migration
+`0027` and re-syncing**: the dropdown still showed all 5 entries
+(including the duplicates) even though `dashboard_metrics_rows` was now
+correctly excluding BSE legs from any *newly computed* row. Root cause:
+the write path was still `upsert_dashboard_fo_metrics` (new rows) +
+`delete_expired_dashboard_fo_metrics` (rows whose `expiry_date` had
+already passed) -- and the stale BSE row's `expiry_date` is a real,
+future BSE monthly expiry, so it was never "expired" by that prune's
+definition. The BSE-exclusion fix stops the row from being *re-upserted*
+each run, but nothing was left to *remove* a row that a previous run
+(before the fix existed) had already written. Since this is a pure
+derived cache with no history worth preserving (the same reasoning
+migrations `0010`/`0011` already used to justify a wholesale
+drop-and-recreate on schema changes), `recompute_dashboard_metrics`
+was changed to a true replace: `fo_repo.clear_dashboard_fo_metrics`
+(deletes every row, not just expired ones) now runs *before*
+`upsert_dashboard_fo_metrics` on every call, and
+`delete_expired_dashboard_fo_metrics` was deleted outright (superseded,
+not left as dead code) -- mirrored in `dashboardMetrics.ts` as
+`clearDashboardMetrics`, replacing `deleteExpiredDashboardMetrics`. This
+also forecloses the whole class of bug: any *future* reason
+`dashboard_metrics_rows` might exclude a leg no longer needs its own
+matching prune query, since every recompute now starts from an empty
+table.
 
 `dashboard_fo_metrics` was originally one row per symbol (migration
 `0009`, holding only the nearest expiry); migration `0010` dropped and

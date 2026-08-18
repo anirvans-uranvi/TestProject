@@ -76,17 +76,29 @@ def upsert_dashboard_fo_metrics(client: Client, rows: list[dict]) -> None:
         client.table("dashboard_fo_metrics").upsert(chunk, on_conflict="symbol,expiry_date").execute()
 
 
-def delete_expired_dashboard_fo_metrics(client: Client, as_of: date) -> None:
-    """This cache is only ever upserted, never pruned by the write path
-    itself -- a symbol's near/next/far expiries roll forward over time
-    (last month's near expiry falls off the "up to 3 nearest" set once it
-    expires), but the old row for it was never deleted, just no longer
-    refreshed. Left unchecked, the Dashboard's "Options month" dropdown
-    (built from every distinct `expiry_date` in this table) keeps
-    offering already-expired months forever. Called at the end of every
-    `recompute_dashboard_metrics` run, same finalization pattern as
-    `refresh_open_flags`."""
-    client.table("dashboard_fo_metrics").delete().lt("expiry_date", as_of.isoformat()).execute()
+def clear_dashboard_fo_metrics(client: Client) -> None:
+    """Deletes every row in the Dashboard's precomputed cache. Called at
+    the *start* of every `recompute_dashboard_metrics` run, immediately
+    followed by `upsert_dashboard_fo_metrics` writing the freshly computed
+    full set back -- a true replace, not an incremental upsert.
+
+    This used to be `delete_expired_dashboard_fo_metrics(as_of)`, deleting
+    only rows whose `expiry_date` had already passed -- upsert-only
+    otherwise. That under-pruned: a row can stop belonging in the cache
+    for reasons other than its own expiry passing (e.g.
+    `dashboard_metrics_rows` changing which *legs* it's willing to use --
+    see the BSE-exclusion fix below), and an expiry-only prune leaves such
+    a row sitting in the table forever, since nothing ever re-upserts it
+    away. Confirmed live: excluding BSE-sourced legs from
+    `dashboard_metrics_rows` didn't clear a stale BSE-derived expiry from
+    the Dashboard's "Options month" dropdown even after a fresh refresh,
+    because that row's own `expiry_date` (a real, not-yet-passed BSE
+    monthly expiry) was never "expired" by the old prune's definition.
+    Full clear-then-insert sidesteps the whole class of bug -- this is a
+    small, pure derived cache (~1 row per symbol per near/next/far
+    expiry), the same "harmless to truncate, rebuilt on the next refresh"
+    tradeoff already accepted by migrations 0010/0011's drop-and-recreate."""
+    client.table("dashboard_fo_metrics").delete().gte("expiry_date", "1900-01-01").execute()
 
 
 def refresh_open_flags(client: Client, as_of: date) -> None:

@@ -7,8 +7,6 @@ screen renders, so they're unit-testable without Streamlit or a live DB.
 """
 from __future__ import annotations
 
-from datetime import date
-
 from supabase import Client
 
 from src.data_providers.nse_fo_provider import FOBhavcopy
@@ -506,16 +504,19 @@ def recompute_dashboard_metrics(client: Client) -> int:
     `get_latest_prices`'s own docstring already describes for the
     Portfolio page's identical problem.
 
-    Also prunes any row whose `expiry_date` has since passed --
-    `dashboard_metrics_rows` only ever emits a symbol's *current* up-to-3
-    nearest expiries, so a month that just expired stops being emitted
-    but its old cached row would otherwise never be deleted, leaving it
-    to linger in the Dashboard's "Options month" dropdown forever. See
-    `fo_repo.delete_expired_dashboard_fo_metrics`."""
+    Clears the whole cache before writing the freshly computed rows back
+    -- a true replace, not an incremental upsert. `dashboard_metrics_rows`
+    only ever emits a symbol's *current* up-to-3 nearest expiries (after
+    excluding BSE-sourced legs), so a row can stop belonging in the cache
+    for reasons other than its own expiry passing; an upsert-plus-
+    delete-expired-only approach (the previous design) leaves such a row
+    sitting in the table forever, since nothing else ever removes it. See
+    `fo_repo.clear_dashboard_fo_metrics`'s docstring for the real bug this
+    caused."""
     all_symbols = [c.symbol for c in companies_repo.list_all_companies(client)]
     spot_by_symbol = snapshot_repo.get_latest_prices(client, all_symbols)
     option_rows = fo_repo.get_all_open_options(client)
     rows = dashboard_metrics_rows(option_rows, spot_by_symbol)
+    fo_repo.clear_dashboard_fo_metrics(client)
     fo_repo.upsert_dashboard_fo_metrics(client, rows)
-    fo_repo.delete_expired_dashboard_fo_metrics(client, date.today())
     return len(rows)
