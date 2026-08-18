@@ -1970,6 +1970,25 @@ Two sharp edges worth knowing, neither a bug:
    with the source trade's would be more surprising than a clean
    "re-enter it if you still want it".
 
+**A real bug this caused**: splitting legs out of a trade with a large
+leg count threw `IndexError: list index out of range` on
+`trade_legs[i]` -- confirmed live, splitting 2 legs out of a 10-leg
+trade. Root cause: the legs table's row-selection state
+(`st.dataframe(..., on_select="rerun", key=legs_table_key)`) is keyed by
+widget key, not by the data it was computed against, so it survives the
+`st.rerun()` a successful split triggers completely unchanged -- but
+`trade_legs` is rebuilt from the now-smaller trade on that rerun, so a
+previously-selected row index past the new (shorter) list's end
+crashes `trade_legs[i]` on the very next render, even though the split
+itself had already succeeded. Fixed two ways: `st.session_state.pop(legs_table_key,
+None)` right before every `st.rerun()` that follows a merge or split
+(both change `trade_legs`' composition, not just split), so a fresh
+selection starts empty next render instead of carrying stale indices
+forward; plus a defensive `[i for i in all_selected_rows if i <
+len(trade_legs)]` filter where `selected_leg_rows` is computed, so any
+future path that reruns this page without remembering to clear
+`legs_table_key` degrades to "selection cleared" instead of crashing.
+
 `10_Analyse_Trade.py` itself is reached only via `st.session_state["analyse_trade_id"]`/
 `["analyse_trade_portfolio"]` + `st.switch_page` from My Trades' row
 selection (see the "Streamlit app" section's `visibility="hidden"`

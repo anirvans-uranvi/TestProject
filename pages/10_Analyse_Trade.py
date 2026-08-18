@@ -118,13 +118,14 @@ leg_table_rows = [
     }
     for leg in trade_legs
 ]
+legs_table_key = f"analyse_trade_legs_{slug(portfolio_name)}_{slug(trade_id)}"
 legs_event = st.dataframe(
     pd.DataFrame(leg_table_rows),
     use_container_width=True,
     hide_index=True,
     on_select="rerun",
     selection_mode="multi-row",
-    key=f"analyse_trade_legs_{slug(portfolio_name)}_{slug(trade_id)}",
+    key=legs_table_key,
     column_config={
         "Qty": st.column_config.NumberColumn(format="%+,.2f"),
         "Avg Price": st.column_config.NumberColumn(format="₹%,.2f"),
@@ -230,12 +231,25 @@ with merge_col:
         portfolio_repo.set_trade_group(client, user_id, portfolio_name, legs_to_move, trade_id)
         st.session_state["portfolio_cache_bust"] += 1
         st.cache_data.clear()
+        # The legs table's row-selection state is keyed by widget key, not
+        # by the data it was computed against -- it survives st.rerun()
+        # unchanged even though trade_legs is about to be a different
+        # (here, larger) list. Clear it so a stale selection can't
+        # silently point at the wrong leg -- or, after a split shrinks
+        # trade_legs, past its end entirely (confirmed live: IndexError
+        # on trade_legs[i] right after a successful split).
+        st.session_state.pop(legs_table_key, None)
         st.success(f"Merged {len(trades_to_merge)} trade(s) into this one.")
         st.rerun()
 
 with split_col:
     st.markdown("**Split selected legs out of this trade**")
-    selected_leg_rows = legs_event.selection.rows if legs_event and legs_event.selection else []
+    all_selected_rows = legs_event.selection.rows if legs_event and legs_event.selection else []
+    # Defensive: the selection state can outlive the row it pointed to
+    # (see the merge-button comment above) if some other path ever
+    # reruns this page without clearing legs_table_key -- silently drop
+    # any now-out-of-range index rather than crashing on trade_legs[i].
+    selected_leg_rows = [i for i in all_selected_rows if i < len(trade_legs)]
     if not selected_leg_rows:
         st.caption("Select one or more legs above first.")
     else:
@@ -260,6 +274,7 @@ with split_col:
                 portfolio_repo.set_trade_group(client, user_id, portfolio_name, selected_leg_keys, new_trade_id)
                 st.session_state["portfolio_cache_bust"] += 1
                 st.cache_data.clear()
+                st.session_state.pop(legs_table_key, None)  # trade_legs is about to shrink -- see merge button's comment
                 st.success(f'Split {len(selected_legs)} leg(s) into "{new_trade_id}".')
                 st.rerun()
         else:
@@ -267,6 +282,7 @@ with split_col:
                 portfolio_repo.clear_trade_group_overrides(client, user_id, portfolio_name, selected_leg_keys)
                 st.session_state["portfolio_cache_bust"] += 1
                 st.cache_data.clear()
+                st.session_state.pop(legs_table_key, None)  # trade_legs is about to shrink -- see merge button's comment
                 st.success(f"Split {len(selected_legs)} leg(s) back to their default per-underlying Trade.")
                 st.rerun()
 
