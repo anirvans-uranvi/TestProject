@@ -16,6 +16,14 @@
 --
 -- Additive only (`select *` consumers, which is every current one, just
 -- gain a column) -- see fo_repo.get_all_open_options and its callers.
+--
+-- `source` must be appended AFTER the existing columns, not inserted
+-- alongside them in their original 0007 order -- `create or replace
+-- view` requires every pre-existing column to keep its original name at
+-- its original ordinal position; Postgres reads a mid-list insertion as
+-- renaming every column after it (confirmed live: "cannot change name of
+-- view column 'lot_size' to 'source'" when `source` was placed before
+-- `lot_size`/`contract_name`/`is_open`).
 
 create or replace view latest_option_chain_view
 with (security_invoker = true)
@@ -39,10 +47,10 @@ select distinct on (p.symbol, p.expiry_date, p.strike_price, p.option_type)
     p.volume,
     p.turnover,
     p.num_trades,
-    p.source,
     oc.lot_size,
     oc.contract_name,
-    oc.is_open
+    oc.is_open,
+    p.source
 from option_daily_prices p
 join option_contracts oc
     on oc.symbol = p.symbol and oc.expiry_date = p.expiry_date
