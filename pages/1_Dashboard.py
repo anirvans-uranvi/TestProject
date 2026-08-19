@@ -71,9 +71,9 @@ st.caption(
     "or PEG clearing their thresholds), and classifies each as Green, Amber, Red, or Unavailable."
 )
 st.caption(
-    f"Data sources — Stock prices: `{app_settings.market_data_provider}` · "
+    f"Data sources — Stock prices: `{user_settings.data_provider}` (Settings > Data Provider) · "
     f"Fundamentals (PE/PEG/dividends): `{app_settings.fundamentals_provider}` · "
-    "Options/F&O: NSE + BSE Bhavcopy (end-of-day)"
+    "Options/F&O: NSE + BSE Bhavcopy (end-of-day) — always, regardless of Data Provider"
 )
 
 header_col1, header_col2 = st.columns(2)
@@ -116,6 +116,21 @@ if not rows:
     st.stop()
 
 df = pd.DataFrame([r.model_dump() for r in rows])
+
+# Prefer a live broker quote over the shared, possibly-stale
+# daily_screener_snapshots value -- only when this account's Data
+# Provider setting (Settings page) is Dhan/Zerodha, and only for
+# whichever symbols "Market Data Refresh" actually cached a live price
+# for (user_live_prices, migration 0030); every other symbol keeps its
+# snapshot value. `live_prices` is also consulted below to skip the
+# "(as of <date>)" stale-fallback marker for a live-priced row -- its
+# LTP is fresh even though the snapshot row backing 52W/returns/PEG for
+# that symbol may not be.
+live_prices: dict[str, float] = {}
+if user_settings.data_provider != "yfinance_bhavcopy":
+    live_prices = snapshot_repo.get_user_live_prices(client, user_id, df["symbol"].tolist())
+    if live_prices:
+        df["latest_price"] = df.apply(lambda r: live_prices.get(r["symbol"], r["latest_price"]), axis=1)
 
 # ---------------------------------------------------------------------
 # F&O-derived columns (5% CSP, 5% CC) -- read from the precomputed
@@ -368,7 +383,8 @@ display_rows = []
 for _, r in filtered.iterrows():
     ltp_cell = format_inr(r["latest_price"])
     if (
-        pd.notna(r["latest_price"])
+        r["symbol"] not in live_prices
+        and pd.notna(r["latest_price"])
         and pd.notna(r["snapshot_date"])
         and _latest_snapshot_date is not None
         and r["snapshot_date"] != _latest_snapshot_date

@@ -37,9 +37,9 @@ pages/                  Streamlit multipage app (each still its own script,
                         registered by app.py rather than auto-discovered)
   1_Dashboard.py         Screener table, metric cards, filters, CSV export -- sidebar label "Screener"
   2_Stock_Detail.py       Price/volume/dividend charts, scorecard, per-stock alerts -- sidebar label "Equity"
-  4_Settings.py            Per-user thresholds, alert CRUD + notification history, notification channels, sign out
+  4_Settings.py            Per-user thresholds, alert CRUD + notification history, notification channels,
+                              Data Provider (Dhan/Zerodha/YFinance+Bhavcopy) + broker sync, sign out
   5_Options.py              F&O: futures term structure, 5% CSP / 5% CC breakdown
-  6_My_Broker.py             Upload/connect Zerodha/Dhan holdings + F&O positions, create/delete portfolios
   7_My_Trades.py              Holdings + positions grouped by underlying into Stock/Index/Other Trades
   8_My_Holdings.py            Equity holdings, split ETFs & Mutual Funds / Stocks, both with 1D/5D/20D Change
   9_My_Positions.py           Per-leg F&O positions, split into Stock Options / Index Options / Others (no grouping -- see My Trades for that)
@@ -65,8 +65,8 @@ scripts/
 supabase/
   migrations/               Schema, RLS policies, views/functions
   seed.sql                   Current Nifty 50 constituents + companies (reference data only)
-  functions/manual-refresh/  Edge Function behind the "Stock Data Refresh" button
-  functions/fo-refresh/       Edge Function behind "NSE/BSE F&O Data Refresh" (one function, exchange param)
+  functions/manual-refresh/  Edge Function "Market Data Refresh" calls for stock data
+  functions/fo-refresh/       Edge Function "Market Data Refresh" calls for NSE/BSE F&O (one function, exchange param)
 tests/                     Pytest suite (calculations, providers, services)
 ```
 
@@ -352,8 +352,13 @@ Three interchangeable mechanisms, pick one (or run more than one --
 
 1. **GitHub Actions** (`.github/workflows/refresh_prices.yml`): cron jobs
    for intraday (every 15 min during NSE hours), EOD, fundamentals, and
-   screener recompute. Needs `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
-   (and `DHAN_*` if using the live provider) as repo secrets.
+   screener recompute, plus one **8pm IST** job that runs a full stock
+   refresh (`--mode=all`) **and** NSE + BSE F&O bhavcopy
+   (`scripts/fetch_fo_data.py --days 1`) -- the scheduled counterpart to
+   the "Market Data Refresh" button below, for every account still on the
+   default YFinance + Bhavcopy Data Provider. Needs `SUPABASE_URL`,
+   `SUPABASE_SERVICE_ROLE_KEY` (and `DHAN_*` if using the live provider)
+   as repo secrets.
 2. **APScheduler daemon**: `python scripts/run_refresh.py --mode=all
    --daemon` (also the `scheduler` service in `docker-compose.yml`).
 3. **Manual/cron**: `python scripts/run_refresh.py --mode=<intraday|eod|fundamentals|screener|all>`
@@ -368,30 +373,50 @@ retry transient provider failures with exponential backoff
 ## On-demand refresh (the refresh bar)
 
 The scheduled mechanisms above run independently of the Streamlit app.
-Three on-demand buttons do an actual live fetch on click, each
-implemented as a **Supabase Edge Function** rather than in Streamlit page
-code -- a real fetch-and-write needs the Supabase service-role key
-(bypasses RLS), which must never live in Streamlit page code since
-Streamlit Cloud runs that code in every logged-in user's own browser
-session. Each Edge Function holds the key safely as a Supabase-injected
-environment variable (runs server-side inside Supabase's infrastructure);
-Streamlit only ever sends the *calling user's own* access token
-(`src/services/edge_refresh.py`), never any secret.
+One **🔄 Market Data Refresh** button (previously three separate buttons,
+collapsed into one on request) does an actual live fetch on click.
+`src/utils/refresh_bar.py`'s `render_global_refresh_bar()` renders it at
+the same spot on every page (right after the title and disclaimer) --
+**Dashboard, Stock Detail, Options, My Trades, My Holdings, My Positions,
+My CSP, Analyse Trade, and Settings** -- so refreshing data never requires
+navigating back to one specific page. A click clears Streamlit's entire
+cache (`st.cache_data.clear()`) before rerunning, so every page's own
+cached loaders pick up the fresh data regardless of which page triggered
+the refresh.
 
-`src/utils/refresh_bar.py`'s `render_global_refresh_bar()` renders all
-three at once, at the same spot on every page (right after the title and
-disclaimer) -- **Dashboard, Stock Detail, Options, My Broker, My Trades,
-My Holdings, My Positions, and Settings** -- so refreshing data never
-requires navigating back to one specific page. A click clears Streamlit's entire cache (`st.cache_data.clear()`)
-before rerunning, so every page's own cached loaders pick up the fresh
-data regardless of which page triggered the refresh.
+**Every click fires up to four fetches concurrently** (via a
+`ThreadPoolExecutor`, cutting wall-clock time to roughly the slowest one
+instead of their sum, rather than the old sequential one-button-at-a-time
+flow):
 
-- **🔄 Stock Data Refresh** -- cash-market data (prices, dividends,
-  fundamentals, screener recompute), via `supabase/functions/manual-refresh/`.
-- **📊 NSE F&O Data Refresh** / **📊 BSE F&O Data Refresh** -- futures +
-  options for each exchange, both via the same
-  `supabase/functions/fo-refresh/` (see below) -- one Edge Function,
-  parameterized by a POST body `{"exchange": "NSE" | "BSE"}`.
+- **Stock prices + fundamentals + screener recompute** -- cash-market
+  data via `supabase/functions/manual-refresh/` -- always, regardless of
+  this account's Data Provider setting (fundamentals aren't available
+  from Dhan/Zerodha's APIs at all).
+- **NSE F&O** and **BSE F&O** -- futures + options for each exchange,
+  both via the same `supabase/functions/fo-refresh/` (see below) -- one
+  Edge Function, parameterized by a POST body `{"exchange": "NSE" |
+  "BSE"}` -- always, since neither broker exposes a bhavcopy-equivalent
+  full options chain.
+- **Live broker prices** -- *only* when this account's Data Provider
+  (Settings) is Dhan or Zerodha: refetches this account's connected
+  broker's live quote across the full watched-symbol universe (Nifty50
+  constituents + this account's own portfolio symbols) and caches it in
+  `user_live_prices` (migration `0030`) for Dashboard/Stock Detail to
+  read as an override (`src/utils/refresh_bar.py::_refresh_user_live_prices`).
+
+The first three are each implemented as a **Supabase Edge Function**
+rather than in Streamlit page code -- a real fetch-and-write needs the
+Supabase service-role key (bypasses RLS), which must never live in
+Streamlit page code since Streamlit Cloud runs that code in every
+logged-in user's own browser session. Each Edge Function holds the key
+safely as a Supabase-injected environment variable (runs server-side
+inside Supabase's infrastructure); Streamlit only ever sends the
+*calling user's own* access token (`src/services/edge_refresh.py`),
+never any secret. The fourth (live broker prices) runs entirely in
+Streamlit's own process, using this account's already-saved
+`broker_connections` credentials the same way the portfolio pages'
+broker-live LTP override already does.
 
 It reimplements price/dividend/fundamentals fetching (via Yahoo Finance,
 unofficial endpoints, see [Limitations](#limitations)) and the
@@ -446,11 +471,11 @@ needed. No changes are required on the Streamlit side beyond having
 `SUPABASE_URL` set (already required for everything else) -- the
 function's URL is derived from it.
 
-### F&O Data Refresh buttons (`supabase/functions/fo-refresh/`)
+### F&O data refresh (`supabase/functions/fo-refresh/`)
 
-The **📊 NSE F&O Data Refresh** / **📊 BSE F&O Data Refresh** buttons both
-call the *same* Edge Function, `supabase/functions/fo-refresh/`, with a
-POST body of `{"exchange": "NSE"}` or `{"exchange": "BSE"}`
+"Market Data Refresh" calls this Edge Function **twice concurrently** --
+once with a POST body of `{"exchange": "NSE"}`, once with `{"exchange":
+"BSE"}` -- both against the *same* Edge Function, `supabase/functions/fo-refresh/`
 (`src/services/edge_refresh.py::trigger_fo_refresh(access_token, exchange)`;
 omitting the body defaults to `"NSE"`, so any old caller keeps working).
 Each checks whether that exchange has published a newer F&O bhavcopy than
@@ -643,180 +668,135 @@ published yet.
 
 ## Portfolio pages
 
-Your own holdings and F&O positions -- uploaded from broker CSV exports,
-not the Nifty50 screener universe -- span six pages, only five of which
-appear in the sidebar (**My Broker**, **My Trades**, **My Holdings**, **My
+Your own holdings and F&O positions -- synced live from a connected
+broker (see [Connecting a broker](#connecting-a-broker-settings--data-provider)
+above), not the Nifty50 screener universe -- span five pages, four of
+which appear in the sidebar (**My Trades**, **My Holdings**, **My
 Positions**, **My CSP**; **Analyse Trade** is reached only by selecting a
-row on My Trades). All six share one loader/formatting module,
+row on My Trades). All five share one loader/formatting module,
 `src/utils/portfolio_page.py` (cached data loaders, the cache-bust
 counter, `build_trade_legs`), so a cache hit on one page is a cache hit on
 another -- e.g. switching from My Holdings to My Trades doesn't re-fetch
 holdings that are still fresh. Every page keeps the same "one tab per
-portfolio" structure (**you can maintain multiple, independently-named
-portfolios that all coexist**, e.g. "Personal", "Family", "Retirement");
-only **My Broker** also gets a "+ New portfolio" tab, since that's the
-only page a portfolio can be created or deleted from.
+portfolio" structure it always has, but since a live broker sync now
+targets exactly one resolved portfolio per account (see above), in
+practice there's just the one tab -- a pre-existing account with multiple
+portfolio_names from before this change still shows all of them, just
+with no way to add another live-synced one.
 
-### My Broker (`pages/6_My_Broker.py`)
+### Connecting a broker (Settings > Data Provider)
 
-Upload/connect Zerodha or Dhan holdings and F&O positions, per portfolio.
-**A portfolio's broker is fixed once it has data** -- an existing tab
-shows its own broker (inferred from its saved holdings/positions) as a
-locked, disabled field, so a portfolio named "Dhan Corporate" can't
-accidentally have Zerodha data uploaded into it; its save button reads
-"Update Portfolio". Only the "+ New portfolio" tab (or the first-ever
-portfolio) offers a real Broker dropdown, since nothing's saved under
-that name yet -- its button reads "Create Portfolio". Once a broker is
-picked, "Holdings" or "Positions" from a "What are you uploading?"
-selector, then the file. Two broker formats are supported for each:
+There's no upload page anymore -- CSV import was dropped entirely once a
+live broker sync became viable as the account's one data source. Instead,
+Settings has a **"Data Provider"** section
+(`src/utils/data_provider_settings.py`) with one dropdown:
+**Dhan**, **Zerodha**, or **YFinance + NSE/BSE Bhavcopy** (the default).
+This choice is **account-wide**, not per-portfolio -- a `broker_connections`
+row is now keyed `(user_id, broker)` (migration
+`0029_broker_connections_account_wide.sql`, collapsed from the original
+per-portfolio design), and it governs two things at once:
 
-- **Holdings -- Zerodha**: the `Instrument` column is already the exact
-  NSE trading symbol, so it's trusted directly.
-- **Holdings -- Dhan**: the `Name` column is a free-text company name,
-  matched against `companies.name` by normalized-substring containment
-  (case/suffix-insensitive). Ambiguous or unmatched names are left
-  unresolved -- you can type the correct NSE symbol in before saving, or
-  leave it blank to keep that row as N/A.
-- **Positions -- Zerodha**: the `Instrument` column is Zerodha's own F&O
-  tradingsymbol, decoded by `portfolio_service.parse_zerodha_option_instrument`
-  in one of two formats: the *weekly* one (e.g. `NIFTY2681123000PE` --
-  underlying + 2-digit year + a single month character + 2-digit day +
-  strike + CE/PE; today, index-only -- NIFTY, BANKNIFTY, SENSEX, ...),
-  or the *monthly* one (e.g. `NIFTY26AUG23100PE` or `SBIN25AUG970PE` --
-  underlying + 2-digit year + 3-letter month, no day at all, since NSE
-  monthly contracts always expire the last Thursday of that month, a day
-  this app computes rather than reads off the symbol -- doesn't account
-  for an exchange holiday shifting that day earlier, so treat the
-  computed expiry as approximate for a monthly contract, exact for a
-  weekly one).
-- **Positions -- Dhan**: the `Name` column is Dhan's own space-separated
-  format (e.g. `ONGC 25 AUG 230 PUT`), used uniformly for both monthly
-  and weekly contracts, decoded by `portfolio_service.parse_dhan_position_name`.
-  It carries no year, so the year is inferred as the nearest occurrence
-  of that day/month on or after today (an open position's expiry can't
-  be in the past).
+1. **Stock LTP everywhere it's shown** (Dashboard, Stock Detail, and the
+   portfolio pages below) -- Dhan/Zerodha means a live broker quote,
+   cached per-account in `user_live_prices` (migration `0030`) by the
+   **Market Data Refresh** button (see [On-demand refresh](#on-demand-refresh-the-refresh-bar)
+   below) and read as an override over the shared, possibly-stale
+   `daily_screener_snapshots` value. **Fundamentals (PEG, dividend
+   yield) and the full F&O options chain are never provider-branched** --
+   neither Dhan nor Zerodha's API exposes that data, so those always stay
+   yfinance/NSE+BSE-bhavcopy-sourced regardless of this setting.
+2. **Where your holdings/positions come from.** Picking Dhan or Zerodha
+   reveals a credential form and a "Sync now" button right there in
+   Settings; picking the default shows nothing further to connect.
+   Sync always targets **one portfolio per account**
+   (`portfolio_repo.get_or_default_portfolio_name` -- reuses whatever
+   single portfolio_name your holdings/positions already share, or
+   `"My Portfolio"` for a brand-new account with nothing saved yet; there's
+   no portfolio-name picker anymore).
 
-A position whose instrument string doesn't decode is still saved and
-shown -- just with no expiry/strike/type -- there's no manual-symbol
-override for positions the way there is for unresolved holdings, since a
-position's contract identity (unlike a holding's free-text company name)
-is either decodable from the string or it isn't.
+**Dhan**: paste a Client ID and Access Token (generate one on
+`web.dhan.co` -> Profile -> "DhanHQ Trading APIs"; valid for 24 hours),
+"Save & Sync" pulls holdings + positions straight from Dhan's API (`GET
+/v2/holdings`, `GET /v2/positions`, `POST /v2/marketfeed/ltp` for
+position LTPs) via `src/data_providers/dhan_provider.py`
+(`portfolio_service.dhan_holdings_from_api`/`dhan_positions_from_api` --
+symbol/expiry/strike/type come from Dhan's own structured fields
+`tradingSymbol`/`drvExpiryDate`/`drvStrikePrice`/`drvOptionType`, no
+name-matching or regex decoding needed). Since the token expires every 24
+hours, syncing is always a manual click -- Settings warns once a saved
+token is more than ~23 hours old. Fetching live LTP for positions needs
+Dhan's separate "Data APIs" subscription (distinct from "Trading APIs");
+without it (or for any security Dhan's own feed omits),
+`portfolio_service.apply_fallback_option_ltp` fills the gap from this
+app's own F&O data (`option_daily_prices` via `latest_option_chain_view`)
+for any symbol/expiry/strike this app tracks -- the previous trading
+day's close, not a live tick, but still enough to show P&L instead of
+N/A. Covers NIFTY/BANKNIFTY (NSE) and SENSEX/BANKEX (BSE) index options
+alike; a *stock* option position only ever falls back to NSE's chain,
+never BSE's (BSE is index-options-only). **A fallback LTP is flagged, not
+silent**: `portfolio_positions.ltp_as_of` (migration `0026`) is set to
+that chain row's own trade date whenever the fallback fires, `None` for a
+live quote -- My CSP shows `"(as of <date>)"` next to a fallback LTP so
+it's never mistaken for a live one. **Security trade-off:** the access
+token can also place trades (Dhan has no read-only scope for individual
+accounts), stored as entered, protected only by the same row-level
+security every other per-user table here relies on -- not separately
+encrypted. This app's own code only ever calls the read-only endpoints
+above. "Disconnect" removes the saved credentials only; previously synced
+holdings/positions are left as-is.
 
-**Dhan can also be connected directly, instead of a CSV upload.** Picking
-"Dhan" as the broker offers a choice: "Upload CSV" (as above) or "Connect
-Dhan account". The latter asks for a Dhan Client ID and Access Token
-(generate one on `web.dhan.co` -> Profile -> "DhanHQ Trading APIs"; it's
-valid for 24 hours), saves them to `broker_connections` (migration `0017`,
-widened by `0022` to also hold Zerodha's third credential -- see below),
-and a "Sync now" button then pulls holdings + positions straight from
-Dhan's API (`GET /v2/holdings`, `GET /v2/positions`, and `POST
-/v2/marketfeed/ltp` for position LTPs) via
-`src/data_providers/dhan_provider.py`. The synced rows are translated into
-the exact same shape the CSV parsers produce
-(`portfolio_service.dhan_holdings_from_api`/`dhan_positions_from_api`) and
-saved through the same `replace_broker_holdings`/`replace_broker_positions`
-calls, so the resulting tables are indistinguishable from a CSV upload --
-except symbol/expiry/strike/type come from Dhan's own structured fields
-(`tradingSymbol`, `drvExpiryDate`, `drvStrikePrice`, `drvOptionType`)
-rather than fuzzy name-matching or regex decoding. Since the token expires
-every 24 hours, syncing is always a manual click (no background refresh in
-this version) -- the page warns once a saved token is more than ~23 hours
-old. Fetching live LTP for positions needs Dhan's separate "Data APIs"
-subscription (distinct from "Trading APIs", enabled on the same
-`web.dhan.co` page); without it (or for any security Dhan's own feed
-omits), `portfolio_service.apply_fallback_option_ltp` fills the gap from
-this app's own F&O data (`option_daily_prices` via
-`latest_option_chain_view`) for any symbol/expiry/strike this app tracks --
-the previous trading day's close, not a live tick, but still enough to show
-P&L instead of N/A. This now covers NIFTY/BANKNIFTY index options (via
-NSE, migration `0018`) and SENSEX/BANKEX index options (via BSE, migration
-`0019`) alike; only a strike/expiry genuinely outside the tracked chain
-stays N/A. A *stock* option position, though, only ever falls back to
-NSE's chain -- BSE is index-options-only (see the F&O Data Refresh
-buttons section above). **A fallback LTP is flagged, not silent**:
-`portfolio_positions.ltp_as_of` (migration `0026`) is set to that chain
-row's own trade date whenever the fallback fires, `None` for a live
-quote -- My CSP shows `"(as of <date>)"` next to a fallback LTP so it's
-never mistaken for a live one (confirmed live: a JioFin CSP showed LTP
-3.30 on My CSP against a live 4.40 in Dhan's own app, with nothing in
-this app distinguishing the two before this).
-**Security trade-off:** the access token can also place trades (Dhan
-has no read-only scope for individual accounts), and it's stored as
-entered, protected only by the same row-level security every other
-per-user table in this app relies on -- not separately encrypted. This
-app's own code only ever calls the read-only endpoints above. "Disconnect"
-removes the saved credentials only; previously synced holdings/positions
-are left as-is, same as switching away from CSV upload.
+**Zerodha** (`src/data_providers/zerodha_provider.py`) works through a
+genuinely different mechanism -- Kite Connect is a paid, app-based
+platform, not a self-service token page:
 
-**Zerodha can also be connected directly** (`src/data_providers/zerodha_provider.py`),
-but through a genuinely different mechanism than Dhan's -- Zerodha's Kite
-Connect API is a paid, app-based platform, not a self-service token page:
-
-1. **One-time setup, on Zerodha's own site, before this works at all**:
-   register a Kite Connect app at developers.kite.trade (**₹2,000+GST/month
-   subscription, billed by Zerodha, separate from this project**), which
-   gives you an **API Key** and **API Secret**. Set that app's **Redirect
-   URL** to this app's own My Broker page --
-   `{your app's base URL}/My_Broker` (the exact `/My_Broker` path is
-   pinned in `app.py` so it stays stable regardless of the underlying
-   filename).
-2. In this app, pick "Zerodha" as the broker, "Connect Zerodha account",
-   and enter that API Key + API Secret once ("Save").
-3. Click **"Log in to Zerodha"** -- this opens Zerodha's own login page in
-   a **new browser tab** (standard OAuth-style redirect; this app never
-   sees your Zerodha password or TOTP code). If that new tab isn't
-   already signed into *this* app, you'll be asked to sign in here first
-   -- do so, and the Zerodha connection still completes normally
-   afterward. After logging into Zerodha, it redirects back to this app's
-   My Broker page with a one-time `request_token`; pick which portfolio
-   to save the connection to and click "Save & Sync" to complete it and
-   pull your first sync.
+1. **One-time setup, on Zerodha's own site**: register a Kite Connect app
+   at developers.kite.trade (**₹2,000+GST/month subscription, billed by
+   Zerodha, separate from this project**), which gives you an **API Key**
+   and **API Secret**. Set that app's **Redirect URL** to this app's
+   Settings page -- `{your app's base URL}/Settings` (the exact
+   `/Settings` path is pinned in `app.py`). **If you had Zerodha connected
+   before this change, update the Redirect URL** -- it used to point at
+   `/My_Broker`, which no longer exists.
+2. In Settings, pick "Zerodha", enter that API Key + API Secret once
+   ("Save").
+3. Click **"Log in to Zerodha"** -- opens Zerodha's own login page in a
+   **new browser tab** (standard OAuth-style redirect; this app never
+   sees your password or TOTP). After logging in, it redirects back to
+   Settings with a one-time `request_token`, which completes the login
+   and immediately syncs -- no extra confirmation click, since (unlike
+   the old per-portfolio design) there's no portfolio to pick anymore.
 4. From then on, "Sync now" pulls holdings + positions straight from
    Kite Connect (`GET /portfolio/holdings`, `GET /portfolio/positions`),
-   translated into the same shape the CSV parsers produce
-   (`portfolio_service.zerodha_holdings_from_api`/`zerodha_positions_from_api`)
-   and saved through the same `replace_broker_holdings`/
-   `replace_broker_positions` calls -- indistinguishable from a CSV
-   upload once synced. Zerodha's own `tradingsymbol` for an F&O position
-   is in the exact same format as the CSV positions export's
-   `Instrument` column, so the existing
-   `parse_zerodha_option_instrument` decoder (weekly index options only
-   -- see above) is reused as-is; Kite's holdings/positions responses
-   also include `last_price` directly, so unlike Dhan there's no
-   separate LTP call or fallback step needed.
+   translated via `portfolio_service.zerodha_holdings_from_api`/
+   `zerodha_positions_from_api`. Zerodha's own `tradingsymbol` for an
+   F&O position is in the exact same format
+   `parse_zerodha_option_instrument` was originally built to decode from
+   a CSV positions export's `Instrument` column, so that decoder is
+   reused as-is (weekly index options: e.g. `NIFTY2681123000PE`; monthly:
+   e.g. `NIFTY26AUG23100PE`/`SBIN25AUG970PE`, expiry computed as that
+   month's last Thursday -- doesn't account for an exchange holiday
+   shifting that day earlier). Kite's responses also include `last_price`
+   directly, so unlike Dhan there's no separate LTP call or fallback step
+   needed.
 
-**Kite Connect's session expires at a fixed daily time (~6am IST the
-next day), not on a rolling 24-hour window like Dhan's** -- there's no
-way around logging in again through step 3 above every trading day you
-want to sync. The page detects this (comparing the saved session's start
-time against the most recent 6am IST boundary, not a simple hours-old
-check) and shows "Log in to Zerodha" again instead of "Sync now" once
-that boundary has passed.
-
-**Security trade-off, same model as Dhan's:** the API Secret and access
-token are stored as entered, protected only by `broker_connections`' RLS
-policy -- not separately encrypted. This app's own code only ever calls
-the read-only Holdings/Positions endpoints. "Disconnect" removes the
-saved credentials only; previously synced holdings/positions are left
-as-is.
+**Kite Connect's session expires at a fixed daily time (~6am IST the next
+day), not on a rolling 24-hour window like Dhan's** -- there's no way
+around logging in again through step 3 every trading day you want to
+sync. Settings detects this (comparing the saved session's start time
+against the most recent 6am IST boundary, not a simple hours-old check)
+and shows "Log in to Zerodha" again instead of "Sync now" once that
+boundary has passed. **Security trade-off, same model as Dhan's:** the
+API Secret and access token are stored as entered, protected only by
+`broker_connections`' RLS policy. "Disconnect" removes the saved
+credentials only; previously synced holdings/positions are left as-is.
 
 Both holdings and positions are saved per-user (`portfolio_holdings`,
-migrations `0012`/`0014`; `portfolio_positions`, migration `0016`;
-manual Trade groupings/metadata, `portfolio_trade_groups` and
-`portfolio_trade_meta`, migrations `0020`/`0021` -- see My Trades below),
-right below the disclaimer; a portfolio's tab exists as soon as it has
-holdings *or* positions saved (not holdings alone). Uploading a broker's
-file replaces that broker's previously saved rows of the selected type
-*in this portfolio only*; every other portfolio, broker, and the other
-upload type are untouched. A "+ New portfolio" tab is always available at
-the end to start an entirely separate portfolio from scratch (pick a name
--- it defaults to "Portfolio N" if left blank -- and a broker); creating
-one never deletes or modifies any existing portfolio. Each tab also has a
-collapsed "🗑️ Delete" section at the bottom to remove that portfolio
-entirely (every holding, position, broker connection, and Trade
-grouping/metadata within it) -- it requires ticking a confirmation
-checkbox before the delete button becomes clickable, since this can't be
-undone; every other portfolio is unaffected.
+migrations `0012`/`0014`; `portfolio_positions`, migration `0016`; manual
+Trade groupings/metadata, `portfolio_trade_groups` and
+`portfolio_trade_meta`, migrations `0020`/`0021` -- see My Trades below).
+A fresh sync fully replaces that broker's previously saved rows of each
+type (`replace_broker_holdings`/`replace_broker_positions`); nothing is
+merged in from a prior sync.
 
 ### My Holdings (`pages/8_My_Holdings.py`)
 
@@ -852,8 +832,8 @@ dependency on a page-wide expiry selector.
 
 ### My Positions (`pages/9_My_Positions.py`)
 
-Open F&O positions decoded from the same broker exports, one row per leg,
-no grouping (see My Trades below for that) -- split into three tables per
+Open F&O positions synced from your connected broker, one row per leg, no
+grouping (see My Trades below for that) -- split into three tables per
 portfolio tab: **Stock Options**, **Index Options**, and **Others**.
 `portfolio_service.classify_position_bucket` decides which: a position
 whose instrument string decoded into an actual option contract sorts by
@@ -866,22 +846,23 @@ broker's raw contract string), Underlying, Expiry, Strike, Type, Qty
 (signed -- negative is short), Avg Price, P&L, P&L%. Others has just
 Instrument, Qty, Avg Price, P&L, P&L% -- no expiry/strike/type/underlying,
 since none of those apply. Unlike holdings, the LTP behind each P&L here
-is trusted from the uploaded file rather than fetched live (not shown as
-its own column, only used to compute P&L/P&L%). For a Dhan-synced position
-missing LTP (see "Connect Dhan account" above),
-`portfolio_service.apply_fallback_option_ltp` fills the gap from this
-app's own F&O data -- which now includes index options (NIFTY, BANKNIFTY
-via NSE; SENSEX, BANKEX via BSE -- migrations `0018`/`0019`), not just
-stock options. BSE is index-options-only, though (see the F&O Data
-Refresh buttons section above) -- a *stock* option position always falls
+is whatever the broker sync resolved at sync time, not re-fetched live on
+every render (not shown as its own column, only used to compute
+P&L/P&L%). For a Dhan-synced position missing LTP (see
+[Connecting a broker](#connecting-a-broker-settings--data-provider)
+above), `portfolio_service.apply_fallback_option_ltp` fills the gap from
+this app's own F&O data -- which now includes index options (NIFTY,
+BANKNIFTY via NSE; SENSEX, BANKEX via BSE -- migrations `0018`/`0019`),
+not just stock options. BSE is index-options-only, though (see the F&O
+data refresh section above) -- a *stock* option position always falls
 back to NSE's own chain, never BSE's. Index *futures* remain out of scope
 on both exchanges. P&L/P&L% are still recomputed from qty/avg price/LTP
-rather than trusted from the file, since Zerodha's and Dhan's own P&L%
-columns turned out to mean different things (Dhan's is direction-aware,
-Zerodha's is a raw price change) -- see
+rather than trusted from the broker's own P&L figure, since Zerodha's and
+Dhan's own P&L% columns turned out to mean different things (Dhan's is
+direction-aware, Zerodha's is a raw price change) -- see
 `portfolio_service.compute_positions_view`. A position whose instrument
-string doesn't decode (see My Broker above) is still saved and shown here
--- in the Others table, with no expiry/strike/type.
+string doesn't decode is still saved and shown here -- in the Others
+table, with no expiry/strike/type.
 
 **LTP only comes from data already loaded in Supabase** -- never a fresh
 live fetch triggered by this page. The app's `companies`/
@@ -1077,7 +1058,7 @@ and are silently skipped. Columns, left to right:
   select the trade, click "Analyse Trade", and set it there (folded
   into the same form as the underlying/trade-type edits) -- see Analyse
   Trade above. **Defaults to today automatically** the first time a "Sync now" click
-  (Connect Dhan/Zerodha account -- CSV uploads don't do this) brings in
+  (Settings' Data Provider section) brings in
   a position leg that has no Trade Date yet, so Target P&L never sits
   stuck at N/A just because nobody's visited the form -- change it
   anytime afterward if the real entry date was earlier; an already-set
@@ -1136,13 +1117,13 @@ and are silently skipped. Columns, left to right:
   that far before the position loses money past the premium collected),
   positive means it's already fallen through breakeven.
 - **LTP Underlying** -- the underlying stock's own current price. If this
-  portfolio has a connected broker account -- Dhan and/or Zerodha (My
-  Broker's "Connect ... account") -- a live quote straight from that
-  broker is used; otherwise (or for any symbol no connected broker
-  returns a live quote for, e.g. an expired token) falls back to
-  `daily_screener_snapshots` -- the same source My Holdings' Current
-  Value already reads, only as fresh as the last "Stock Data Refresh"
-  (commonly yfinance, ~15-20min delayed).
+  account has a connected broker (Dhan and/or Zerodha, Settings' "Data
+  Provider" section) -- a live quote straight from that broker is used;
+  otherwise (or for any symbol no connected broker returns a live quote
+  for, e.g. an expired token) falls back to `daily_screener_snapshots` --
+  the same source My Holdings' Current Value already reads, only as
+  fresh as the last "Market Data Refresh" (commonly yfinance, ~15-20min
+  delayed).
 - **Momentum** -- the exact same "Momentum" criterion (B) the
   Dashboard's screener classifies every stock on
   (`src.calculations.classification.criterion_b`: 1D, 5D, AND 20D

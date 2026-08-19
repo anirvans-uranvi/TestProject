@@ -1,8 +1,10 @@
-"""Tests for portfolio_service: CSV parsing for both broker formats,
-name-to-symbol matching, cross-broker merging, and valuation math. The
-sample CSV bodies below are the real Zerodha/Dhan export shapes this
-feature was built against."""
-import io
+"""Tests for portfolio_service: broker API response translation
+(Dhan/Zerodha live sync), instrument-string decoding, cross-broker
+merging, and valuation math. CSV parsing was dropped once a live broker
+sync (Settings' "Data Provider" section) became the only way to
+populate holdings/positions -- see git history for the removed
+parse_zerodha_csv/parse_dhan_csv/parse_zerodha_positions_csv/
+parse_dhan_positions_csv tests."""
 from datetime import date, timedelta
 
 import pytest
@@ -10,91 +12,6 @@ import pytest
 from src.models.company import Company
 from src.models.enums import CompanyType, OptionType
 from src.services import portfolio_service
-
-ZERODHA_CSV = """"Instrument","Qty.","Avg. cost","LTP","Invested","Cur. val","P&L","Net chg.","Day chg.",""
-"GILT5YBEES",7500,64.3,65.95,482250,494625,12375,2.57,0.05,""
-"INDHOTEL",10,660.8,723.4,6608,7234,626,9.47,-0.26,""
-"LIQUIDCASE",14000,114.12,115.12,1597631.99,1611680,14048.01,0.88,0.01,""
-"LTGILTCASE",50000,29.67,30.44,1483500,1522000,38500,2.6,-0.13,""
-"NIFTYBEES",6000,266.6,272.99,1599600,1637940,38340,2.4,-0.14,""
-"SBIN",1500,974.2,1021.1,1461300,1531650,70350,4.81,-0.41,""
-"VAML",1150,441,438.45,507150,504217.5,-2932.5,-0.58,1.66,""
-"""
-
-DHAN_CSV = """"Name","Quantity","Avg Price","Last Traded","Investment","Current Value","P&L","P&L %"
-"Coal India",1350,"475.88","427.90","6,42,438.40","5,77,665.00","-64,773.40","-10.08%"
-"HDFC Bank",1300,"831.89","746.70","10,81,452.10","9,70,710.00","-1,10,742.10","-10.24%"
-"Hindustan Zinc",1225,"621.64","538.55","7,61,505.33","6,59,723.75","-1,01,781.57","-13.37%"
-"Indusind Bank",700,"975.64","1,015.35","6,82,947.15","7,10,745.00","27,797.85","4.07%"
-"Oil & Natural Gas Corporation",2250,"234.07","252.37","5,26,668.30","5,67,832.50","41,164.20","7.82%"
-"Tata Motors Passenger Vehicles",3200,"467.60","328.10","14,96,333.60","10,49,920.00","-4,46,413.60","-29.83%"
-"""
-
-
-def _companies() -> list[Company]:
-    return [
-        Company(symbol="SBIN", name="State Bank of India Ltd"),
-        Company(symbol="COALINDIA", name="Coal India Ltd"),
-        Company(symbol="HDFCBANK", name="HDFC Bank Ltd"),
-        Company(symbol="ONGC", name="Oil & Natural Gas Corporation Ltd"),
-        Company(symbol="TMPV", name="Tata Motors Passenger Vehicles Ltd"),
-    ]
-
-
-class TestParseZerodhaCsv:
-    def test_uses_instrument_column_as_symbol_directly(self):
-        holdings = portfolio_service.parse_zerodha_csv(io.StringIO(ZERODHA_CSV))
-        assert len(holdings) == 7
-        sbin = next(h for h in holdings if h["raw_name"] == "SBIN")
-        assert sbin["symbol"] == "SBIN"
-        assert sbin["qty"] == 1500
-        assert sbin["avg_price"] == 974.2
-        assert sbin["investment"] == 1461300
-
-    def test_ignores_the_files_own_ltp_and_pnl_columns(self):
-        holdings = portfolio_service.parse_zerodha_csv(io.StringIO(ZERODHA_CSV))
-        for h in holdings:
-            assert set(h.keys()) == {"raw_name", "symbol", "qty", "avg_price", "investment"}
-
-
-class TestMatchSymbol:
-    def test_matches_a_shortened_broker_name(self):
-        assert portfolio_service.match_symbol("Coal India", _companies()) == "COALINDIA"
-
-    def test_matches_with_bank_suffix_shared(self):
-        assert portfolio_service.match_symbol("HDFC Bank", _companies()) == "HDFCBANK"
-
-    def test_matches_long_multiword_name(self):
-        assert portfolio_service.match_symbol("Tata Motors Passenger Vehicles", _companies()) == "TMPV"
-
-    def test_returns_none_when_no_company_matches(self):
-        assert portfolio_service.match_symbol("Hindustan Zinc", _companies()) is None
-
-    def test_returns_none_for_ambiguous_match(self):
-        companies = [
-            Company(symbol="A", name="Tata Motors Ltd"),
-            Company(symbol="B", name="Tata Motors Passenger Vehicles Ltd"),
-        ]
-        assert portfolio_service.match_symbol("Tata Motors", companies) is None
-
-
-class TestParseDhanCsv:
-    def test_matches_known_companies_and_leaves_others_unresolved(self):
-        holdings = portfolio_service.parse_dhan_csv(io.StringIO(DHAN_CSV), _companies())
-        by_name = {h["raw_name"]: h for h in holdings}
-        assert by_name["Coal India"]["symbol"] == "COALINDIA"
-        assert by_name["HDFC Bank"]["symbol"] == "HDFCBANK"
-        assert by_name["Oil & Natural Gas Corporation"]["symbol"] == "ONGC"
-        assert by_name["Tata Motors Passenger Vehicles"]["symbol"] == "TMPV"
-        assert by_name["Hindustan Zinc"]["symbol"] is None
-        assert by_name["Indusind Bank"]["symbol"] is None
-
-    def test_parses_indian_grouped_quoted_numbers(self):
-        holdings = portfolio_service.parse_dhan_csv(io.StringIO(DHAN_CSV), _companies())
-        coal_india = next(h for h in holdings if h["raw_name"] == "Coal India")
-        assert coal_india["qty"] == 1350
-        assert coal_india["avg_price"] == pytest.approx(475.88)
-        assert coal_india["investment"] == pytest.approx(642438.40)
 
 
 class TestMergeHoldings:
@@ -196,19 +113,6 @@ class TestLooksLikeEtfName:
         assert portfolio_service.looks_like_etf_name("Vedanta Aluminium Metal Limited") is False
 
 
-ZERODHA_POSITIONS_CSV = """"Product","Instrument","Qty.","Avg.","LTP","P&L","Chg.",""
-"NRML","NIFTY2681123000PE",-780,10.15,1.1,7059,-89.16,""
-"NRML","NIFTY2681124000PE",780,56.99,8,-38210.25,-85.96,""
-"NRML","NIFTY2681124200CE",780,159.63,383.45,174580.25,140.21,""
-"""
-
-DHAN_POSITIONS_CSV = """"Name","Product","Qty","Avg Price","LTP","P&L","% Change","Action"
-"HINDALCO 25 AUG 860 PUT","Normal","-700.00","2.55","1.05","1,050.00","58.82"
-"ONGC 25 AUG 260 CALL","Normal","-2,250.00","2.95","0.62","5,242.50","78.98"
-"NIFTY 11 AUG 24200 CALL","Normal","780.00","162.00","395.00","1,81,740.00","143.83"
-"""
-
-
 class TestParseZerodhaOptionInstrument:
     def test_decodes_weekly_index_option(self):
         decoded = portfolio_service.parse_zerodha_option_instrument("NIFTY2681123000PE")
@@ -251,51 +155,6 @@ class TestParseZerodhaOptionInstrument:
     def test_returns_none_for_unrecognized_format(self):
         assert portfolio_service.parse_zerodha_option_instrument("NOTANOPTION") is None
         assert portfolio_service.parse_zerodha_option_instrument("NIFTY26XYZ23100PE") is None
-
-
-class TestParseZerodhaPositionsCsv:
-    def test_decodes_every_row_and_keeps_signed_qty(self):
-        positions = portfolio_service.parse_zerodha_positions_csv(io.StringIO(ZERODHA_POSITIONS_CSV))
-        assert len(positions) == 3
-        short_put = next(p for p in positions if p["raw_name"] == "NIFTY2681123000PE")
-        assert short_put["symbol"] == "NIFTY"
-        assert short_put["qty"] == -780
-        assert short_put["avg_price"] == 10.15
-        assert short_put["ltp"] == 1.1
-        assert short_put["expiry_date"] == date(2026, 8, 11)
-        assert short_put["strike_price"] == 23000.0
-        assert short_put["option_type"] == OptionType.PE
-
-
-class TestParseDhanPositionName:
-    def test_decodes_put_with_explicit_reference_date(self):
-        decoded = portfolio_service.parse_dhan_position_name("ONGC 25 AUG 230 PUT", as_of=date(2026, 8, 7))
-        assert decoded == {
-            "symbol": "ONGC",
-            "expiry_date": date(2026, 8, 25),
-            "strike_price": 230.0,
-            "option_type": OptionType.PE,
-        }
-
-    def test_infers_next_year_when_date_has_already_passed_this_year(self):
-        decoded = portfolio_service.parse_dhan_position_name("NIFTY 15 JAN 24000 CALL", as_of=date(2026, 8, 7))
-        assert decoded["expiry_date"] == date(2027, 1, 15)
-
-    def test_returns_none_for_unrecognized_format(self):
-        assert portfolio_service.parse_dhan_position_name("SOME FUTURE CONTRACT", as_of=date(2026, 8, 7)) is None
-
-
-class TestParseDhanPositionsCsv:
-    def test_decodes_indian_grouped_numbers_and_signed_qty(self):
-        positions = portfolio_service.parse_dhan_positions_csv(io.StringIO(DHAN_POSITIONS_CSV), as_of=date(2026, 8, 7))
-        assert len(positions) == 3
-        ongc = next(p for p in positions if p["raw_name"] == "ONGC 25 AUG 260 CALL")
-        assert ongc["symbol"] == "ONGC"
-        assert ongc["qty"] == -2250
-        assert ongc["avg_price"] == pytest.approx(2.95)
-        assert ongc["ltp"] == pytest.approx(0.62)
-        assert ongc["expiry_date"] == date(2026, 8, 25)
-        assert ongc["option_type"] == OptionType.CE
 
 
 class TestComputePositionsView:

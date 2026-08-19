@@ -134,7 +134,7 @@ def _render_positions_tab(portfolio_name: str, positions_for_portfolio: list) ->
         )
         return
     if not positions_for_portfolio:
-        st.caption("No positions saved yet for this portfolio -- upload one on My Broker.")
+        st.caption("No positions synced yet for this portfolio -- connect a broker in Settings > Data Provider.")
         return
 
     position_rows = [
@@ -190,7 +190,7 @@ def _render_positions_tab(portfolio_name: str, positions_for_portfolio: list) ->
 portfolio_names = sorted({h.portfolio_name for h in saved_holdings} | {p.portfolio_name for p in saved_positions})
 
 if not portfolio_names:
-    st.info("No portfolios yet -- go to My Broker to upload or connect one.")
+    st.info("No portfolios yet -- go to Settings > Data Provider to connect a Dhan or Zerodha account.")
 else:
     tabs = st.tabs(portfolio_names)
     for name, tab in zip(portfolio_names, tabs):

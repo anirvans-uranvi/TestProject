@@ -1,32 +1,52 @@
 """Shared "refresh data" bar shown at a consistent location -- right
 after the page title/disclaimer -- on every page (Dashboard, Stock
-Detail, Options, My Broker, My Trades, My Holdings, My Positions,
-Settings), so a user never has to navigate back to one specific page just
-to trigger a data refresh. Three buttons:
-Stock Data Refresh (Yahoo Finance, via the manual-refresh Edge Function),
-NSE F&O Data Refresh, and BSE F&O Data Refresh (both via the same
-fo-refresh Edge Function, parameterized by exchange -- see
-src/services/edge_refresh.py and supabase/functions/fo-refresh/index.ts's
-own docstring for why one function serves both).
+Detail, Options, My Trades, My Holdings, My Positions, My CSP, Analyse
+Trade, Settings), so a user never has to navigate back to one specific
+page just to trigger a data refresh.
+
+One "🔄 Market Data Refresh" button (previously three separate ones --
+Stock Data Refresh, NSE F&O Data Refresh, BSE F&O Data Refresh --
+collapsed into one on request). A click fires every applicable fetch
+*concurrently* via a ThreadPoolExecutor rather than one-after-another
+(these are blocking network calls; running them in parallel cuts wall-
+clock time to roughly the slowest one instead of their sum):
+- Stock prices + fundamentals + screener recompute, via the
+  manual-refresh Edge Function (Yahoo Finance) -- always, regardless of
+  this account's Data Provider setting, since fundamentals (PEG,
+  dividend) aren't available from Dhan/Zerodha's APIs at all.
+- NSE and BSE F&O bhavcopy, via the fo-refresh Edge Function -- also
+  always; neither broker exposes a bhavcopy-equivalent full options
+  chain dump, so F&O ingestion stays bhavcopy-sourced regardless of
+  provider.
+- **New**: if this account's Data Provider setting (Settings page) is
+  Dhan or Zerodha, also refetches live stock LTP from that broker across
+  the full watched-symbol universe and caches it in `user_live_prices`
+  (migration 0030) -- what Dashboard/Stock Detail read as an override on
+  top of the shared daily_screener_snapshots value, see
+  src/repositories/snapshot_repo.py's get_user_live_prices.
 
 A click always calls `st.cache_data.clear()` -- the *entire* app-wide
 cache, not just the current page's -- before `st.rerun()`-ing, so every
 page's own `@st.cache_data` loaders re-fetch fresh data regardless of
-which page the click happened on. That's what makes "available on all
-pages" actually mean something, rather than just refreshing data the
-current page happens to read.
+which page the click happened on.
 """
 from __future__ import annotations
+
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import streamlit as st
 
 from src.models.enums import CompanyType
-from src.repositories import companies_repo, fetch_log_repo
+from src.repositories import companies_repo, fetch_log_repo, portfolio_repo, settings_repo, snapshot_repo
 from src.services import edge_refresh
+from src.utils.portfolio_page import load_live_dhan_prices, load_live_zerodha_prices
+from src.utils.session import current_user_id
 from src.utils.timezones import format_ist
 
 _NSE_FO_PROVIDER = "fo_edge_nse"
 _BSE_FO_PROVIDER = "fo_edge_bse"
+_BROKER_BY_PROVIDER = {"dhan": "Dhan", "zerodha": "Zerodha"}
 
 
 def _last_fetch_caption(client, label: str, fetch_type: str | list[str], provider_name: str | None = None) -> str:
@@ -37,32 +57,75 @@ def _last_fetch_caption(client, label: str, fetch_type: str | list[str], provide
 
 def _universe_breakdown(client) -> str:
     """Same "(X stocks, Y ETFs/funds)" breakdown the stock-refresh message
-    has always shown (see git history of pages/1_Dashboard.py) -- moved
-    here so it stays identical regardless of which page triggered the
-    refresh."""
+    has always shown (see git history of pages/1_Dashboard.py)."""
     companies = companies_repo.list_all_companies(client)
     stock_count = sum(1 for c in companies if c.company_type == CompanyType.EQUITY)
     etf_count = sum(1 for c in companies if c.company_type == CompanyType.ETF)
     return f" ({stock_count} stocks, {etf_count} ETFs/funds)" if etf_count else ""
 
 
-def _run(key: str, spinner_text: str, action) -> None:
-    with st.spinner(spinner_text):
-        try:
-            summary = action()
-        except edge_refresh.ManualRefreshError as exc:
-            st.session_state[f"_refresh_bar_{key}"] = {"error": str(exc)}
-        else:
-            st.session_state[f"_refresh_bar_{key}"] = summary
+def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
+    """Refetches this account's live LTP across the full watched-symbol
+    universe (Nifty50 constituents + this account's own portfolio
+    symbols -- the same union Stock Detail/Options already use to widen
+    their pickers) from its connected broker, and caches the result in
+    user_live_prices for Dashboard/Stock Detail to read as an override.
+    Only invoked when this account's Data Provider setting is Dhan/
+    Zerodha -- see render_global_refresh_bar. Returns a small summary
+    dict for _render_live_prices_summary."""
+    connection = portfolio_repo.get_broker_connection(client, user_id, broker)
+    if connection is None or not connection.access_token:
+        return {"error": f"No connected {broker} account yet -- connect one in Settings' Data Provider section."}
+
+    symbols = tuple(
+        sorted(
+            {c.symbol for c in companies_repo.list_current_constituents(client)}
+            | set(portfolio_repo.list_portfolio_symbols(client, user_id))
+        )
+    )
+    # A unique cache_bust per click -- this is a user-initiated "fetch
+    # fresh now" action, not something that should reuse
+    # load_live_*_prices' own 60s @st.cache_data TTL from an earlier,
+    # possibly-stale call.
+    cache_bust = time.time()
+    if broker == "Dhan":
+        prices = load_live_dhan_prices(connection.client_id, connection.access_token, symbols, cache_bust)
+    else:
+        prices = load_live_zerodha_prices(
+            connection.client_id, connection.api_secret, connection.access_token, symbols, cache_bust
+        )
+    snapshot_repo.upsert_user_live_prices(client, user_id, prices)
+    return {"broker": broker, "quoted": len(prices), "total": len(symbols)}
+
+
+def _run_all(client, user_id: str, data_provider: str) -> None:
+    access_token = st.session_state["sb_access_token"]
+    tasks = {
+        "stock": lambda: edge_refresh.trigger_manual_refresh(access_token),
+        "nse_fo": lambda: edge_refresh.trigger_fo_refresh(access_token, "NSE"),
+        "bse_fo": lambda: edge_refresh.trigger_fo_refresh(access_token, "BSE"),
+    }
+    broker = _BROKER_BY_PROVIDER.get(data_provider)
+    if broker:
+        tasks["live_prices"] = lambda: _refresh_user_live_prices(client, user_id, broker)
+
+    with st.spinner("Refreshing market data -- stocks, fundamentals, and NSE + BSE F&O, all at once. This can take a few minutes..."):
+        with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+            futures = {key: pool.submit(action) for key, action in tasks.items()}
+            for key, future in futures.items():
+                try:
+                    st.session_state[f"_refresh_bar_{key}"] = future.result()
+                except edge_refresh.ManualRefreshError as exc:
+                    st.session_state[f"_refresh_bar_{key}"] = {"error": str(exc)}
     st.cache_data.clear()
     st.rerun()
 
 
 def _render_stock_summary(client) -> None:
-    # Shown once, right after the rerun _run() triggers -- a message set
-    # and then immediately st.rerun()-ed away would never actually
+    # Shown once, right after the rerun _run_all() triggers -- a message
+    # set and then immediately st.rerun()-ed away would never actually
     # render, so this is stashed in session_state and displayed on the
-    # next script run instead (same pattern for all three summaries below).
+    # next script run instead (same pattern for every summary below).
     summary = st.session_state.pop("_refresh_bar_stock", None)
     if not summary:
         return
@@ -95,39 +158,36 @@ def _render_fo_summary(key: str, exchange_label: str) -> None:
         st.info(summary.get("message", f"{exchange_label} F&O data is already up to date."))
 
 
+def _render_live_prices_summary() -> None:
+    summary = st.session_state.pop("_refresh_bar_live_prices", None)
+    if not summary:
+        return
+    if summary.get("error"):
+        st.error(summary["error"])
+    else:
+        st.success(f"✅ Cached live {summary['broker']} quotes for {summary['quoted']} of {summary['total']} watched symbols.")
+
+
 def render_global_refresh_bar(client) -> None:
-    """Renders the 3-button bar plus each button's own "last refreshed"
-    caption and (once, right after a click) its result message. Reads the
-    signed-in user's access token from `st.session_state["sb_access_token"]`
-    -- every page that calls this has already gone through `require_login()`,
-    which sets it."""
-    access_token = st.session_state["sb_access_token"]
-    cols = st.columns(3)
-    with cols[0]:
-        st.caption(_last_fetch_caption(client, "Last stock refresh", ["intraday_price", "all"]))
-        if st.button("🔄 Stock Data Refresh", use_container_width=True, key="refresh_bar_stock_btn"):
-            _run(
-                "stock",
-                "Refreshing live data from Yahoo Finance -- this can take up to a minute...",
-                lambda: edge_refresh.trigger_manual_refresh(access_token),
-            )
-    with cols[1]:
-        st.caption(_last_fetch_caption(client, "Last NSE F&O refresh", "fo", _NSE_FO_PROVIDER))
-        if st.button("📊 NSE F&O Data Refresh", use_container_width=True, key="refresh_bar_nse_fo_btn"):
-            _run(
-                "nse_fo",
-                "Checking NSE for a newer F&O bhavcopy -- this can take up to a few minutes...",
-                lambda: edge_refresh.trigger_fo_refresh(access_token, "NSE"),
-            )
-    with cols[2]:
-        st.caption(_last_fetch_caption(client, "Last BSE F&O refresh", "fo", _BSE_FO_PROVIDER))
-        if st.button("📊 BSE F&O Data Refresh", use_container_width=True, key="refresh_bar_bse_fo_btn"):
-            _run(
-                "bse_fo",
-                "Checking BSE for a newer F&O bhavcopy -- this can take up to a few minutes...",
-                lambda: edge_refresh.trigger_fo_refresh(access_token, "BSE"),
-            )
+    """Renders the caption(s) + single Market Data Refresh button, plus
+    (once, right after a click) each fetch's own result message. Reads
+    the signed-in user's access token from
+    `st.session_state["sb_access_token"]` -- every page that calls this
+    has already gone through `require_login()`, which sets it."""
+    user_id = current_user_id()
+    user_settings = settings_repo.get_user_settings(client, user_id)
+
+    st.caption(_last_fetch_caption(client, "Last stock refresh", ["intraday_price", "all"]))
+    st.caption(_last_fetch_caption(client, "Last NSE F&O refresh", "fo", _NSE_FO_PROVIDER))
+    st.caption(_last_fetch_caption(client, "Last BSE F&O refresh", "fo", _BSE_FO_PROVIDER))
+    broker = _BROKER_BY_PROVIDER.get(user_settings.data_provider)
+    if broker:
+        st.caption(f"Stock LTP source: live {broker} quotes (Data Provider setting, in Settings).")
+
+    if st.button("🔄 Market Data Refresh", key="refresh_bar_market_data_btn"):
+        _run_all(client, user_id, user_settings.data_provider)
 
     _render_stock_summary(client)
     _render_fo_summary("nse_fo", "NSE")
     _render_fo_summary("bse_fo", "BSE")
+    _render_live_prices_summary()

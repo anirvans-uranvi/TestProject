@@ -3,11 +3,10 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from src.config import get_settings
 from src.models.alert import Alert
 from src.models.enums import AlertType, Theme
-from src.models.user import UserSettings
 from src.repositories import alerts_repo, companies_repo, notification_repo, settings_repo
+from src.utils.data_provider_settings import render_data_provider_section
 from src.utils.formatting import alert_type_label, summarize_alert_config
 from src.utils.session import (
     current_user_email,
@@ -26,7 +25,6 @@ require_login()  # already injects Tailwind + the light-theme CSS design system
 
 client = get_user_client_cached()
 user_id = current_user_id()
-app_settings = get_settings()
 
 current = settings_repo.get_user_settings(client, user_id)
 inject_global_styles(current.theme)  # re-inject with the user's actual theme -- a later <style> tag wins
@@ -58,12 +56,13 @@ with st.form("thresholds_form"):
 if submitted:
     settings_repo.upsert_user_settings(
         client,
-        UserSettings(
-            user_id=user_id,
-            dividend_yield_threshold=dividend_threshold,
-            peg_threshold=peg_threshold,
-            stale_data_threshold_minutes=stale_minutes,
-            theme=Theme(theme),
+        current.model_copy(
+            update={
+                "dividend_yield_threshold": dividend_threshold,
+                "peg_threshold": peg_threshold,
+                "stale_data_threshold_minutes": stale_minutes,
+                "theme": Theme(theme),
+            }
         ),
     )
     st.success("Settings saved.")
@@ -198,10 +197,4 @@ with st.expander("Change password"):
             else:
                 st.success("Password updated.")
 
-st.divider()
-st.subheader("Data provider configuration (read-only, set via environment variables)")
-st.code(
-    f"MARKET_DATA_PROVIDER={app_settings.market_data_provider}\n"
-    f"FUNDAMENTALS_PROVIDER={app_settings.fundamentals_provider}",
-    language="bash",
-)
+render_data_provider_section(client=client, user_id=user_id, current=current)

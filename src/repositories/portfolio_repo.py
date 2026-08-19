@@ -64,12 +64,13 @@ def replace_broker_holdings(
 
 def delete_portfolio(client: Client, user_id: str, portfolio_name: str) -> None:
     """Permanently deletes every row for (user_id, portfolio_name) --
-    every broker's holdings, positions, saved API connection, and manual
-    Trade grouping/metadata within it. Used by the My Broker page's
-    "Delete this portfolio" control; every other portfolio is untouched."""
+    every broker's holdings, positions, and manual Trade
+    grouping/metadata within it. Does NOT touch broker_connections --
+    that's an account-wide credential since migration 0029, not scoped to
+    an individual portfolio; disconnecting it is a separate action in
+    Settings' "Data Provider" section."""
     client.table("portfolio_holdings").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
     client.table("portfolio_positions").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
-    client.table("broker_connections").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
     client.table("portfolio_trade_groups").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
     client.table("portfolio_trade_meta").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
     client.table("portfolio_position_meta").delete().eq("user_id", user_id).eq("portfolio_name", portfolio_name).execute()
@@ -104,17 +105,14 @@ def replace_broker_positions(
     client.table("portfolio_positions").insert(payload).execute()
 
 
-def get_broker_connection(
-    client: Client, user_id: str, portfolio_name: str, broker: str
-) -> BrokerConnection | None:
-    """The saved API connection for one broker within one portfolio, if
-    any -- None means the user hasn't connected this broker's API here
-    (they may still have CSV-uploaded holdings/positions for it)."""
+def get_broker_connection(client: Client, user_id: str, broker: str) -> BrokerConnection | None:
+    """The saved API connection for this account's chosen broker, if any
+    -- None means the user hasn't connected it (account-wide since
+    migration 0029; no longer scoped to an individual portfolio)."""
     resp = (
         client.table("broker_connections")
         .select("*")
         .eq("user_id", user_id)
-        .eq("portfolio_name", portfolio_name)
         .eq("broker", broker)
         .limit(1)
         .execute()
@@ -124,26 +122,39 @@ def get_broker_connection(
 
 
 def upsert_broker_connection(client: Client, connection: BrokerConnection) -> None:
-    """Saves or replaces one broker's API credentials for one portfolio --
+    """Saves or replaces this account's API credentials for one broker --
     used both for the initial "Save & Sync" and for "Update credentials"
     (which re-saves both fields and resets token_saved_at)."""
     payload = [connection.model_dump(mode="json", exclude_none=True)]
-    client.table("broker_connections").upsert(payload, on_conflict="user_id,portfolio_name,broker").execute()
+    client.table("broker_connections").upsert(payload, on_conflict="user_id,broker").execute()
 
 
-def delete_broker_connection(client: Client, user_id: str, portfolio_name: str, broker: str) -> None:
+def delete_broker_connection(client: Client, user_id: str, broker: str) -> None:
     """"Disconnect" -- removes the saved API credentials only. Any
-    holdings/positions already synced from this broker are left as-is,
-    same as switching a portfolio away from CSV upload never deletes prior
-    data."""
-    (
-        client.table("broker_connections")
-        .delete()
-        .eq("user_id", user_id)
-        .eq("portfolio_name", portfolio_name)
-        .eq("broker", broker)
-        .execute()
-    )
+    holdings/positions already synced from this broker are left as-is."""
+    client.table("broker_connections").delete().eq("user_id", user_id).eq("broker", broker).execute()
+
+
+DEFAULT_PORTFOLIO_NAME = "My Portfolio"
+
+
+def get_or_default_portfolio_name(client: Client, user_id: str) -> str:
+    """The one portfolio_name this account's live broker sync should
+    target -- on request, once Data Provider became account-wide and CSV
+    upload (the old multi-portfolio "+ New portfolio" flow) was dropped:
+    reuses whatever single portfolio_name this account's holdings/
+    positions already share (a fresh sync should land in the same place
+    as the last one, not silently spawn a second portfolio), or falls
+    back to DEFAULT_PORTFOLIO_NAME for a brand-new account with nothing
+    saved yet. If more than one portfolio_name still exists (e.g. from
+    before this account-wide collapse), the alphabetically-first one is
+    used, deterministically rather than depending on set ordering --
+    existing data under any other name is left untouched, just no longer
+    reachable from a live sync."""
+    names = {h.portfolio_name for h in list_holdings(client, user_id)} | {
+        p.portfolio_name for p in list_positions(client, user_id)
+    }
+    return min(names) if names else DEFAULT_PORTFOLIO_NAME
 
 
 def list_trade_groups(client: Client, user_id: str) -> list[PortfolioTradeGroup]:

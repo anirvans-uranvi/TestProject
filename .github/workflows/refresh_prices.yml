@@ -8,6 +8,12 @@ on:
     - cron: "30 10 * * 1-5"            # EOD OHLCV shortly after 15:30 IST close
     - cron: "0 1 * * 1-5"              # fundamentals/dividends once daily, before market open
     - cron: "45 10 * * 1-5"            # screener snapshot recompute after EOD prices land
+    # 8pm IST: the scheduled counterpart to the "Market Data Refresh"
+    # button for accounts on the default yfinance/bhavcopy Data Provider
+    # -- a full stock refresh plus NSE + BSE F&O bhavcopy, all in one
+    # place (this centralizes F&O ingestion into this workflow; it
+    # previously ran on an undocumented external cron).
+    - cron: "30 14 * * 1-5"
 
 jobs:
   refresh:
@@ -30,6 +36,7 @@ jobs:
             "30 10 * * 1-5") echo "mode=eod" >> "$GITHUB_OUTPUT" ;;
             "0 1 * * 1-5") echo "mode=fundamentals" >> "$GITHUB_OUTPUT" ;;
             "45 10 * * 1-5") echo "mode=screener" >> "$GITHUB_OUTPUT" ;;
+            "30 14 * * 1-5") echo "mode=all" >> "$GITHUB_OUTPUT" ;;
             *) echo "mode=all" >> "$GITHUB_OUTPUT" ;;
           esac
 
@@ -43,3 +50,17 @@ jobs:
           DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
           DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
         run: python scripts/run_refresh.py --mode=${{ steps.mode.outputs.mode }}
+
+      # Only on the 8pm IST run -- NSE + BSE F&O bhavcopy, one trading
+      # day each (--days 1; the default 60-day backfill is for a fresh
+      # deployment, not a daily cron). Every other scheduled run above
+      # only refreshes stock data, unaffected by this step.
+      - name: Run F&O bhavcopy refresh (NSE + BSE)
+        if: github.event.schedule == '30 14 * * 1-5'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          python scripts/fetch_fo_data.py --exchange nse --days 1
+          python scripts/fetch_fo_data.py --exchange bse --days 1

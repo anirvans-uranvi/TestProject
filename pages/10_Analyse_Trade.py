@@ -78,7 +78,7 @@ all_companies = load_all_companies(client, st.session_state["portfolio_cache_bus
 company_type_by_symbol = {c.symbol: c.company_type for c in all_companies}
 
 legs = build_trade_legs(
-    client, user_id, portfolio_name, st.session_state["portfolio_cache_bust"], holdings_for_portfolio, positions_for_portfolio
+    client, user_id, st.session_state["portfolio_cache_bust"], holdings_for_portfolio, positions_for_portfolio
 )
 overrides_by_leg = {(g.broker, g.raw_name): g.trade_id for g in trade_groups_for_portfolio}
 trade_meta_by_id = {

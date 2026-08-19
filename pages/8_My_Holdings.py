@@ -175,7 +175,7 @@ def _render_holdings_tab(portfolio_name: str, holdings_for_portfolio: list) -> N
         for h in holdings_for_portfolio
     ]
     if not raw_rows:
-        st.caption("No holdings saved yet for this portfolio -- upload one on My Broker.")
+        st.caption("No holdings synced yet for this portfolio -- connect a broker in Settings > Data Provider.")
         return
 
     merged = portfolio_service.merge_holdings(raw_rows)
@@ -184,9 +184,7 @@ def _render_holdings_tab(portfolio_name: str, holdings_for_portfolio: list) -> N
     # Prefer a live quote from whichever broker(s) this portfolio has
     # connected over the (possibly stale, yfinance-sourced) screener
     # snapshot above -- same preference My CSP's LTP Underlying uses.
-    live_ltp_by_symbol = load_live_broker_prices(
-        client, user_id, portfolio_name, symbols, st.session_state["portfolio_cache_bust"]
-    )
+    live_ltp_by_symbol = load_live_broker_prices(client, user_id, symbols, st.session_state["portfolio_cache_bust"])
     ltp_by_symbol = {**ltp_by_symbol, **live_ltp_by_symbol}
     rows, totals = portfolio_service.compute_portfolio_view(merged, ltp_by_symbol)
     rows.sort(key=lambda r: r["investment"], reverse=True)
@@ -239,7 +237,7 @@ def _render_holdings_tab(portfolio_name: str, holdings_for_portfolio: list) -> N
 portfolio_names = sorted({h.portfolio_name for h in saved_holdings} | {p.portfolio_name for p in saved_positions})
 
 if not portfolio_names:
-    st.info("No portfolios yet -- go to My Broker to upload or connect one.")
+    st.info("No portfolios yet -- go to Settings > Data Provider to connect a Dhan or Zerodha account.")
 else:
     tabs = st.tabs(portfolio_names)
     for name, tab in zip(portfolio_names, tabs):

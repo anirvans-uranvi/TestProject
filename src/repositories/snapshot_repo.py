@@ -79,6 +79,44 @@ def get_latest_returns_and_pe(client: Client, symbols: list[str]) -> dict[str, d
     return result
 
 
+def get_user_live_prices(client: Client, user_id: str, symbols: list[str]) -> dict[str, float]:
+    """This account's own cached live LTPs (user_live_prices, migration
+    0030) for the given symbols -- written by the "Market Data Refresh"
+    button only when the account's Data Provider setting is Dhan/Zerodha
+    (src/utils/refresh_bar.py). Callers merge this over get_latest_prices'
+    daily_screener_snapshots value (`{**shared, **live}`) so a symbol this
+    account hasn't live-priced yet still falls back to the shared value --
+    same pattern src/utils/portfolio_page.py's load_live_broker_prices
+    already established for the portfolio pages."""
+    if not symbols:
+        return {}
+    resp = (
+        client.table("user_live_prices")
+        .select("symbol, latest_price")
+        .eq("user_id", user_id)
+        .in_("symbol", symbols)
+        .execute()
+    )
+    return {row["symbol"]: float(row["latest_price"]) for row in (resp.data or [])}
+
+
+def upsert_user_live_prices(client: Client, user_id: str, prices: dict[str, float]) -> None:
+    """Replaces this account's cached live LTP for exactly the given
+    symbols -- deletes any existing rows for them first, then inserts the
+    fresh set, matching this app's usual "replace" convention (e.g.
+    replace_broker_holdings) rather than a partial per-row upsert. Symbols
+    not in `prices` (this account's provider didn't quote them this time)
+    are left untouched, not cleared -- a transient miss shouldn't erase a
+    still-good previous value."""
+    if not prices:
+        return
+    client.table("user_live_prices").delete().eq("user_id", user_id).in_("symbol", list(prices)).execute()
+    payload = [
+        {"user_id": user_id, "symbol": symbol, "latest_price": price} for symbol, price in prices.items()
+    ]
+    client.table("user_live_prices").insert(payload).execute()
+
+
 def get_previous_snapshot(client: Client, symbol: str, before_date: date) -> DailyScreenerSnapshot | None:
     resp = (
         client.table("daily_screener_snapshots")

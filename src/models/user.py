@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from src.models.enums import Theme
+
+DataProvider = Literal["dhan", "zerodha", "yfinance_bhavcopy"]
 
 
 class UserSettings(BaseModel):
@@ -15,6 +18,13 @@ class UserSettings(BaseModel):
     peg_threshold: float = 1.0
     stale_data_threshold_minutes: int = 30
     theme: Theme = Theme.SYSTEM
+    data_provider: DataProvider = "yfinance_bhavcopy"
+    """Which live source prices this account's stock LTP everywhere it's
+    shown (Dashboard, Stock Detail, and the portfolio pages' own broker-
+    live overrides). Fundamentals (PEG/dividend) and the full F&O chain
+    are NOT provider-branched -- neither Dhan nor Zerodha's API exposes
+    that data, so those stay yfinance/NSE+BSE-bhavcopy-sourced regardless
+    of this setting (see migration 0028)."""
     updated_at: datetime | None = None
 
 

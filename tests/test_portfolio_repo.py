@@ -228,18 +228,16 @@ class TestDeletePortfolio:
         assert len(remaining) == 1
         assert remaining[0]["raw_name"] == "KEEP"
 
-    def test_also_deletes_broker_connections_within_the_named_portfolio_only(self):
+    def test_does_not_touch_broker_connections_account_wide_since_0029(self):
+        # broker_connections is account-wide (migration 0029), not scoped
+        # to an individual portfolio_name anymore -- deleting one
+        # portfolio must never disconnect the account's broker.
         client = _FakeClient()
-        client.store["broker_connections"] = [
-            _connection_row("Portfolio 1", "Dhan"),
-            _connection_row("Portfolio 2", "Dhan"),
-        ]
+        client.store["broker_connections"] = [_connection_row("Dhan")]
 
         portfolio_repo.delete_portfolio(client, "u1", "Portfolio 1")
 
-        remaining = client.store["broker_connections"]
-        assert len(remaining) == 1
-        assert remaining[0]["portfolio_name"] == "Portfolio 2"
+        assert client.store["broker_connections"] == [_connection_row("Dhan")]
 
     def test_also_deletes_trade_groups_within_the_named_portfolio_only(self):
         client = _FakeClient()
@@ -439,10 +437,9 @@ class TestListPositions:
         assert {p.portfolio_name for p in result} == {"Portfolio 1", "Portfolio 2"}
 
 
-def _connection_row(portfolio_name, broker="Dhan", client_id="CID1234", token="TOKEN1", user_id="u1"):
+def _connection_row(broker="Dhan", client_id="CID1234", token="TOKEN1", user_id="u1"):
     return {
         "user_id": user_id,
-        "portfolio_name": portfolio_name,
         "broker": broker,
         "client_id": client_id,
         "access_token": token,
@@ -454,16 +451,14 @@ class TestBrokerConnections:
     def test_get_returns_none_when_not_connected(self):
         client = _FakeClient()
 
-        assert portfolio_repo.get_broker_connection(client, "u1", "Portfolio 1", "Dhan") is None
+        assert portfolio_repo.get_broker_connection(client, "u1", "Dhan") is None
 
     def test_upsert_then_get_round_trips(self):
         client = _FakeClient()
-        connection = BrokerConnection(
-            user_id="u1", portfolio_name="Portfolio 1", broker="Dhan", client_id="CID1234", access_token="TOKEN1",
-        )
+        connection = BrokerConnection(user_id="u1", broker="Dhan", client_id="CID1234", access_token="TOKEN1")
 
         portfolio_repo.upsert_broker_connection(client, connection)
-        result = portfolio_repo.get_broker_connection(client, "u1", "Portfolio 1", "Dhan")
+        result = portfolio_repo.get_broker_connection(client, "u1", "Dhan")
 
         assert result is not None
         assert result.client_id == "CID1234"
@@ -471,33 +466,57 @@ class TestBrokerConnections:
 
     def test_upsert_twice_replaces_rather_than_duplicates(self):
         client = _FakeClient()
-        first = BrokerConnection(
-            user_id="u1", portfolio_name="Portfolio 1", broker="Dhan", client_id="OLD", access_token="OLDTOKEN"
-        )
-        second = BrokerConnection(
-            user_id="u1", portfolio_name="Portfolio 1", broker="Dhan", client_id="NEW", access_token="NEWTOKEN"
-        )
+        first = BrokerConnection(user_id="u1", broker="Dhan", client_id="OLD", access_token="OLDTOKEN")
+        second = BrokerConnection(user_id="u1", broker="Dhan", client_id="NEW", access_token="NEWTOKEN")
 
         portfolio_repo.upsert_broker_connection(client, first)
         portfolio_repo.upsert_broker_connection(client, second)
 
         assert len(client.store["broker_connections"]) == 1
-        result = portfolio_repo.get_broker_connection(client, "u1", "Portfolio 1", "Dhan")
+        result = portfolio_repo.get_broker_connection(client, "u1", "Dhan")
         assert result.client_id == "NEW"
 
-    def test_delete_removes_only_the_targeted_broker_within_the_portfolio(self):
+    def test_delete_removes_only_the_targeted_broker(self):
         client = _FakeClient()
         client.store["broker_connections"] = [
-            _connection_row("Portfolio 1", "Dhan"),
-            _connection_row("Portfolio 1", "OtherBroker"),
-            _connection_row("Portfolio 2", "Dhan"),
+            _connection_row("Dhan"),
+            _connection_row("OtherBroker"),
+            {**_connection_row("Dhan"), "user_id": "u2"},
         ]
 
-        portfolio_repo.delete_broker_connection(client, "u1", "Portfolio 1", "Dhan")
+        portfolio_repo.delete_broker_connection(client, "u1", "Dhan")
 
         remaining = client.store["broker_connections"]
         assert len(remaining) == 2
-        assert portfolio_repo.get_broker_connection(client, "u1", "Portfolio 1", "Dhan") is None
+        assert portfolio_repo.get_broker_connection(client, "u1", "Dhan") is None
+
+
+class TestGetOrDefaultPortfolioName:
+    def test_no_holdings_or_positions_returns_the_default(self):
+        client = _FakeClient()
+
+        assert portfolio_repo.get_or_default_portfolio_name(client, "u1") == portfolio_repo.DEFAULT_PORTFOLIO_NAME
+
+    def test_a_single_existing_portfolio_name_is_reused(self):
+        client = _FakeClient()
+        client.store["portfolio_holdings"] = [_row("Dhan Corporate", "Dhan", "SBIN")]
+
+        assert portfolio_repo.get_or_default_portfolio_name(client, "u1") == "Dhan Corporate"
+
+    def test_a_name_only_present_via_positions_is_also_reused(self):
+        client = _FakeClient()
+        client.store["portfolio_positions"] = [_position_row("Dhan Corporate", "Dhan", "NIFTY2681123000PE")]
+
+        assert portfolio_repo.get_or_default_portfolio_name(client, "u1") == "Dhan Corporate"
+
+    def test_multiple_existing_names_picks_deterministically(self):
+        client = _FakeClient()
+        client.store["portfolio_holdings"] = [
+            _row("Zeta Portfolio", "Dhan", "SBIN"),
+            _row("Alpha Portfolio", "Dhan", "COALINDIA"),
+        ]
+
+        assert portfolio_repo.get_or_default_portfolio_name(client, "u1") == "Alpha Portfolio"
 
 
 def _trade_group_row(portfolio_name, broker, raw_name, trade_id, user_id="u1"):

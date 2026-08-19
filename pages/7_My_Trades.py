@@ -120,10 +120,10 @@ def _render_trades_tab(
     company_type_by_symbol: dict,
 ) -> None:
     legs = build_trade_legs(
-        client, user_id, portfolio_name, st.session_state["portfolio_cache_bust"], holdings_for_portfolio, positions_for_portfolio
+        client, user_id, st.session_state["portfolio_cache_bust"], holdings_for_portfolio, positions_for_portfolio
     )
     if not legs:
-        st.caption("No holdings or positions saved yet for this portfolio -- upload one on My Broker.")
+        st.caption("No holdings or positions synced yet for this portfolio -- connect a broker in Settings > Data Provider.")
         return
 
     overrides_by_leg = {(g.broker, g.raw_name): g.trade_id for g in trade_groups_for_portfolio}
@@ -145,7 +145,7 @@ def _render_trades_tab(
 portfolio_names = sorted({h.portfolio_name for h in saved_holdings} | {p.portfolio_name for p in saved_positions})
 
 if not portfolio_names:
-    st.info("No portfolios yet -- go to My Broker to upload or connect one.")
+    st.info("No portfolios yet -- go to Settings > Data Provider to connect a Dhan or Zerodha account.")
 else:
     all_companies = load_all_companies(client, st.session_state["portfolio_cache_bust"])
     company_type_by_symbol = {c.symbol: c.company_type for c in all_companies}

@@ -1,11 +1,15 @@
-"""Broker CSV parsing, symbol matching, and valuation for the Portfolio
-feature's pages (pages/6_My_Broker.py, 7_My_Trades.py, 8_My_Holdings.py,
-9_My_Positions.py, 10_Analyse_Trade.py). Holdings and positions are plain dicts
-throughout (not a dataclass) -- same convention as fo_service's row-dict
-outputs. Holdings keys: raw_name, symbol (str | None), qty, avg_price,
-investment. Positions keys: raw_name, symbol (str | None, the underlying),
-expiry_date (date | None), strike_price (float | None), option_type
-(OptionType | None), qty (signed -- negative is short), avg_price, ltp.
+"""Broker API response translation and valuation for the Portfolio
+feature's pages (7_My_Trades.py, 8_My_Holdings.py, 9_My_Positions.py,
+10_Analyse_Trade.py, 11_My_CSP.py) -- holdings/positions come from a live
+Dhan/Zerodha sync (Settings' "Data Provider" section,
+src/utils/data_provider_settings.py) only; CSV upload was dropped
+entirely once that became the account's one live data source. Holdings
+and positions are plain dicts throughout (not a dataclass) -- same
+convention as fo_service's row-dict outputs. Holdings keys: raw_name,
+symbol (str | None), qty, avg_price, investment. Positions keys:
+raw_name, symbol (str | None, the underlying), expiry_date (date | None),
+strike_price (float | None), option_type (OptionType | None), qty
+(signed -- negative is short), avg_price, ltp.
 """
 from __future__ import annotations
 
@@ -13,110 +17,9 @@ import calendar
 import re
 from datetime import date, timedelta
 
-import pandas as pd
-
 from src.models.company import Company
 from src.models.enums import CompanyType, OptionType
 from src.models.portfolio import PortfolioHolding, PortfolioPosition
-
-
-def _to_float(value) -> float | None:
-    if pd.isna(value):
-        return None
-    if isinstance(value, str):
-        value = value.replace(",", "").replace("%", "").strip()
-        if value in ("", "-", "NA", "N/A"):
-            return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def parse_zerodha_csv(file) -> list[dict]:
-    """Zerodha's holdings export -- `Instrument` is already the exact
-    NSE trading symbol, so it's trusted directly with no name matching.
-    The file's own LTP/Cur. val/P&L columns are ignored; those are
-    always recomputed live against the app's own market data."""
-    df = pd.read_csv(file)
-    holdings = []
-    for _, row in df.iterrows():
-        instrument = row.get("Instrument")
-        if pd.isna(instrument) or not str(instrument).strip():
-            continue
-        qty = _to_float(row.get("Qty."))
-        avg_price = _to_float(row.get("Avg. cost"))
-        investment = _to_float(row.get("Invested"))
-        if qty is None or avg_price is None or investment is None:
-            continue
-        holdings.append(
-            {
-                "raw_name": str(instrument).strip(),
-                "symbol": str(instrument).strip().upper(),
-                "qty": qty,
-                "avg_price": avg_price,
-                "investment": investment,
-            }
-        )
-    return holdings
-
-
-def _normalize_name(name: str) -> str:
-    normalized = re.sub(r"[^A-Z0-9]", "", name.upper())
-    for suffix in ("LIMITED", "LTD"):
-        if normalized.endswith(suffix):
-            normalized = normalized[: -len(suffix)]
-            break
-    return normalized
-
-
-def match_symbol(raw_name: str, companies: list[Company]) -> str | None:
-    """Matches a broker's free-text instrument name against known
-    companies by normalized-name containment. Returns the symbol only on
-    exactly one match -- zero or ambiguous matches are left unresolved
-    rather than guessed."""
-    normalized_raw = _normalize_name(raw_name)
-    if not normalized_raw:
-        return None
-    matches = set()
-    for company in companies:
-        normalized_company = _normalize_name(company.name)
-        if not normalized_company:
-            continue
-        if normalized_raw == normalized_company or normalized_raw in normalized_company or normalized_company in normalized_raw:
-            matches.add(company.symbol)
-    if len(matches) == 1:
-        return next(iter(matches))
-    return None
-
-
-def parse_dhan_csv(file, companies: list[Company]) -> list[dict]:
-    """Dhan's holdings export -- `Name` is a human company name, not an
-    NSE symbol, and numbers are quoted with Indian-style grouping (e.g.
-    "6,42,438.40"). Symbol is resolved via match_symbol(); unresolved
-    rows keep symbol=None rather than a guess."""
-    df = pd.read_csv(file)
-    holdings = []
-    for _, row in df.iterrows():
-        name = row.get("Name")
-        if pd.isna(name) or not str(name).strip():
-            continue
-        raw_name = str(name).strip()
-        qty = _to_float(row.get("Quantity"))
-        avg_price = _to_float(row.get("Avg Price"))
-        investment = _to_float(row.get("Investment"))
-        if qty is None or avg_price is None or investment is None:
-            continue
-        holdings.append(
-            {
-                "raw_name": raw_name,
-                "symbol": match_symbol(raw_name, companies),
-                "qty": qty,
-                "avg_price": avg_price,
-                "investment": investment,
-            }
-        )
-    return holdings
 
 
 _MONTH_ABBR = {
@@ -208,123 +111,13 @@ def parse_zerodha_option_instrument(instrument: str) -> dict | None:
     return None
 
 
-def parse_zerodha_positions_csv(file) -> list[dict]:
-    """Zerodha's positions export -- `Instrument` is the exact NSE
-    tradingsymbol (decoded via parse_zerodha_option_instrument above).
-    `Qty.` keeps its sign (short positions are negative). The file's own
-    LTP is trusted (there's no live per-contract price source for index
-    options -- see nse_fo_provider's IDF/IDO exclusion); P&L is always
-    recomputed from qty/avg_price/ltp rather than trusting the file's own
-    P&L/Chg. columns (see compute_positions_view)."""
-    df = pd.read_csv(file)
-    positions = []
-    for _, row in df.iterrows():
-        instrument = row.get("Instrument")
-        if pd.isna(instrument) or not str(instrument).strip():
-            continue
-        raw_name = str(instrument).strip()
-        qty = _to_float(row.get("Qty."))
-        avg_price = _to_float(row.get("Avg."))
-        ltp = _to_float(row.get("LTP"))
-        if qty is None or avg_price is None:
-            continue
-        decoded = parse_zerodha_option_instrument(raw_name) or {}
-        positions.append(
-            {
-                "raw_name": raw_name,
-                "symbol": decoded.get("symbol"),
-                "expiry_date": decoded.get("expiry_date"),
-                "strike_price": decoded.get("strike_price"),
-                "option_type": decoded.get("option_type"),
-                "qty": qty,
-                "avg_price": avg_price,
-                "ltp": ltp,
-            }
-        )
-    return positions
-
-
-_DHAN_POSITION_NAME_RE = re.compile(
-    r"^(?P<symbol>[A-Z]+)\s+(?P<dd>\d{1,2})\s+(?P<mmm>[A-Z]{3})\s+"
-    r"(?P<strike>\d+(?:\.\d+)?)\s+(?P<type>CALL|PUT)$"
-)
-
-
-def parse_dhan_position_name(raw_name: str, as_of: date | None = None) -> dict | None:
-    """Decodes Dhan's positions "Name" format -- "<SYMBOL> <DD> <MMM>
-    <STRIKE> <CALL|PUT>", e.g. "ONGC 25 AUG 230 PUT" -- used uniformly for
-    both monthly stock options and weekly index options; unlike Zerodha's
-    tradingsymbol it carries no year, so the year is inferred as the
-    nearest DD-MMM on or after `as_of` (an always-open position's expiry
-    can't be in the past). Returns None for anything that doesn't match
-    (futures rows, malformed input)."""
-    m = _DHAN_POSITION_NAME_RE.match(raw_name.strip().upper())
-    if not m:
-        return None
-    month = _MONTH_ABBR.get(m.group("mmm"))
-    if month is None:
-        return None
-    day = int(m.group("dd"))
-    reference = as_of or date.today()
-    try:
-        expiry_date = date(reference.year, month, day)
-    except ValueError:
-        return None
-    if expiry_date < reference:
-        try:
-            expiry_date = date(reference.year + 1, month, day)
-        except ValueError:
-            return None
-    return {
-        "symbol": m.group("symbol"),
-        "expiry_date": expiry_date,
-        "strike_price": float(m.group("strike")),
-        "option_type": OptionType.CE if m.group("type") == "CALL" else OptionType.PE,
-    }
-
-
-def parse_dhan_positions_csv(file, as_of: date | None = None) -> list[dict]:
-    """Dhan's positions export -- `Name` is decoded via
-    parse_dhan_position_name above (no separate company-name matching
-    needed, unlike parse_dhan_csv for holdings -- Dhan's positions export
-    already embeds the exact NSE symbol). `Qty` keeps its sign. Numbers
-    are quoted with Indian-style grouping, same as the holdings export."""
-    df = pd.read_csv(file)
-    positions = []
-    for _, row in df.iterrows():
-        name = row.get("Name")
-        if pd.isna(name) or not str(name).strip():
-            continue
-        raw_name = str(name).strip()
-        qty = _to_float(row.get("Qty"))
-        avg_price = _to_float(row.get("Avg Price"))
-        ltp = _to_float(row.get("LTP"))
-        if qty is None or avg_price is None:
-            continue
-        decoded = parse_dhan_position_name(raw_name, as_of) or {}
-        positions.append(
-            {
-                "raw_name": raw_name,
-                "symbol": decoded.get("symbol"),
-                "expiry_date": decoded.get("expiry_date"),
-                "strike_price": decoded.get("strike_price"),
-                "option_type": decoded.get("option_type"),
-                "qty": qty,
-                "avg_price": avg_price,
-                "ltp": ltp,
-            }
-        )
-    return positions
-
-
 def dhan_holdings_from_api(rows: list[dict]) -> list[dict]:
     """Translates GET /v2/holdings rows (src/data_providers/dhan_provider.py's
-    get_holdings()) into the same holding-dict shape parse_zerodha_csv/
-    parse_dhan_csv produce, so holdings_to_records/merge_holdings/
-    compute_portfolio_view are reused unchanged regardless of source.
-    `tradingSymbol` is already the exact NSE symbol -- no match_symbol()
-    fuzzy matching needed here, unlike the Dhan CSV export's human company
-    name. Skips rows with no quantity (a holding fully sold off today)."""
+    get_holdings()) into this app's own holding-dict shape, so
+    holdings_to_records/merge_holdings/compute_portfolio_view are reused
+    unchanged regardless of source. `tradingSymbol` is already the exact
+    NSE symbol -- no fuzzy name matching needed. Skips rows with no
+    quantity (a holding fully sold off today)."""
     holdings = []
     for row in rows:
         qty = row.get("totalQty") or 0
@@ -360,15 +153,14 @@ def _dhan_underlying_symbol(trading_symbol: str) -> str | None:
 
 # Confirmed against a real GET /v2/positions response: drvOptionType comes
 # back as the full word ("PUT"/"CALL"), not the CE/PE code Dhan uses
-# elsewhere (e.g. option_contracts.option_type, or the Dhan CSV export's
-# own "CALL"/"PUT" -- see parse_dhan_position_name) -- both spellings are
+# elsewhere (e.g. option_contracts.option_type) -- both spellings are
 # accepted here for safety.
 _DHAN_OPTION_TYPES = {"PUT": OptionType.PE, "PE": OptionType.PE, "CALL": OptionType.CE, "CE": OptionType.CE}
 
 
 def dhan_positions_from_api(rows: list[dict], ltp_by_security_id: dict[str, float]) -> list[dict]:
-    """Translates GET /v2/positions rows into the same position-dict shape
-    the CSV parsers produce. Unlike the CSV path, expiry/strike/type come
+    """Translates GET /v2/positions rows into this app's own position-dict
+    shape. Unlike Zerodha, expiry/strike/type come
     straight from Dhan's own drvExpiryDate/drvStrikePrice/drvOptionType --
     no regex instrument-name decoding needed. `netQty` is already signed
     (positive long, negative short), matching this app's convention. `ltp`
@@ -409,13 +201,12 @@ def dhan_positions_from_api(rows: list[dict], ltp_by_security_id: dict[str, floa
 
 def zerodha_holdings_from_api(rows: list[dict]) -> list[dict]:
     """Translates GET /portfolio/holdings rows (src/data_providers/
-    zerodha_provider.py's get_holdings()) into the same holding-dict shape
-    parse_zerodha_csv/parse_dhan_csv produce, so holdings_to_records/
-    merge_holdings/compute_portfolio_view are reused unchanged regardless
-    of source. `tradingsymbol` is already the exact NSE trading symbol --
-    same as the CSV export's own `Instrument` column -- so it's trusted
-    directly, no match_symbol() fuzzy matching needed. Skips rows with no
-    quantity (a holding fully sold off today).
+    zerodha_provider.py's get_holdings()) into this app's own holding-dict
+    shape, so holdings_to_records/merge_holdings/compute_portfolio_view
+    are reused unchanged regardless of source. `tradingsymbol` is already
+    the exact NSE trading symbol, so it's trusted directly, no fuzzy name
+    matching needed. Skips rows with no quantity (a holding fully sold
+    off today).
 
     **A real bug this fixed**: Kite's own `quantity` field is the *free*
     (non-pledged) quantity only -- confirmed live against a real account
@@ -451,13 +242,14 @@ def zerodha_holdings_from_api(rows: list[dict]) -> list[dict]:
 
 
 def zerodha_positions_from_api(rows: list[dict]) -> list[dict]:
-    """Translates GET /portfolio/positions (`net`) rows into the same
-    position-dict shape parse_zerodha_positions_csv produces. Kite
-    Connect's own `tradingsymbol` is in the *exact same format* as the
-    CSV positions export's `Instrument` column, so the existing
-    parse_zerodha_option_instrument decoder is reused as-is -- no new
-    regex needed here, unlike Dhan, whose API and CSV paths needed
-    separate decoders. `quantity` is already signed (positive long,
+    """Translates GET /portfolio/positions (`net`) rows into this app's
+    own position-dict shape. Kite Connect's own `tradingsymbol` decodes
+    directly via parse_zerodha_option_instrument above (the exact same
+    format that function was originally built to parse from a CSV
+    positions export's `Instrument` column, before CSV upload was
+    dropped) -- no separate regex needed here, unlike Dhan, whose
+    positions payload carries expiry/strike/type as separate structured
+    fields instead. `quantity` is already signed (positive long,
     negative short), matching this app's convention. `last_price` comes
     straight from the row -- unlike Dhan, whose positions response omits
     LTP without a separate "Data APIs" subscription, Kite's response
@@ -586,10 +378,9 @@ def is_csp_trade_type(trade_type: str) -> bool:
     """Whether a Trade's (free-text, user-editable) `trade_type` marks it
     as a Cash Secured Put -- the signal `pages/11_My_CSP.py` filters on.
     Case-insensitive and whitespace-trimmed so "CSP", "csp", " CSP " all
-    match the same way the rest of this app treats free-text user input
-    (e.g. `parse_dhan_position_name`'s uppercasing) -- there's no fixed
-    enum of trade types (see PortfolioTradeMeta), "CSP" is just a
-    convention this page expects the user to type on Analyse Trade."""
+    match -- there's no fixed enum of trade types (see PortfolioTradeMeta),
+    "CSP" is just a convention this page expects the user to type on
+    Analyse Trade."""
     return trade_type.strip().lower() == "csp"
 
 
@@ -701,9 +492,9 @@ def classify_position_bucket(
     isn't a decoded option contract -- an undecoded F&O row, a futures
     position, or a stock/ETF bought/sold as a position rather than a
     holding -- since `option_type` and `symbol` are only ever set together
-    (parse_zerodha_option_instrument/parse_dhan_position_name/
-    dhan_positions_from_api/zerodha_positions_from_api all take both
-    fields from the same decode-or-nothing result). A decoded option's
+    (parse_zerodha_option_instrument/dhan_positions_from_api/
+    zerodha_positions_from_api all take both fields from the same
+    decode-or-nothing result). A decoded option's
     underlying then splits "stock" vs "index" the same way
     classify_underlying_bucket does for My Trades (company_type Index
     only -> "index"; ETF/Fund/everything else -> "stock")."""
@@ -948,9 +739,9 @@ def looks_like_etf_name(name: str) -> bool:
     """Classifies a symbol as an ETF/fund from its *real* display name --
     e.g. yfinance's `longName`/`shortName`, not `companies.name` for a
     portfolio-only symbol, which is often just the raw ticker itself with
-    no real name attached (Zerodha's CSV export uses the exact NSE symbol
-    as its own "Instrument" field, so `raw_name == symbol` for every
-    Zerodha-sourced holding -- see parse_zerodha_csv() above).
+    no real name attached (Zerodha's own `tradingsymbol` is the exact NSE
+    symbol, so `raw_name == symbol` for every Zerodha-sourced holding --
+    see zerodha_holdings_from_api above).
 
     Deliberately NOT based on yfinance's own `quoteType` field: checked
     live against every ETF/fund this app currently tracks (NIFTYBEES,

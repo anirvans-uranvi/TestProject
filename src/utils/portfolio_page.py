@@ -1,6 +1,9 @@
-"""Cross-page helpers for the Portfolio feature's five pages -- My Broker
-(pages/6_My_Broker.py), My Trades (7), My Holdings (8), My Positions (9),
-and Analyse Trade (10, hidden from the sidebar). Every page needs the same
+"""Cross-page helpers for the Portfolio feature's pages -- My Trades (7),
+My Holdings (8), My Positions (9), My CSP (11), and Analyse Trade (10,
+hidden from the sidebar). Broker connect/sync UI lives in Settings' "Data
+Provider" section (src/utils/data_provider_settings.py) now, not a
+dedicated page -- these loaders are still shared across every page that
+reads the resulting holdings/positions/broker-live prices. Every page needs the same
 cached data loaders (e.g. My Trades and Analyse Trade both need holdings +
 positions + trade groups + trade meta to rebuild the same leg/Trade view;
 My Holdings and My Positions each need a subset), so they're extracted
@@ -46,11 +49,6 @@ def load_positions(_client, _user_id: str, _cache_bust: int):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def load_broker_connection(_client, _user_id: str, portfolio_name: str, broker: str, _cache_bust: int):
-    return portfolio_repo.get_broker_connection(_client, _user_id, portfolio_name, broker)
-
-
-@st.cache_data(ttl=60, show_spinner=False)
 def load_trade_groups(_client, _user_id: str, _cache_bust: int):
     return portfolio_repo.list_trade_groups(_client, _user_id)
 
@@ -83,10 +81,10 @@ def load_returns_and_pe(_client, symbols: tuple[str, ...], _cache_bust: int):
 @st.cache_data(ttl=60, show_spinner=False)
 def load_live_dhan_prices(client_id: str, access_token: str, symbols: tuple[str, ...], _cache_bust: int) -> dict[str, float]:
     """Live NSE equity LTPs straight from Dhan's marketfeed
-    (DhanProvider.get_quotes), keyed by symbol. Only meaningful for a
-    portfolio with a connected Dhan account (pages/6_My_Broker.py
-    "Connect Dhan account"), whose already-saved access_token this
-    reuses -- no separate app-wide Dhan credentials required. Returns {}
+    (DhanProvider.get_quotes), keyed by symbol. Only meaningful for an
+    account with Dhan connected (Settings' "Data Provider" section),
+    whose already-saved access_token this reuses -- no separate app-wide
+    Dhan credentials required. Returns {}
     on any provider error (expired token, a symbol Dhan's instrument
     master doesn't resolve, network) -- see load_live_broker_prices below
     for how the caller falls back when this comes back empty."""
@@ -105,11 +103,11 @@ def load_live_zerodha_prices(
 ) -> dict[str, float]:
     """Live NSE equity LTPs straight from Kite Connect's /quote/ltp
     (ZerodhaProvider.get_ltp), keyed by symbol -- Zerodha's counterpart to
-    load_live_dhan_prices above. Only meaningful for a portfolio with a
-    connected Zerodha account whose Kite session hasn't expired yet
-    (pages/6_My_Broker.py "Connect Zerodha account"); reuses the
-    already-saved api_key/api_secret/access_token, no separate app-wide
-    credentials. Returns {} on any provider error (expired daily session,
+    load_live_dhan_prices above. Only meaningful for an account with
+    Zerodha connected whose Kite session hasn't expired yet (Settings'
+    "Data Provider" section); reuses the already-saved
+    api_key/api_secret/access_token, no separate app-wide credentials.
+    Returns {} on any provider error (expired daily session,
     an unrecognized symbol, network) -- see load_live_broker_prices below
     for how the caller falls back when this comes back empty."""
     if not symbols:
@@ -120,31 +118,33 @@ def load_live_zerodha_prices(
         return {}
 
 
-def load_live_broker_prices(_client, user_id: str, portfolio_name: str, symbols: tuple[str, ...], cache_bust: int) -> dict[str, float]:
-    """Live equity LTPs from whichever broker(s) this portfolio has
-    actually connected (Dhan and/or Zerodha -- pages/6_My_Broker.py
-    "Connect ... account") -- fresher than load_latest_prices'
-    daily_screener_snapshots value, which only reflects whatever
-    provider/timing the last manual "Stock Data Refresh" used (this
-    deployment runs yfinance, ~15-20min delayed, and only as current as
-    that one click). Checks both broker connections for this portfolio
-    and merges their live quotes; if a portfolio has both connected and
-    both quote the same symbol, Zerodha's value wins simply because it's
-    applied last -- an arbitrary tie-break, since either is equally
-    "live". A symbol neither broker can quote (or a portfolio with no
-    broker connected at all, or a broker connected but its session/token
-    has expired) is simply absent from the result, leaving the caller's
-    daily_screener_snapshots value as the fallback for it -- not a
-    special case here, just an empty/partial dict. Not itself
+def load_live_broker_prices(_client, user_id: str, symbols: tuple[str, ...], cache_bust: int) -> dict[str, float]:
+    """Live equity LTPs from whichever broker(s) this account has
+    actually connected (Dhan and/or Zerodha -- Settings' "Data Provider"
+    section, src/utils/data_provider_settings.py) -- fresher than
+    load_latest_prices' daily_screener_snapshots value, which only
+    reflects whatever provider/timing the last "Market Data Refresh"
+    click used for a yfinance_bhavcopy account. Account-wide since
+    migration 0029 (broker_connections no longer keyed by
+    portfolio_name), so this no longer takes a portfolio_name -- one
+    connected Dhan/Zerodha account covers every portfolio this account
+    has. Checks both broker connections and merges their live quotes; if
+    both are connected and both quote the same symbol, Zerodha's value
+    wins simply because it's applied last -- an arbitrary tie-break,
+    since either is equally "live". A symbol neither broker can quote (or
+    no broker connected at all, or a connected broker whose
+    session/token has expired) is simply absent from the result, leaving
+    the caller's daily_screener_snapshots value as the fallback for it --
+    not a special case here, just an empty/partial dict. Not itself
     `@st.cache_data`-wrapped (the two loaders it calls already are) so
     that a fresh get_broker_connection lookup always sees the latest
     saved connection state (e.g. right after "Sync now" bumps
     portfolio_cache_bust)."""
     live: dict[str, float] = {}
-    dhan_connection = portfolio_repo.get_broker_connection(_client, user_id, portfolio_name, "Dhan")
+    dhan_connection = portfolio_repo.get_broker_connection(_client, user_id, "Dhan")
     if dhan_connection is not None and dhan_connection.access_token:
         live.update(load_live_dhan_prices(dhan_connection.client_id, dhan_connection.access_token, symbols, cache_bust))
-    zerodha_connection = portfolio_repo.get_broker_connection(_client, user_id, portfolio_name, "Zerodha")
+    zerodha_connection = portfolio_repo.get_broker_connection(_client, user_id, "Zerodha")
     if zerodha_connection is not None and zerodha_connection.access_token and zerodha_connection.api_secret:
         live.update(
             load_live_zerodha_prices(
@@ -169,7 +169,7 @@ def load_option_chain(_client, symbol: str, expiry_iso: str, _cache_bust: int) -
 
 
 def build_trade_legs(
-    client, user_id: str, portfolio_name: str, cache_bust: int, holdings_for_portfolio: list, positions_for_portfolio: list
+    client, user_id: str, cache_bust: int, holdings_for_portfolio: list, positions_for_portfolio: list
 ) -> list[dict]:
     """Unmerged per-broker leg list for one portfolio, ready for
     portfolio_service.group_into_trades -- shared by My Trades (the list
@@ -178,7 +178,11 @@ def build_trade_legs(
     (which combines a symbol's rows across brokers into one row), Trades
     need per-leg identity: that's the same natural key (broker, raw_name)
     portfolio_trade_groups overrides are keyed by, and what a merge/split
-    in Analyse Trade actually reassigns."""
+    in Analyse Trade actually reassigns. No portfolio_name parameter --
+    load_live_broker_prices below is account-wide (migration 0029), not
+    scoped per portfolio; the caller still pre-filters
+    holdings_for_portfolio/positions_for_portfolio to one portfolio_name
+    before calling this."""
     holding_dicts = [
         {"raw_name": h.raw_name, "symbol": h.symbol, "qty": h.qty, "avg_price": h.avg_price, "investment": h.investment}
         for h in holdings_for_portfolio
@@ -189,7 +193,7 @@ def build_trade_legs(
     # as My CSP's LTP Underlying (see load_live_broker_prices) -- a
     # Holding leg's own LTP/Cur Val/P&L here feeds both My Trades' Total
     # P&L and Analyse Trade's legs table.
-    live_ltp_by_symbol = load_live_broker_prices(client, user_id, portfolio_name, holding_symbols, cache_bust)
+    live_ltp_by_symbol = load_live_broker_prices(client, user_id, holding_symbols, cache_bust)
     ltp_by_symbol = {**ltp_by_symbol, **live_ltp_by_symbol}
     computed_holding_rows, _totals = portfolio_service.compute_portfolio_view(holding_dicts, ltp_by_symbol)
     holding_legs = [

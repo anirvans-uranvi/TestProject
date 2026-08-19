@@ -96,3 +96,95 @@ class TestGetLatestReturnsAndPe:
     def test_no_rows_returns_empty_dict(self):
         client = _FakeSnapshotClient([])
         assert snapshot_repo.get_latest_returns_and_pe(client, ["NIFTYBEES"]) == {}
+
+
+class _FakeLivePricesTable:
+    """A persistent-store fake (unlike _FakeSnapshotTable above, which
+    hands out a fresh copy per .table() call) -- needed here since
+    upsert_user_live_prices deletes then inserts within one call, and the
+    tests need that mutation to actually stick for a follow-up
+    get_user_live_prices call."""
+
+    def __init__(self, store: list[dict]):
+        self.store = store
+        self._filters: dict = {}
+        self._pending_delete = False
+
+    def select(self, *args, **kwargs):
+        return self
+
+    def insert(self, payload):
+        self.store.extend(payload)
+        return self
+
+    def delete(self):
+        self._pending_delete = True
+        return self
+
+    def eq(self, column, value):
+        self._filters[column] = value
+        return self
+
+    def in_(self, column, values):
+        self._filters[column] = ("in", set(values))
+        return self
+
+    def _matches(self, row) -> bool:
+        for column, expected in self._filters.items():
+            if isinstance(expected, tuple) and expected[0] == "in":
+                if row.get(column) not in expected[1]:
+                    return False
+            elif row.get(column) != expected:
+                return False
+        return True
+
+    def execute(self):
+        matching = [r for r in self.store if self._matches(r)]
+        if self._pending_delete:
+            self.store[:] = [r for r in self.store if r not in matching]
+        return types.SimpleNamespace(data=matching)
+
+
+class _FakeLivePricesClient:
+    def __init__(self):
+        self.store: list[dict] = []
+
+    def table(self, name):
+        assert name == "user_live_prices"
+        return _FakeLivePricesTable(self.store)
+
+
+class TestUserLivePrices:
+    def test_get_with_no_symbols_returns_empty_dict_without_querying(self):
+        client = _FakeLivePricesClient()
+        assert snapshot_repo.get_user_live_prices(client, "u1", []) == {}
+
+    def test_upsert_then_get_round_trips(self):
+        client = _FakeLivePricesClient()
+        snapshot_repo.upsert_user_live_prices(client, "u1", {"JIOFIN": 243.6, "SBIN": 811.9})
+
+        result = snapshot_repo.get_user_live_prices(client, "u1", ["JIOFIN", "SBIN"])
+
+        assert result == {"JIOFIN": 243.6, "SBIN": 811.9}
+
+    def test_get_only_returns_the_requested_users_rows(self):
+        client = _FakeLivePricesClient()
+        snapshot_repo.upsert_user_live_prices(client, "u1", {"JIOFIN": 243.6})
+        snapshot_repo.upsert_user_live_prices(client, "u2", {"JIOFIN": 999.0})
+
+        assert snapshot_repo.get_user_live_prices(client, "u1", ["JIOFIN"]) == {"JIOFIN": 243.6}
+
+    def test_upsert_replaces_only_the_given_symbols_leaving_others_untouched(self):
+        client = _FakeLivePricesClient()
+        snapshot_repo.upsert_user_live_prices(client, "u1", {"JIOFIN": 243.6, "SBIN": 800.0})
+
+        snapshot_repo.upsert_user_live_prices(client, "u1", {"JIOFIN": 245.0})
+
+        result = snapshot_repo.get_user_live_prices(client, "u1", ["JIOFIN", "SBIN"])
+        assert result == {"JIOFIN": 245.0, "SBIN": 800.0}
+        assert len(client.store) == 2  # no stale duplicate left behind for JIOFIN
+
+    def test_upsert_with_no_prices_is_a_no_op(self):
+        client = _FakeLivePricesClient()
+        snapshot_repo.upsert_user_live_prices(client, "u1", {})
+        assert client.store == []
