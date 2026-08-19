@@ -18,6 +18,9 @@ from datetime import date
 
 import streamlit as st
 
+from src.data_providers.base import ProviderError
+from src.data_providers.dhan_provider import DhanAuthError, DhanProvider
+from src.data_providers.zerodha_provider import ZerodhaAuthError, ZerodhaProvider
 from src.repositories import companies_repo, fo_repo, portfolio_repo, snapshot_repo
 from src.services import portfolio_service
 
@@ -78,6 +81,84 @@ def load_returns_and_pe(_client, symbols: tuple[str, ...], _cache_bust: int):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
+def load_live_dhan_prices(client_id: str, access_token: str, symbols: tuple[str, ...], _cache_bust: int) -> dict[str, float]:
+    """Live NSE equity LTPs straight from Dhan's marketfeed
+    (DhanProvider.get_quotes), keyed by symbol. Only meaningful for a
+    portfolio with a connected Dhan account (pages/6_My_Broker.py
+    "Connect Dhan account"), whose already-saved access_token this
+    reuses -- no separate app-wide Dhan credentials required. Returns {}
+    on any provider error (expired token, a symbol Dhan's instrument
+    master doesn't resolve, network) -- see load_live_broker_prices below
+    for how the caller falls back when this comes back empty."""
+    if not symbols:
+        return {}
+    try:
+        quotes = DhanProvider(client_id=client_id, access_token=access_token).get_quotes(list(symbols))
+    except (DhanAuthError, ProviderError):
+        return {}
+    return {symbol: quote.latest_price for symbol, quote in quotes.items()}
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_live_zerodha_prices(
+    api_key: str, api_secret: str, access_token: str, symbols: tuple[str, ...], _cache_bust: int
+) -> dict[str, float]:
+    """Live NSE equity LTPs straight from Kite Connect's /quote/ltp
+    (ZerodhaProvider.get_ltp), keyed by symbol -- Zerodha's counterpart to
+    load_live_dhan_prices above. Only meaningful for a portfolio with a
+    connected Zerodha account whose Kite session hasn't expired yet
+    (pages/6_My_Broker.py "Connect Zerodha account"); reuses the
+    already-saved api_key/api_secret/access_token, no separate app-wide
+    credentials. Returns {} on any provider error (expired daily session,
+    an unrecognized symbol, network) -- see load_live_broker_prices below
+    for how the caller falls back when this comes back empty."""
+    if not symbols:
+        return {}
+    try:
+        return ZerodhaProvider(api_key=api_key, api_secret=api_secret, access_token=access_token).get_ltp(list(symbols))
+    except (ZerodhaAuthError, ProviderError):
+        return {}
+
+
+def load_live_broker_prices(_client, user_id: str, portfolio_name: str, symbols: tuple[str, ...], cache_bust: int) -> dict[str, float]:
+    """Live equity LTPs from whichever broker(s) this portfolio has
+    actually connected (Dhan and/or Zerodha -- pages/6_My_Broker.py
+    "Connect ... account") -- fresher than load_latest_prices'
+    daily_screener_snapshots value, which only reflects whatever
+    provider/timing the last manual "Stock Data Refresh" used (this
+    deployment runs yfinance, ~15-20min delayed, and only as current as
+    that one click). Checks both broker connections for this portfolio
+    and merges their live quotes; if a portfolio has both connected and
+    both quote the same symbol, Zerodha's value wins simply because it's
+    applied last -- an arbitrary tie-break, since either is equally
+    "live". A symbol neither broker can quote (or a portfolio with no
+    broker connected at all, or a broker connected but its session/token
+    has expired) is simply absent from the result, leaving the caller's
+    daily_screener_snapshots value as the fallback for it -- not a
+    special case here, just an empty/partial dict. Not itself
+    `@st.cache_data`-wrapped (the two loaders it calls already are) so
+    that a fresh get_broker_connection lookup always sees the latest
+    saved connection state (e.g. right after "Sync now" bumps
+    portfolio_cache_bust)."""
+    live: dict[str, float] = {}
+    dhan_connection = portfolio_repo.get_broker_connection(_client, user_id, portfolio_name, "Dhan")
+    if dhan_connection is not None and dhan_connection.access_token:
+        live.update(load_live_dhan_prices(dhan_connection.client_id, dhan_connection.access_token, symbols, cache_bust))
+    zerodha_connection = portfolio_repo.get_broker_connection(_client, user_id, portfolio_name, "Zerodha")
+    if zerodha_connection is not None and zerodha_connection.access_token and zerodha_connection.api_secret:
+        live.update(
+            load_live_zerodha_prices(
+                zerodha_connection.client_id,
+                zerodha_connection.api_secret,
+                zerodha_connection.access_token,
+                symbols,
+                cache_bust,
+            )
+        )
+    return live
+
+
+@st.cache_data(ttl=60, show_spinner=False)
 def load_option_expiries(_client, symbols: tuple[str, ...], _cache_bust: int) -> dict[str, list[str]]:
     return {symbol: [d.isoformat() for d in fo_repo.list_option_expiries(_client, symbol)] for symbol in symbols}
 
@@ -87,7 +168,9 @@ def load_option_chain(_client, symbol: str, expiry_iso: str, _cache_bust: int) -
     return fo_repo.get_option_chain(_client, symbol, date.fromisoformat(expiry_iso))
 
 
-def build_trade_legs(client, cache_bust: int, holdings_for_portfolio: list, positions_for_portfolio: list) -> list[dict]:
+def build_trade_legs(
+    client, user_id: str, portfolio_name: str, cache_bust: int, holdings_for_portfolio: list, positions_for_portfolio: list
+) -> list[dict]:
     """Unmerged per-broker leg list for one portfolio, ready for
     portfolio_service.group_into_trades -- shared by My Trades (the list
     view) and Analyse Trade (one trade's detail view) so bucket/label
@@ -102,6 +185,12 @@ def build_trade_legs(client, cache_bust: int, holdings_for_portfolio: list, posi
     ]
     holding_symbols = tuple(sorted({d["symbol"] for d in holding_dicts if d["symbol"]}))
     ltp_by_symbol = load_latest_prices(client, holding_symbols, cache_bust)
+    # Same broker-live-first, daily_screener_snapshots-fallback preference
+    # as My CSP's LTP Underlying (see load_live_broker_prices) -- a
+    # Holding leg's own LTP/Cur Val/P&L here feeds both My Trades' Total
+    # P&L and Analyse Trade's legs table.
+    live_ltp_by_symbol = load_live_broker_prices(client, user_id, portfolio_name, holding_symbols, cache_bust)
+    ltp_by_symbol = {**ltp_by_symbol, **live_ltp_by_symbol}
     computed_holding_rows, _totals = portfolio_service.compute_portfolio_view(holding_dicts, ltp_by_symbol)
     holding_legs = [
         {**row, "broker": h.broker, "leg_type": "Holding"}

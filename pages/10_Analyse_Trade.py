@@ -77,7 +77,9 @@ trade_meta_for_portfolio = [m for m in saved_trade_meta if m.portfolio_name == p
 all_companies = load_all_companies(client, st.session_state["portfolio_cache_bust"])
 company_type_by_symbol = {c.symbol: c.company_type for c in all_companies}
 
-legs = build_trade_legs(client, st.session_state["portfolio_cache_bust"], holdings_for_portfolio, positions_for_portfolio)
+legs = build_trade_legs(
+    client, user_id, portfolio_name, st.session_state["portfolio_cache_bust"], holdings_for_portfolio, positions_for_portfolio
+)
 overrides_by_leg = {(g.broker, g.raw_name): g.trade_id for g in trade_groups_for_portfolio}
 trade_meta_by_id = {
     m.trade_id: {"underlying_label": m.underlying_label, "trade_type": m.trade_type, "bucket_override": m.bucket_override}

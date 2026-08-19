@@ -820,10 +820,13 @@ undone; every other portfolio is unaffected.
 
 ### My Holdings (`pages/8_My_Holdings.py`)
 
-Equity holdings valued live against the app's own market data (same
-stock/contract held across multiple brokers within one portfolio is
-combined into one row for display -- `portfolio_service.merge_holdings`),
-split into two tables by `companies.company_type` (migration `0018`):
+Equity holdings valued against a live quote from whichever broker(s) this
+portfolio has connected, falling back to the app's own
+`daily_screener_snapshots` data for any symbol no connected broker prices
+(same preference My CSP's LTP Underlying uses) -- same stock/contract
+held across multiple brokers within one portfolio is combined into one
+row for display (`portfolio_service.merge_holdings`), split into two
+tables by `companies.company_type` (migration `0018`):
 **ETFs & Mutual Funds** (`ETF`/`Fund`) first, then **Stocks**
 (`Equity`/`Index`, and any still-unresolved holding, since there's no
 better signal for those). **Both tables share the exact same columns**
@@ -989,7 +992,15 @@ Auto".
 
 Each table shows **Underlying Instrument**, **Trade Type** (defaults to
 "Trade"), **Legs**, and **Total P&L** (summed over the trade's own priced
-legs). Select a row and click "Analyse Trade" to open that Trade's detail
+legs). A Holding leg's own LTP feeding that P&L (and the legs table's LTP
+column below) prefers a live quote from whichever broker(s) this
+portfolio has connected, same as My CSP's LTP Underlying -- falling back
+to `daily_screener_snapshots` only for a symbol no connected broker
+prices (`portfolio_page.build_trade_legs`, shared by both this page and
+Analyse Trade). A Position leg's own LTP is unrelated to this -- it's
+already resolved once at sync time (live broker quote, or this app's own
+F&O bhavcopy as fallback -- see My Positions above), not recomputed here.
+Select a row and click "Analyse Trade" to open that Trade's detail
 page (`st.session_state["analyse_trade_id"]`/`["analyse_trade_portfolio"]`
 + `st.switch_page` -- Analyse Trade is registered in `app.py` with
 `st.Page(..., visibility="hidden")`, so it's reachable this way but never
@@ -1124,9 +1135,14 @@ and are silently skipped. Columns, left to right:
   below the current price (cushion: the underlying would need to fall
   that far before the position loses money past the premium collected),
   positive means it's already fallen through breakeven.
-- **LTP Underlying** -- the underlying stock's own current price, from
+- **LTP Underlying** -- the underlying stock's own current price. If this
+  portfolio has a connected broker account -- Dhan and/or Zerodha (My
+  Broker's "Connect ... account") -- a live quote straight from that
+  broker is used; otherwise (or for any symbol no connected broker
+  returns a live quote for, e.g. an expired token) falls back to
   `daily_screener_snapshots` -- the same source My Holdings' Current
-  Value already reads.
+  Value already reads, only as fresh as the last "Stock Data Refresh"
+  (commonly yfinance, ~15-20min delayed).
 - **Momentum** -- the exact same "Momentum" criterion (B) the
   Dashboard's screener classifies every stock on
   (`src.calculations.classification.criterion_b`: 1D, 5D, AND 20D

@@ -15,6 +15,7 @@ from src.utils.portfolio_page import (
     load_all_companies,
     load_holdings,
     load_latest_prices,
+    load_live_broker_prices,
     load_positions,
     load_returns_and_pe,
     slug,
@@ -180,6 +181,13 @@ def _render_holdings_tab(portfolio_name: str, holdings_for_portfolio: list) -> N
     merged = portfolio_service.merge_holdings(raw_rows)
     symbols = tuple(sorted({r["symbol"] for r in merged if r["symbol"]}))
     ltp_by_symbol = load_latest_prices(client, symbols, st.session_state["portfolio_cache_bust"])
+    # Prefer a live quote from whichever broker(s) this portfolio has
+    # connected over the (possibly stale, yfinance-sourced) screener
+    # snapshot above -- same preference My CSP's LTP Underlying uses.
+    live_ltp_by_symbol = load_live_broker_prices(
+        client, user_id, portfolio_name, symbols, st.session_state["portfolio_cache_bust"]
+    )
+    ltp_by_symbol = {**ltp_by_symbol, **live_ltp_by_symbol}
     rows, totals = portfolio_service.compute_portfolio_view(merged, ltp_by_symbol)
     rows.sort(key=lambda r: r["investment"], reverse=True)
 

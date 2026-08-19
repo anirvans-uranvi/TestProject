@@ -141,3 +141,34 @@ class ZerodhaProvider:
         directly, same as holdings above."""
         data = (self._get("/portfolio/positions") or {}).get("data") or {}
         return data.get("net") or []
+
+    def get_ltp(self, symbols: list[str]) -> dict[str, float]:
+        """Live NSE equity LTPs from GET /quote/ltp -- unlike
+        get_holdings/get_positions above, this isn't scoped to what the
+        user actually holds; it's a live quote for any NSE tradingsymbol,
+        the same "underlying's own current price" role
+        DhanProvider.get_quotes plays for My CSP's LTP Underlying column.
+        `i=NSE:<symbol>` is repeated once per symbol (Kite's documented
+        way to batch a quote request); response is keyed
+        `"NSE:<symbol>"`, unwrapped back to a plain `{symbol: last_price}`
+        dict here so callers don't need to know Kite's key format."""
+        if not symbols:
+            return {}
+        instruments = [f"NSE:{s}" for s in symbols]
+        _throttle()
+        try:
+            resp = httpx.get(
+                f"{BASE_URL}/quote/ltp", params=[("i", i) for i in instruments], headers=self._headers, timeout=self._timeout
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"Zerodha request to /quote/ltp failed: {exc}") from exc
+        if resp.status_code in (401, 403):
+            raise ZerodhaAuthError(f"Zerodha access token rejected ({resp.status_code}): {resp.text[:200]}")
+        if resp.status_code >= 400:
+            raise ProviderError(f"Zerodha request error {resp.status_code}: {resp.text[:200]}")
+        data = (resp.json() or {}).get("data") or {}
+        return {
+            symbol: entry["last_price"]
+            for symbol, instrument in zip(symbols, instruments)
+            if (entry := data.get(instrument)) is not None
+        }

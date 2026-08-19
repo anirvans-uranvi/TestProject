@@ -943,7 +943,7 @@ page's own `st.set_page_config(page_title=..., page_icon=...)` call
 
   **A real bug found here, right after this section first shipped**: the CSP/CC breakdown's spot value (CC was still "ITM PMCC" at the time, but the bug and fix applied identically) was initially taken from `option_chain_summary(near_chain_rows)["spot"]` — the F&O bhavcopy's own `underlying_price` column — while the Dashboard's two columns (now the `dashboard_fo_metrics` cache, see above) use the cash-market `latest_price` from `latest_screener_view`. These two prices aren't the same value, so this page's numbers didn't match the Dashboard's for the same stock (confirmed live: ADANIENT showed 5% CSP = 0.54% on the Dashboard but 0.45% here, since a different spot picked a different nearest-5%-below strike, 3040 vs 3020). Fixed by fetching `snapshot_repo.get_latest_screener_row(client, symbol).latest_price` and using that as the spot for both calculations here too, instead of the chain's `underlying_price` — the top-of-page "Spot"/"ATM strike" summary tiles are unaffected and deliberately still use the chain's own `underlying_price` (correct for highlighting the ATM row in the actual option-chain data being displayed there). If you add another F&O-derived calculation to either screen, source spot the same way this one now does — from the screener, not the chain — to keep the two screens' numbers in agreement.
 
-- **`6_My_Broker.py` / `7_My_Trades.py` / `8_My_Holdings.py` / `9_My_Positions.py` / `11_My_CSP.py` / `10_Analyse_Trade.py`** — six pages (`10_Analyse_Trade.py` hidden from the sidebar, see the "Streamlit app" section above) replacing what used to be one combined `6_Portfolio.py` (sidebar label "My Portfolio", retired). See the dedicated Portfolio pages section below for the full upload → match → save → refresh-registration pipeline, the multiple-coexisting-portfolios design (`portfolio_name`, migration `0014`), and the My Trades/Analyse Trade/My CSP grouping. Each page reads every one of the signed-in user's saved rows across every portfolio and broker via `src/utils/portfolio_page.py`'s shared cached loaders; My Holdings/My Positions/My Trades/My CSP each render one `st.tabs` entry per distinct `portfolio_name` (union of holdings' and positions' names — a portfolio can exist on positions alone) scoping `portfolio_service.merge_holdings`/`compute_portfolio_view` (LTP via `snapshot_repo.get_latest_prices`, a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why) and `compute_positions_view` to just that portfolio's own rows. Every table on these pages is a plain `st.dataframe` — see below for why, and for how row selection replaced the per-row 🔍 button.
+- **`6_My_Broker.py` / `7_My_Trades.py` / `8_My_Holdings.py` / `9_My_Positions.py` / `11_My_CSP.py` / `10_Analyse_Trade.py`** — six pages (`10_Analyse_Trade.py` hidden from the sidebar, see the "Streamlit app" section above) replacing what used to be one combined `6_Portfolio.py` (sidebar label "My Portfolio", retired). See the dedicated Portfolio pages section below for the full upload → match → save → refresh-registration pipeline, the multiple-coexisting-portfolios design (`portfolio_name`, migration `0014`), and the My Trades/Analyse Trade/My CSP grouping. Each page reads every one of the signed-in user's saved rows across every portfolio and broker via `src/utils/portfolio_page.py`'s shared cached loaders; My Holdings/My Positions/My Trades/My CSP each render one `st.tabs` entry per distinct `portfolio_name` (union of holdings' and positions' names — a portfolio can exist on positions alone) scoping `portfolio_service.merge_holdings`/`compute_portfolio_view` (LTP via `snapshot_repo.get_latest_prices`, a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why — overridden by a live broker quote wherever `portfolio_page.load_live_broker_prices` finds one, on request; see the LTP Underlying and Holdings sections below) and `compute_positions_view` to just that portfolio's own rows. Every table on these pages is a plain `st.dataframe` — see below for why, and for how row selection replaced the per-row 🔍 button.
 
 ## Portfolio pages
 
@@ -1801,6 +1801,18 @@ to "Stocks". The Total Investment/Cur Val/P&L/P&L% stat grid above both
 tables is untouched -- it still aggregates across every holding regardless
 of which table it lands in.
 
+**LTP (and everything derived from it -- Cur Val, P&L, P&L%) prefers a
+live broker quote over `daily_screener_snapshots`, on the same request
+that added it to My CSP's LTP Underlying**: `_render_holdings_tab` calls
+`load_latest_prices` for the base value, then overrides it with
+`load_live_broker_prices(client, user_id, portfolio_name, symbols,
+cache_bust)` for any symbol a connected broker (Dhan and/or Zerodha)
+actually quotes -- falling back to the snapshot value for the rest (no
+broker connected, an expired token, or a symbol that broker's feed
+doesn't cover). Same merge pattern as My CSP: `{**ltp_by_symbol,
+**live_ltp_by_symbol}`, so only symbols the live call actually priced get
+overridden.
+
 **The two Holdings tables' columns have gone back and forth a few times,
 by user request each time -- currently identical again.** Originally
 both tables shared the same base columns; then Stocks gained CC ROI/CC
@@ -1854,21 +1866,45 @@ This used to be F&O-positions-only (the original `portfolio_trade_groups`
 to holdings too and adds a real detail page instead of an inline
 combine/split control under the positions table.
 
-`src/utils/portfolio_page.py::build_trade_legs(client, cache_bust,
-holdings_for_portfolio, positions_for_portfolio)` is the shared leg
-builder both `7_My_Trades.py` and `10_Analyse_Trade.py` call (so their
-grouping/labels never drift apart): holding rows are priced via
-`compute_portfolio_view` (called on the **unmerged** per-broker dicts,
-not `merge_holdings`'s cross-broker-combined rows -- Trades need leg-
-level identity, the same `(broker, raw_name)` natural key
-`portfolio_trade_groups` is keyed by) and re-tagged `leg_type="Holding"`
-by zipping the input list against `compute_portfolio_view`'s output rows
-(that function builds a fixed-key dict per row, so any caller-supplied
-extra key like `broker` doesn't survive through it and has to be
-reattached afterwards); position rows go through the existing
-`compute_positions_view`, which *does* pass extra keys through
-(`{**p, "pnl": ..., "pnl_pct": ...}`), so tagging `leg_type="Position"`
-before calling it is enough.
+`src/utils/portfolio_page.py::build_trade_legs(client, user_id,
+portfolio_name, cache_bust, holdings_for_portfolio,
+positions_for_portfolio)` is the shared leg builder both
+`7_My_Trades.py` and `10_Analyse_Trade.py` call (My CSP also calls it, to
+build the same unmerged leg list before filtering down to CSP-tagged
+Position legs — see below), so their grouping/labels never drift apart:
+holding rows are priced via `compute_portfolio_view` (called on the
+**unmerged** per-broker dicts, not `merge_holdings`'s cross-broker-
+combined rows -- Trades need leg- level identity, the same `(broker,
+raw_name)` natural key `portfolio_trade_groups` is keyed by) and
+re-tagged `leg_type="Holding"` by zipping the input list against
+`compute_portfolio_view`'s output rows (that function builds a
+fixed-key dict per row, so any caller-supplied extra key like `broker`
+doesn't survive through it and has to be reattached afterwards);
+position rows go through the existing `compute_positions_view`, which
+*does* pass extra keys through (`{**p, "pnl": ..., "pnl_pct": ...}`), so
+tagging `leg_type="Position"` before calling it is enough.
+
+**`user_id`/`portfolio_name` were added to this signature on request**
+("apply the same [live-broker-quote] logic to My Trades, My Holdings, My
+Positions and Analyse Trade" -- following the same fix on My CSP's LTP
+Underlying column, see further down). A Holding leg's price now goes
+through the identical two-step lookup My CSP's `ltp_by_symbol` uses:
+`load_latest_prices` (the `daily_screener_snapshots` base value) then
+overridden by `load_live_broker_prices(client, user_id, portfolio_name,
+holding_symbols, cache_bust)` wherever a connected broker actually
+quotes that symbol. Since this function is the single shared leg
+builder, that one change automatically reaches every page that calls
+it — My Trades' Total P&L, Analyse Trade's legs table LTP/P&L, and (for
+the Holding legs it discards before filtering to CSP Positions only) My
+CSP. All three call sites were updated to pass `user_id`/`portfolio_name`
+through — each already had both in scope as a module-level global or a
+function parameter, so no new plumbing was needed beyond the signature
+change itself. Position-leg pricing is untouched by this — it was
+already resolved once at sync time (live broker quote, or this app's own
+F&O bhavcopy as fallback, see `_sync_dhan`/`apply_fallback_option_ltp`
+in `pages/6_My_Broker.py`), not recomputed per-render, so **My Positions
+needed no code change at all** — it only ever reads `p["ltp"]` as
+already-resolved.
 
 `portfolio_service.classify_underlying_bucket(symbol, company_type_by_symbol)`
 decides which of the three tables a leg's underlying belongs in **by
@@ -2055,11 +2091,76 @@ alongside them) — coverage here is the `AppTest` import-level smoke
 check plus manual verification, the same tradeoff every other
 page-local formatter on this page already accepts.
 
-`LTP Underlying` is the underlying stock's own current price (`snapshot_repo.get_latest_prices`,
-the same call My Holdings uses for its Cur Val column — a direct
+`LTP Underlying` is the underlying stock's own current price, base value
+from `snapshot_repo.get_latest_prices` (`load_latest_prices` — the same
+call My Holdings uses for its Cur Val column — a direct
 `daily_screener_snapshots` query, not `latest_screener_view`, so it still
-resolves for a portfolio-only symbol not in `nifty50_constituents`);
-`1D`/`5D`/`20D` are that stock's own `return_1d`/`return_5d`/`return_20d`
+resolves for a portfolio-only symbol not in `nifty50_constituents`), then
+**overridden with a live quote from whichever broker(s) this portfolio
+has connected, where one's available** — on request, since
+`daily_screener_snapshots` is only as fresh as whatever provider/timing
+the last "Stock Data Refresh" click used (this deployment runs
+`MARKET_DATA_PROVIDER=yfinance`, ~15-20min delayed, and only that
+current as of the last manual click), while a user who's connected a
+broker account for this portfolio (My Broker's "Connect Dhan account" /
+"Connect Zerodha account") already has a live-data source sitting right
+there. After the snapshot lookup, `_render_csp_tab` calls
+`portfolio_page.load_live_broker_prices(client, user_id, portfolio_name,
+symbols, cache_bust)`, which checks **both** broker connections for this
+portfolio in turn — deliberately "any broker, not just Dhan", since a
+user might have Zerodha connected instead (or as well):
+- `portfolio_repo.get_broker_connection(client, user_id, portfolio_name,
+  "Dhan")` — if one exists with an `access_token`,
+  `load_live_dhan_prices(client_id, access_token, symbols, cache_bust)`
+  calls `DhanProvider(client_id, access_token).get_quotes(symbols)` (the
+  marketfeed/ltp endpoint, `NSE_EQ` segment — the same method the main
+  price pipeline uses when `MARKET_DATA_PROVIDER=dhan`, just invoked here
+  with a per-user token instead of the app-wide one).
+- `portfolio_repo.get_broker_connection(client, user_id, portfolio_name,
+  "Zerodha")` — if one exists with both `access_token` and `api_secret`
+  (Kite Connect's daily-expiring session, see `_render_zerodha_connect_section`),
+  `load_live_zerodha_prices(api_key, api_secret, access_token, symbols,
+  cache_bust)` calls `ZerodhaProvider.get_ltp(symbols)` (Kite Connect's
+  `GET /quote/ltp`, one repeated `i=NSE:<symbol>` query param per symbol —
+  new for this fix; `ZerodhaProvider` previously only had the
+  portfolio-sync trio `get_holdings`/`get_positions`/`generate_session`,
+  none of which quote an arbitrary symbol live).
+
+Both branches reuse the **same per-portfolio credentials "Sync now"
+already saved** — no separate app-wide broker credentials needed for
+either. The two dicts are merged with `dict.update` (Zerodha applied
+second, so it wins on a symbol both brokers happen to quote — an
+arbitrary tie-break, since either is equally "live"), then the merged
+result is spread over `ltp_by_symbol` so only symbols a connected broker
+actually priced get overridden; the `daily_screener_snapshots` value for
+every other symbol (no broker connected at all, a connected broker whose
+session/token has expired, or a symbol that broker's feed doesn't cover)
+survives untouched — the same fallback chain the user asked for: broker
+live data first, Yahoo-sourced snapshot as the fallback. Both
+`load_live_dhan_prices`/`load_live_zerodha_prices` swallow their own
+provider's auth/generic errors (`DhanAuthError`/`ZerodhaAuthError`/
+`ProviderError`) and return `{}` on any failure — deliberately silent,
+since `ltp_by_symbol`'s snapshot fallback already covers it and one bad
+quote (or one broker's outage) shouldn't take down the whole tab, let
+alone the other broker's results. Each is cached with the same `ttl=60`
+convention as `load_latest_prices` right above it;
+`load_live_broker_prices` itself is deliberately *not*
+`@st.cache_data`-wrapped, so its `get_broker_connection` lookups always
+see the latest saved connection (e.g. right after a "Sync now" or
+"Log in to Zerodha" bumps `portfolio_cache_bust`) even though the two
+provider calls it delegates to are each cached individually.
+
+**Option-leg LTP already had this broker-first-bhavcopy-fallback shape
+before this fix, unchanged here**: `leg["ltp"]` (the option premium
+itself, not the underlying) is resolved once at sync time, not on every
+My CSP render —
+`_sync_dhan`/`_fetch_fallback_option_chains`/`portfolio_service.apply_fallback_option_ltp`
+in `pages/6_My_Broker.py` fall back to this app's own F&O bhavcopy data
+(`latest_option_chain_view`) for any Dhan position whose Market Quote
+call came back empty (commonly a Dhan account without the separate "Data
+APIs" subscription); Zerodha's positions response includes `last_price`
+directly (`zerodha_positions_from_api`), so no fallback step is needed
+there at all. `1D`/`5D`/`20D` are that stock's own `return_1d`/`return_5d`/`return_20d`
 (`snapshot_repo.get_latest_returns_and_pe`, the same fields My Holdings'
 "1D/5D/20D Change" columns are derived from — named without the
 "Underlying" suffix those columns first shipped with, on request, since

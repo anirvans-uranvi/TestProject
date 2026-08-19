@@ -15,6 +15,7 @@ from src.utils.portfolio_page import (
     load_all_companies,
     load_holdings,
     load_latest_prices,
+    load_live_broker_prices,
     load_position_meta,
     load_positions,
     load_returns_and_pe,
@@ -150,7 +151,9 @@ def _render_csp_tab(
     position_meta_for_portfolio: list,
     company_type_by_symbol: dict,
 ) -> None:
-    legs = build_trade_legs(client, st.session_state["portfolio_cache_bust"], holdings_for_portfolio, positions_for_portfolio)
+    legs = build_trade_legs(
+        client, user_id, portfolio_name, st.session_state["portfolio_cache_bust"], holdings_for_portfolio, positions_for_portfolio
+    )
     if not legs:
         st.caption("No holdings or positions saved yet for this portfolio -- upload one on My Broker.")
         return
@@ -179,6 +182,16 @@ def _render_csp_tab(
 
     symbols = tuple(sorted({leg["symbol"] for leg in csp_legs if leg["symbol"]}))
     ltp_by_symbol = load_latest_prices(client, symbols, st.session_state["portfolio_cache_bust"])
+    # Prefer a live quote from whichever broker(s) this portfolio has
+    # connected over the (possibly stale, yfinance-sourced) screener
+    # snapshot above -- only overrides symbols a connected broker actually
+    # returned a price for; every other symbol (no broker connected, or
+    # connected but that symbol/session didn't come back) keeps its
+    # snapshot value.
+    live_ltp_by_symbol = load_live_broker_prices(
+        client, user_id, portfolio_name, symbols, st.session_state["portfolio_cache_bust"]
+    )
+    ltp_by_symbol = {**ltp_by_symbol, **live_ltp_by_symbol}
     returns_by_symbol = load_returns_and_pe(client, symbols, st.session_state["portfolio_cache_bust"])
     position_meta_by_leg = {(m.broker, m.raw_name): m for m in position_meta_for_portfolio}
 

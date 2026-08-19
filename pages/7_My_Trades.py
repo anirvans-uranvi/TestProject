@@ -119,7 +119,9 @@ def _render_trades_tab(
     trade_meta_for_portfolio: list,
     company_type_by_symbol: dict,
 ) -> None:
-    legs = build_trade_legs(client, st.session_state["portfolio_cache_bust"], holdings_for_portfolio, positions_for_portfolio)
+    legs = build_trade_legs(
+        client, user_id, portfolio_name, st.session_state["portfolio_cache_bust"], holdings_for_portfolio, positions_for_portfolio
+    )
     if not legs:
         st.caption("No holdings or positions saved yet for this portfolio -- upload one on My Broker.")
         return

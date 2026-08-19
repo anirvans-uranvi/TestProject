@@ -1,7 +1,8 @@
 """Tests for ZerodhaProvider's Kite Connect flow (login_url, checksum-based
-generate_session, get_holdings, get_positions) -- used by
-pages/6_My_Broker.py's "Connect Zerodha account" flow. No live Kite
-Connect calls; all HTTP is mocked."""
+generate_session, get_holdings, get_positions, get_ltp) -- used by
+pages/6_My_Broker.py's "Connect Zerodha account" flow and My CSP's live
+underlying-price lookup (src.utils.portfolio_page.load_live_zerodha_prices).
+No live Kite Connect calls; all HTTP is mocked."""
 import hashlib
 
 import httpx
@@ -152,3 +153,72 @@ class TestGetPositions:
         provider = ZerodhaProvider(api_key="KEY1", api_secret="SECRET1", access_token="TOKEN1")
 
         assert provider.get_positions() == []
+
+
+class TestGetLtp:
+    def test_repeats_i_param_per_symbol_and_unwraps_nse_prefix(self, monkeypatch):
+        captured = {}
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["params"] = params
+            return _FakeResponse(
+                200,
+                json_data={
+                    "data": {
+                        "NSE:JIOFIN": {"instrument_token": 1, "last_price": 243.6},
+                        "NSE:SBIN": {"instrument_token": 2, "last_price": 811.9},
+                    }
+                },
+            )
+
+        monkeypatch.setattr(httpx, "get", fake_get)
+        provider = ZerodhaProvider(api_key="KEY1", api_secret="SECRET1", access_token="TOKEN1")
+
+        result = provider.get_ltp(["JIOFIN", "SBIN"])
+
+        assert result == {"JIOFIN": 243.6, "SBIN": 811.9}
+        assert captured["url"].endswith("/quote/ltp")
+        assert captured["params"] == [("i", "NSE:JIOFIN"), ("i", "NSE:SBIN")]
+
+    def test_empty_symbols_returns_empty_dict_without_a_request(self, monkeypatch):
+        def fake_get(*args, **kwargs):
+            raise AssertionError("should not make a request for an empty symbol list")
+
+        monkeypatch.setattr(httpx, "get", fake_get)
+        provider = ZerodhaProvider(api_key="KEY1", api_secret="SECRET1", access_token="TOKEN1")
+
+        assert provider.get_ltp([]) == {}
+
+    def test_symbol_missing_from_response_is_silently_omitted(self, monkeypatch):
+        monkeypatch.setattr(
+            httpx, "get", lambda *a, **k: _FakeResponse(200, json_data={"data": {"NSE:JIOFIN": {"last_price": 243.6}}})
+        )
+        provider = ZerodhaProvider(api_key="KEY1", api_secret="SECRET1", access_token="TOKEN1")
+
+        assert provider.get_ltp(["JIOFIN", "UNKNOWNSYM"]) == {"JIOFIN": 243.6}
+
+    def test_401_raises_zerodha_auth_error(self, monkeypatch):
+        monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResponse(401, text="expired session"))
+        provider = ZerodhaProvider(api_key="KEY1", api_secret="SECRET1", access_token="EXPIRED")
+
+        with pytest.raises(ZerodhaAuthError):
+            provider.get_ltp(["JIOFIN"])
+
+    def test_other_error_status_raises_generic_provider_error_not_auth_error(self, monkeypatch):
+        monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResponse(500, text="boom"))
+        provider = ZerodhaProvider(api_key="KEY1", api_secret="SECRET1", access_token="TOKEN1")
+
+        with pytest.raises(ProviderError) as exc_info:
+            provider.get_ltp(["JIOFIN"])
+        assert not isinstance(exc_info.value, ZerodhaAuthError)
+
+    def test_no_access_token_raises_provider_error_before_any_request(self, monkeypatch):
+        def fake_get(*args, **kwargs):
+            raise AssertionError("should not make a request with no access_token set")
+
+        monkeypatch.setattr(httpx, "get", fake_get)
+        provider = ZerodhaProvider(api_key="KEY1", api_secret="SECRET1")
+
+        with pytest.raises(ProviderError):
+            provider.get_ltp(["JIOFIN"])
