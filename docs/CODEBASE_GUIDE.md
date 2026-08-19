@@ -804,9 +804,11 @@ the Dashboard is purely a Nifty50 *stock* screener. Rows with no
 `source` key at all (older fixtures, or the mock provider's single
 `"mock_fo"` source used for local dev) pass through unaffected -- only
 an explicit BSE prefix is excluded. The underlying stale BSE
-`option_contracts` rows are left alone (harmless once excluded here, and
-still legitimately readable by other consumers of the view, e.g. a
-portfolio's own BANKEX position).
+`option_contracts` rows were left alone at the time -- believed harmless
+once excluded from this one cache's computation. **That assumption was
+wrong, confirmed by a sixth bug below**: the same stale rows were still
+being read, unfiltered, by every *other* consumer of
+`latest_option_chain_view`.
 
 **A fifth bug, confirmed live immediately after applying migration
 `0027` and re-syncing**: the dropdown still showed all 5 entries
@@ -832,6 +834,57 @@ also forecloses the whole class of bug: any *future* reason
 `dashboard_metrics_rows` might exclude a leg no longer needs its own
 matching prune query, since every recompute now starts from an empty
 table.
+
+**A sixth bug, reported "once again" some time after `0027` shipped**:
+the Dashboard's "Options month" dropdown showed a stock's month
+duplicated once more, even though `dashboard_metrics_rows`' BSE
+exclusion (above) was still correctly in place and had never regressed.
+Root cause: the stale pre-restriction BSE `option_contracts`/
+`option_daily_prices` rows `0027` deliberately left alone were never
+actually deleted -- `fo_repo.refresh_open_flags` (run on every ingest)
+only compares `expiry_date` to today, with no concept of source or
+symbol type, so it kept reaffirming `is_open = true` for these rows
+forever, exactly as `0027`'s own docstring already predicted ("still
+`is_open = true` as long as their own expiry date hasn't passed"). Fixing
+only `dashboard_metrics_rows`' own computation was necessary but not
+sufficient a second time: `latest_option_chain_view` itself still served
+the garbage row to everyone else -- `fo_repo.get_option_chain` (My CSP's
+fallback LTP, Analyse Trade's fallback path), `fo_repo.list_option_expiries`
+(queries `option_contracts` directly, bypassing the view and its
+`source` column entirely), and the Options page's own expiry picker all
+read it unfiltered. There was no single Python-side choke point left to
+patch -- the fix had to move into the data itself.
+
+Migration `0031_stock_options_nse_only.sql` does two things instead of
+one more downstream filter: (1) a one-time cleanup, deleting every
+surviving BSE-sourced `option_contracts`/`option_daily_prices` row whose
+symbol isn't a genuine Index (`companies.company_type = 'Index'`) --
+`option_contracts` itself carries no `source` column, so it's matched
+via its corresponding `option_daily_prices` row's source, and deleted
+*before* those price rows are removed out from under it; and (2) the
+same "BSE row only passes if its symbol is a genuine Index" guard baked
+directly into `latest_option_chain_view`'s own `WHERE` clause (appending
+`source` in `0027` already exposed the column this needs) -- so every
+current *and future* consumer of the view is protected permanently, not
+just whichever one happens to remember to filter it. `refresh_open_flags`
+itself is deliberately left unchanged (still a pure date comparison,
+still blind to source) -- it's not what's wrong; the two fixes above
+mean it no longer matters that it can't tell a stale row from a real one,
+since a stale one can no longer exist in the first place.
+
+This was also the point where two *different* expiry dates could still
+look identical in the UI: `available_expiries` (the dropdown's
+`format_func`) rendered every date as `"%b %Y"` (month + year only) --
+so a BSE date a few days off its symbol's real NSE expiry, both falling
+in the same calendar month, were genuinely indistinguishable entries
+before `0031` even existed to fix the data, which is part of why this
+took a live "Aug 2026 twice" report to notice at all rather than being
+caught by inspection. Fixed on the same request: the dropdown (and
+`pages/5_Options.py`'s futures chart title, the only other
+month-only-formatted date in the app -- everywhere else already showed
+`%d %b %Y`) now renders `"%b %Y (%d-%b-%y)"`, e.g. `"Aug 2026
+(25-Aug-26)"` -- two entries in the same month are now visibly distinct
+even if the underlying data problem were ever to recur.
 
 `dashboard_fo_metrics` was originally one row per symbol (migration
 `0009`, holding only the nearest expiry); migration `0010` dropped and

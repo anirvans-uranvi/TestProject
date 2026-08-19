@@ -104,7 +104,16 @@ def clear_dashboard_fo_metrics(client: Client) -> None:
 def refresh_open_flags(client: Client, as_of: date) -> None:
     """Contracts appear in the bhavcopy only while live, so `is_open` must be
     (re)derived against the real calendar, not the file's own trade date:
-    open iff expiry has not passed as of `as_of`."""
+    open iff expiry has not passed as of `as_of`. Deliberately blind to
+    `source`/symbol type -- purely a date comparison -- which is exactly
+    why a stale BSE-sourced stock contract (see migration
+    0031_stock_options_nse_only.sql) kept getting silently revived to
+    `is_open = true` forever, on every single refresh, as long as its own
+    (bogus, pre-restriction) expiry date hadn't yet passed: this function
+    has no way to know that row shouldn't exist at all. That migration's
+    one-time cleanup plus `latest_option_chain_view`'s own permanent
+    guard is what actually stops it, not this function -- don't expect
+    this one to ever filter by source."""
     iso = as_of.isoformat()
     for table in ("futures_contracts", "option_contracts"):
         client.table(table).update({"is_open": True}).gte("expiry_date", iso).execute()

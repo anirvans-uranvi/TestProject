@@ -616,20 +616,43 @@ The Dashboard's own **5% CSP** / **5% CC** columns read from a small
 precomputed cache table (`dashboard_fo_metrics`, migration `0011`, keyed
 by `(symbol, expiry_date)` -- up to 3 rows per symbol, near/next/far)
 instead of recalculating across every open option contract on every page
-load -- every refresh path (the cron script, `fetch_fo_data.py`, and both
-on-demand refresh buttons below) recomputes all 3 months as its last
-step, so it's never more than one refresh out of date. An **"Options
-month" dropdown** lets you pick which of the 3 cached months feeds those
-two columns -- purely a re-render over already-cached rows, no new
-fetch. The dropdown's choices are restricted to expiries that belong to
-a symbol actually shown in the screener below (Nifty 50 stocks), and the
-underlying cache itself excludes BSE-sourced option legs entirely --
-BSE's F&O feed is index-options only (the Dashboard is a **stock**
-screener), so a BSE leg is either an unrelated index (e.g. BANKEX) or a
-pre-restriction stale stock contract still technically "open" only
-because its own expiry hasn't passed yet. Without both fixes, a stock's
-old BSE monthly expiry (a few days off its real NSE one) could show up
-as a duplicate same-month entry in the dropdown. See
+load -- every refresh path (the cron script, `fetch_fo_data.py`, and
+"Market Data Refresh" below) recomputes all 3 months as its last step, so
+it's never more than one refresh out of date. An **"Options month"
+dropdown** lets you pick which of the 3 cached months feeds those two
+columns -- purely a re-render over already-cached rows, no new fetch --
+shown as `"Aug 2026 (25-Aug-26)"`, the full date alongside the month, not
+just the month (see below for why). The dropdown's choices are
+restricted to expiries that belong to a symbol actually shown in the
+screener below (Nifty 50 stocks).
+
+**Stock option data is always NSE-only, never BSE -- a hard, database-
+level guarantee (migration `0031_stock_options_nse_only.sql`),
+irrespective of which Data Provider an account has selected** (F&O is
+never provider-branched at all -- see
+[Connecting a broker](#connecting-a-broker-settings--data-provider)
+above). BSE's own F&O feed is index-options only by design (SENSEX/
+BANKEX, ...) -- `bse_fo_provider.py` already blocks any new stock-type
+row from being ingested -- but pre-restriction rows for real stock
+symbols (an old BSE monthly expiry a few days off that symbol's real NSE
+one) used to linger indefinitely, since `fo_repo.refresh_open_flags`
+only checks expiry-date-vs-today, not source, so a stale row just kept
+getting silently revived to `is_open = true` forever. **This bug
+recurred twice**: an earlier fix only excluded BSE-sourced legs from the
+Dashboard's own cache computation (`fo_service.dashboard_metrics_rows`),
+which wasn't enough -- every *other* reader of the shared
+`latest_option_chain_view` (My CSP's fallback LTP, Analyse Trade, the
+Options page, `fo_repo.get_option_chain`) still saw the same stale
+garbage unfiltered. Migration `0031` fixes it at the root: a one-time
+cleanup deletes any surviving BSE-sourced option data for a non-Index
+symbol, and the same guard is now baked directly into
+`latest_option_chain_view` itself, so no future consumer -- or ingestion
+bug -- can resurface a stock's BSE-derived row again. Showing the full
+date (not just the month) in every expiry dropdown, mentioned above, was
+the other half of the fix -- two *different* dates landing in the same
+calendar month used to render as visually-indistinguishable duplicate
+entries, which is exactly how this bug was first noticed and how it
+would've stayed hidden even after being fixed. See
 `docs/CODEBASE_GUIDE.md`'s Futures & Options section ("Dashboard cache")
 for the full pipeline.
 

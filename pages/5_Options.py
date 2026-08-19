@@ -163,7 +163,7 @@ if futures_rows:
             template=plotly_template(user_settings.theme),
             height=280,
             margin=dict(l=10, r=10, t=30, b=10),
-            title=f"{symbol} {near_expiry:%b %Y} futures — daily close",
+            title=f"{symbol} {near_expiry:%b %Y (%d-%b-%y)} futures — daily close",
         )
         st.plotly_chart(fig, use_container_width=True)
 else:

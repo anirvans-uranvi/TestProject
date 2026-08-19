@@ -352,7 +352,13 @@ if available_expiries:
         "Options month",
         available_expiries,
         key="dashboard_options_month",
-        format_func=lambda d: date.fromisoformat(d).strftime("%b %Y"),
+        # Full date, not just "Aug 2026" -- these are pooled *exact* dates
+        # (available_expiries is a set of real expiry_date values, not
+        # month buckets), so two entries landing in the same month would
+        # otherwise render as indistinguishable duplicates -- e.g. a data
+        # issue surfacing a stray expiry a few days off the real one
+        # would be invisible until this showed the day too.
+        format_func=lambda d: date.fromisoformat(d).strftime("%b %Y (%d-%b-%y)"),
         help="Which monthly options expiry feeds the 5% CSP / 5% CC columns below.",
     )
 else:

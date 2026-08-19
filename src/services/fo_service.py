@@ -432,14 +432,22 @@ def dashboard_metrics_rows(option_rows: list[dict], spot_by_symbol: dict[str, fl
     BSE-sourced legs (`source` starting with "bse_fo_bhavcopy", see
     `bse_fo_provider.py`) are excluded entirely -- BSE's F&O feed is
     index-options only, and this cache backs a Nifty50 **stock** screener,
-    so a BSE leg is either an index (irrelevant to any screener row) or a
-    pre-restriction stale stock contract that happens to still be
-    `is_open` because its own expiry hasn't passed yet. Confirmed live: a
-    stock symbol's stale BSE monthly expiry, a few days off its real NSE
-    one, produced a second same-month entry in the Dashboard's "Options
-    month" dropdown. `option_rows` without a `source` key (e.g. older test
-    fixtures, or the mock provider's single "mock_fo" source) pass through
-    unaffected -- only an explicit BSE prefix is excluded.
+    so a BSE leg is always irrelevant here (an index, or -- historically,
+    before migration `0031` -- a pre-restriction stale stock contract).
+    This filter is now redundant-but-kept as defense-in-depth: migration
+    `0031_stock_options_nse_only.sql` both cleaned up every surviving
+    stale BSE-sourced stock row and added the same guard directly onto
+    `latest_option_chain_view` (this function's ultimate data source, via
+    `fo_repo.get_all_open_options`), so a BSE stock leg can no longer
+    reach `option_rows` at all -- see that migration's docstring for the
+    full incident (this exact symptom recurred twice: fixing only this
+    one cache's own computation wasn't enough, since every *other*
+    consumer of the view -- `fo_repo.get_option_chain`,
+    `fo_repo.list_option_expiries`, My CSP's fallback LTP, Analyse Trade,
+    the Options page -- read the same underlying garbage rows unfiltered).
+    `option_rows` without a `source` key (e.g. older test fixtures, or
+    the mock provider's single "mock_fo" source) pass through unaffected
+    -- only an explicit BSE prefix is excluded.
     """
     legs_by_symbol: dict[str, list[dict]] = {}
     for r in option_rows:
