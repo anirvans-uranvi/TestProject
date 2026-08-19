@@ -2161,21 +2161,28 @@ this table).
   the CSV-upload path (`_render_positions_upload_section`), only the two
   live "Sync now" flows.
 - `portfolio_service.csp_target_pnl(max_credit, trade_date, expiry_date,
-  as_of=None)` — `min(max_credit * 0.95, max_credit *
-  (duration_held / duration_to_expiry) * 1.2)` (`as_of` defaults to
-  `date.today()`, explicit for testability, same convention
-  `screener_service`/`refresh_service` use). **Two terms, on request** —
-  the accelerated term (`* 1.2`) runs 20% faster than plain linear,
-  changing every day as `duration_held` grows, so it reads as "is
-  today's decay running ahead of or behind a slightly-faster-than-linear
-  expectation"; the `0.95 * max_credit` term is a hard ceiling the
-  accelerated term will eventually exceed (past `duration_held /
-  duration_to_expiry` ≈ 0.79), at which point `min()` locks the target
-  at 95% of max credit for the rest of the position's life, including
-  well past expiry if it's still open — chasing the last 5% isn't worth
-  the assignment/gamma risk of holding to the very end. `None` until a
-  Trade Date is entered (nothing to compute a duration against), or if
-  `duration_to_expiry` isn't positive (expiry on/before the trade date).
+  as_of=None)` — `max(max_credit * 0.5, min(max_credit * 0.95,
+  max_credit * (duration_held / duration_to_expiry) * 1.2))` (`as_of`
+  defaults to `date.today()`, explicit for testability, same convention
+  `screener_service`/`refresh_service` use). **Three terms, on
+  request** — the accelerated term (`* 1.2`) runs 20% faster than plain
+  linear, changing every day as `duration_held` grows, so it reads as
+  "is today's decay running ahead of or behind a
+  slightly-faster-than-linear expectation"; the `0.95 * max_credit` term
+  is a hard ceiling the accelerated term will eventually exceed (past
+  `duration_held / duration_to_expiry` ≈ 0.79), at which point `min()`
+  locks the target at 95% of max credit for the rest of the position's
+  life, including well past expiry if it's still open — chasing the
+  last 5% isn't worth the assignment/gamma risk of holding to the very
+  end. The outer `max(max_credit * 0.5, ...)` is a floor added on
+  request ("the target should never be below 50% of max credit") — early
+  in a trade the accelerated term starts near 0 and would otherwise let
+  the target sink toward nothing; the floor keeps it pinned at half the
+  premium collected until the accelerated term itself climbs past that
+  point (`duration_held / duration_to_expiry` ≈ 0.417, since `0.417 *
+  1.2 ≈ 0.5`). `None` until a Trade Date is entered (nothing to compute
+  a duration against), or if `duration_to_expiry` isn't positive (expiry
+  on/before the trade date).
 - `portfolio_service.csp_stop_loss(existing_stop_loss, max_credit,
   pnl_pct)` — the one genuinely stateful calculation on these pages:
   called fresh on **every render** of My CSP, and whatever it returns is

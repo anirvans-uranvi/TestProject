@@ -1092,19 +1092,22 @@ and are silently skipped. Columns, left to right:
   through Stop Loss -- no marker at all when neither threshold is
   crossed (including whenever Target P&L/Stop Loss themselves aren't
   computable yet, e.g. no Trade Date).
-- **Target P&L** -- `min(Max Credit * 0.95, Max Credit * (Duration Held
-  / Duration to Expiry) * 1.2)`, where `Duration to Expiry = Expiry -
-  Trade Date`, and `Duration Held = Today - Trade Date`, shown with what
-  % of Max Credit it represents in parentheses, e.g. `"₹4,275.00
-  (85.00%)"`. Changes every day as `Duration Held` grows -- the `* 1.2`
-  runs the target 20% faster than plain linear, reflecting that theta
-  decay tends to accelerate as expiry nears (a "higher than average
-  decay" expectation, not a straight-line one) -- but it's capped so it
-  never crosses 95% of Max Credit no matter how long the position is
-  held, even well past expiry (chasing the last 5% isn't worth the
-  assignment/gamma risk of holding to the very end). A rule-of-thumb
-  gauge, not a precise pricing model. Blank until Trade Date is set (no
-  duration to compute against).
+- **Target P&L** -- `max(Max Credit * 0.5, min(Max Credit * 0.95, Max
+  Credit * (Duration Held / Duration to Expiry) * 1.2))`, where
+  `Duration to Expiry = Expiry - Trade Date`, and `Duration Held = Today
+  - Trade Date`, shown with what % of Max Credit it represents in
+  parentheses, e.g. `"₹4,275.00 (85.00%)"`. Changes every day as
+  `Duration Held` grows -- the `* 1.2` runs the target 20% faster than
+  plain linear, reflecting that theta decay tends to accelerate as
+  expiry nears (a "higher than average decay" expectation, not a
+  straight-line one) -- but it's capped so it never crosses 95% of Max
+  Credit no matter how long the position is held, even well past expiry
+  (chasing the last 5% isn't worth the assignment/gamma risk of holding
+  to the very end). It's also floored at 50% of Max Credit, so early in
+  a trade (before the time-decay term catches up) the target never sinks
+  below half the premium collected. A rule-of-thumb gauge, not a precise
+  pricing model. Blank until Trade Date is set (no duration to compute
+  against).
 - **Stop Loss** -- ratchets up automatically as the position becomes
   more profitable, and is saved on every visit so it never resets: a
   brand-new leg (nothing saved yet) starts at `-Max Credit` (willing to

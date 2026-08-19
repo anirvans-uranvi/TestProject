@@ -492,9 +492,20 @@ class TestCspTargetPnl:
 
     def test_defaults_as_of_to_today(self):
         # No as_of passed -- shouldn't raise, and since trade_date is
-        # today, duration_held is 0 so the target is 0.
+        # today, duration_held is 0 so the accelerated target is 0, but
+        # the 50% floor takes over.
         today = date.today()
-        assert portfolio_service.csp_target_pnl(3375.0, today, today + timedelta(days=1)) == 0.0
+        assert portfolio_service.csp_target_pnl(3375.0, today, today + timedelta(days=1)) == pytest.approx(1687.5)
+
+    def test_early_in_trade_is_floored_at_50_pct(self):
+        # 5% of the way through -- accelerated target (0.05 * 1.2 = 6% of
+        # max_credit) would be far below half of max credit, so the 50%
+        # floor wins.
+        max_credit = 1000.0
+        trade_date = date(2026, 8, 1)
+        expiry_date = date(2026, 8, 21)  # 20 days to expiry
+        as_of = trade_date + timedelta(days=1)  # 1 day held
+        assert portfolio_service.csp_target_pnl(max_credit, trade_date, expiry_date, as_of) == pytest.approx(500.0)
 
 
 class TestCspStopLoss:

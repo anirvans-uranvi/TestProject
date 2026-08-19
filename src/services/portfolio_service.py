@@ -633,21 +633,24 @@ def csp_max_credit(avg_price: float | None, qty: float | None) -> float | None:
 def csp_target_pnl(
     max_credit: float | None, trade_date: date | None, expiry_date: date | None, as_of: date | None = None
 ) -> float | None:
-    """My CSP's "Target P&L" -- `min(0.95 * max_credit, max_credit *
-    (duration_held / duration_to_expiry) * 1.2)`. The second term is a
-    time-decay target that runs 20% *faster* than plain linear (theta
-    decay tends to accelerate as expiry nears, so this reflects a
-    "higher than average decay" expectation, not a straight-line one) --
-    it changes every day as `duration_held` grows. The `0.95 *
-    max_credit` term is a hard ceiling: chasing the last 5% of premium
+    """My CSP's "Target P&L" -- `max(0.5 * max_credit, min(0.95 *
+    max_credit, max_credit * (duration_held / duration_to_expiry) *
+    1.2))`. The inner term is a time-decay target that runs 20% *faster*
+    than plain linear (theta decay tends to accelerate as expiry nears,
+    so this reflects a "higher than average decay" expectation, not a
+    straight-line one) -- it changes every day as `duration_held` grows.
+    The `0.95 * max_credit` cap means chasing the last 5% of premium
     isn't worth the assignment/gamma risk of holding to the very end, so
     the target never crosses 95% of max credit no matter how long the
-    position is held, even well past expiry. `as_of` defaults to
-    `date.today()`, explicit for testability, same convention
-    `screener_service`/`refresh_service` already use. `None` when
-    `max_credit`/`trade_date`/`expiry_date` is missing, or the duration
-    to expiry isn't positive (expiry on or before the trade date --
-    division by zero, or nonsensical for a same-day/already-past
+    position is held, even well past expiry. The `0.5 * max_credit`
+    floor means the target never drops below half the max credit either
+    -- even early in the trade (when the time-decay term is still
+    small), the target holds at 50% rather than sinking toward 0. `as_of`
+    defaults to `date.today()`, explicit for testability, same
+    convention `screener_service`/`refresh_service` already use. `None`
+    when `max_credit`/`trade_date`/`expiry_date` is missing, or the
+    duration to expiry isn't positive (expiry on or before the trade
+    date -- division by zero, or nonsensical for a same-day/already-past
     expiry)."""
     if max_credit is None or trade_date is None or expiry_date is None:
         return None
@@ -656,7 +659,8 @@ def csp_target_pnl(
         return None
     duration_held = ((as_of or date.today()) - trade_date).days
     accelerated_target = max_credit * (duration_held / duration_to_expiry) * 1.2
-    return min(max_credit * 0.95, accelerated_target)
+    capped_target = min(max_credit * 0.95, accelerated_target)
+    return max(max_credit * 0.5, capped_target)
 
 
 def csp_stop_loss(existing_stop_loss: float | None, max_credit: float | None, pnl_pct: float | None) -> float | None:
