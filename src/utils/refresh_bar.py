@@ -24,6 +24,12 @@ clock time to roughly the slowest one instead of their sum):
   (migration 0030) -- what Dashboard/Stock Detail read as an override on
   top of the shared daily_screener_snapshots value, see
   src/repositories/snapshot_repo.py's get_user_live_prices.
+- **New**, Dhan only (migration 0032): also refetches live LTP for every
+  ETF (tracked but not shown on the Screener table), plus every futures/
+  option contract this account's own portfolio holds or the Dashboard's
+  cached 5% CSP/5% CC legs reference -- see _dhan_fo_universe and
+  DhanProvider.get_fo_quotes. Zerodha has no F&O instrument resolver yet,
+  so a Zerodha-provider account's refresh is unchanged (equity LTP only).
 
 A click always calls `st.cache_data.clear()` -- the *entire* app-wide
 cache, not just the current page's -- before `st.rerun()`-ing, so every
@@ -34,11 +40,14 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 
 import streamlit as st
 
+from src.data_providers.base import ProviderError
+from src.data_providers.dhan_provider import DhanAuthError, DhanProvider
 from src.models.enums import CompanyType
-from src.repositories import companies_repo, fetch_log_repo, portfolio_repo, settings_repo, snapshot_repo
+from src.repositories import companies_repo, fetch_log_repo, fo_repo, portfolio_repo, settings_repo, snapshot_repo
 from src.services import edge_refresh
 from src.utils.portfolio_page import load_live_dhan_prices, load_live_zerodha_prices
 from src.utils.session import current_user_id
@@ -64,6 +73,39 @@ def _universe_breakdown(client) -> str:
     return f" ({stock_count} stocks, {etf_count} ETFs/funds)" if etf_count else ""
 
 
+def _dhan_fo_universe(client, user_id: str) -> list[tuple[str, date, float, str]]:
+    """Every futures/option contract a Dhan-provider account's live-price
+    refresh should quote: this account's own open portfolio F&O
+    positions (any broker, any portfolio -- a position is a position
+    regardless of which broker it was synced from), plus the Dashboard's
+    cached 5% CSP / 5% CC legs (fo_repo.get_dashboard_fo_metrics) -- the
+    only options the Screener/Dashboard itself actually uses, not the
+    full chain for every strike/expiry. Returns (symbol, expiry_date,
+    strike_price, option_type) tuples -- option_type='FUT' for a futures
+    position (strike_price is meaningless there, sentinel 0.0) -- see
+    DhanProvider.get_fo_quotes."""
+    contracts: set[tuple[str, date, float, str]] = set()
+    for p in portfolio_repo.list_positions(client, user_id):
+        if not p.symbol or p.expiry_date is None:
+            continue
+        if p.option_type is not None and p.strike_price is not None:
+            contracts.add((p.symbol, p.expiry_date, float(p.strike_price), p.option_type.value))
+        elif p.option_type is None and p.strike_price is None:
+            contracts.add((p.symbol, p.expiry_date, 0.0, "FUT"))
+    for row in fo_repo.get_dashboard_fo_metrics(client):
+        symbol = row.get("symbol")
+        expiry_date = row.get("expiry_date")
+        if not symbol or not expiry_date:
+            continue
+        if isinstance(expiry_date, str):
+            expiry_date = date.fromisoformat(expiry_date)
+        if row.get("csp_strike") is not None:
+            contracts.add((symbol, expiry_date, float(row["csp_strike"]), "PE"))
+        if row.get("cc_strike") is not None:
+            contracts.add((symbol, expiry_date, float(row["cc_strike"]), "CE"))
+    return list(contracts)
+
+
 def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
     """Refetches this account's live LTP across the full watched-symbol
     universe (Nifty50 constituents + this account's own portfolio
@@ -71,18 +113,23 @@ def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
     their pickers) from its connected broker, and caches the result in
     user_live_prices for Dashboard/Stock Detail to read as an override.
     Only invoked when this account's Data Provider setting is Dhan/
-    Zerodha -- see render_global_refresh_bar. Returns a small summary
-    dict for _render_live_prices_summary."""
+    Zerodha -- see render_global_refresh_bar. For Dhan specifically, also
+    widens the equity/ETF universe with every tracked ETF and refetches
+    live LTP for every F&O contract _dhan_fo_universe returns (migration
+    0032) -- Zerodha has no F&O instrument resolver yet, so its branch is
+    unchanged. Returns a small summary dict for _render_live_prices_summary."""
     connection = portfolio_repo.get_broker_connection(client, user_id, broker)
     if connection is None or not connection.access_token:
         return {"error": f"No connected {broker} account yet -- connect one in Settings' Data Provider section."}
 
-    symbols = tuple(
-        sorted(
-            {c.symbol for c in companies_repo.list_current_constituents(client)}
-            | set(portfolio_repo.list_portfolio_symbols(client, user_id))
-        )
+    equity_etf_symbols = {c.symbol for c in companies_repo.list_current_constituents(client)} | set(
+        portfolio_repo.list_portfolio_symbols(client, user_id)
     )
+    if broker == "Dhan":
+        equity_etf_symbols |= {
+            c.symbol for c in companies_repo.list_all_companies(client) if c.company_type == CompanyType.ETF
+        }
+    symbols = tuple(sorted(equity_etf_symbols))
     # A unique cache_bust per click -- this is a user-initiated "fetch
     # fresh now" action, not something that should reuse
     # load_live_*_prices' own 60s @st.cache_data TTL from an earlier,
@@ -95,7 +142,27 @@ def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
             connection.client_id, connection.api_secret, connection.access_token, symbols, cache_bust
         )
     snapshot_repo.upsert_user_live_prices(client, user_id, prices)
-    return {"broker": broker, "quoted": len(prices), "total": len(symbols)}
+
+    fo_quoted, fo_total = 0, 0
+    if broker == "Dhan":
+        contracts = _dhan_fo_universe(client, user_id)
+        fo_total = len(contracts)
+        if contracts:
+            try:
+                fo_prices = DhanProvider(
+                    client_id=connection.client_id, access_token=connection.access_token
+                ).get_fo_quotes(contracts)
+            except (DhanAuthError, ProviderError):
+                # Same "best effort, don't fail the whole refresh" stance
+                # load_live_dhan_prices takes for the equity leg -- an
+                # expired token or a transient Dhan error here shouldn't
+                # sink the stock/fundamentals/F&O-bhavcopy tasks running
+                # concurrently alongside this one.
+                fo_prices = {}
+            snapshot_repo.upsert_user_live_fo_prices(client, user_id, fo_prices)
+            fo_quoted = len(fo_prices)
+
+    return {"broker": broker, "quoted": len(prices), "total": len(symbols), "fo_quoted": fo_quoted, "fo_total": fo_total}
 
 
 def _run_all(client, user_id: str, data_provider: str) -> None:
@@ -164,8 +231,11 @@ def _render_live_prices_summary() -> None:
         return
     if summary.get("error"):
         st.error(summary["error"])
-    else:
-        st.success(f"✅ Cached live {summary['broker']} quotes for {summary['quoted']} of {summary['total']} watched symbols.")
+        return
+    message = f"✅ Cached live {summary['broker']} quotes for {summary['quoted']} of {summary['total']} watched symbols."
+    if summary.get("fo_total"):
+        message += f" Plus {summary['fo_quoted']} of {summary['fo_total']} futures/option contracts."
+    st.success(message)
 
 
 def render_global_refresh_bar(client) -> None:

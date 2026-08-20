@@ -43,9 +43,51 @@ def load_holdings(_client, _user_id: str, _cache_bust: int):
     return portfolio_repo.list_holdings(_client, _user_id)
 
 
+def _fo_contract_key(p) -> tuple[str, date, float, str] | None:
+    """This position leg's (symbol, expiry_date, strike_price,
+    option_type) natural key, matching user_live_prices' F&O rows
+    (migration 0032) -- None for a future/option that isn't fully
+    resolved (a still-undecoded leg with option_type/strike_price only
+    partially set) or a plain equity/ETF holding (no expiry_date at
+    all)."""
+    if not p.symbol or p.expiry_date is None:
+        return None
+    if p.option_type is not None and p.strike_price is not None:
+        return (p.symbol, p.expiry_date, float(p.strike_price), p.option_type.value)
+    if p.option_type is None and p.strike_price is None:
+        return (p.symbol, p.expiry_date, 0.0, "FUT")
+    return None
+
+
+def _apply_live_fo_prices(client, user_id: str, positions: list) -> list:
+    """Overrides each F&O position leg's `ltp` with this account's own
+    cached live Dhan quote (user_live_prices, migration 0032) when one
+    exists -- same live-beats-EOD preference load_live_broker_prices
+    already applies for equity LTP, just per-contract instead of
+    per-symbol. Also clears `ltp_as_of` on a live hit -- a live price is
+    never "stale", same rule the equity override already follows on
+    Dashboard/Stock Detail. Doesn't need to branch on the account's Data
+    Provider setting: only Dhan writes F&O rows here today (Zerodha has
+    no F&O instrument resolver yet), so a lookup simply returns nothing
+    for every contract when it hasn't."""
+    keys = [key for p in positions if (key := _fo_contract_key(p)) is not None]
+    if not keys:
+        return positions
+    live = snapshot_repo.get_user_live_fo_prices(client, user_id, keys)
+    if not live:
+        return positions
+    return [
+        p.model_copy(update={"ltp": live[key], "ltp_as_of": None})
+        if (key := _fo_contract_key(p)) in live
+        else p
+        for p in positions
+    ]
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def load_positions(_client, _user_id: str, _cache_bust: int):
-    return portfolio_repo.list_positions(_client, _user_id)
+    positions = portfolio_repo.list_positions(_client, _user_id)
+    return _apply_live_fo_prices(_client, _user_id, positions)
 
 
 @st.cache_data(ttl=60, show_spinner=False)

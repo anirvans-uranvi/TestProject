@@ -404,6 +404,16 @@ flow):
   constituents + this account's own portfolio symbols) and caches it in
   `user_live_prices` (migration `0030`) for Dashboard/Stock Detail to
   read as an override (`src/utils/refresh_bar.py::_refresh_user_live_prices`).
+  **Dhan accounts only** (migration `0032`): this same fetch also widens
+  to every tracked ETF (priced daily but not shown on the Screener table
+  itself) and refetches live LTP for every futures/option contract this
+  account's own portfolio holds, plus the exact CSP/CC option legs the
+  Dashboard's 5% CSP/5% CC columns use (`_dhan_fo_universe`,
+  `DhanProvider.get_fo_quotes`) -- not the full option chain for every
+  strike/expiry, just what the Screener and the account's own positions
+  actually reference. Zerodha has no F&O instrument-lookup mechanism in
+  this codebase yet, so a Zerodha-provider account keeps the equity-only
+  behavior above.
 
 The first three are each implemented as a **Supabase Edge Function**
 rather than in Streamlit page code -- a real fetch-and-write needs the
@@ -725,9 +735,15 @@ per-portfolio design), and it governs two things at once:
    **Market Data Refresh** button (see [On-demand refresh](#on-demand-refresh-the-refresh-bar)
    below) and read as an override over the shared, possibly-stale
    `daily_screener_snapshots` value. **Fundamentals (PEG, dividend
-   yield) and the full F&O options chain are never provider-branched** --
-   neither Dhan nor Zerodha's API exposes that data, so those always stay
-   yfinance/NSE+BSE-bhavcopy-sourced regardless of this setting.
+   yield) and the full F&O options chain (every strike/expiry on the
+   Options page) are never provider-branched** -- neither Dhan nor
+   Zerodha's API exposes that data, so those always stay yfinance/NSE+BSE-
+   bhavcopy-sourced regardless of this setting. **Dhan only** (migration
+   `0032`), Market Data Refresh separately live-prices the *specific*
+   F&O contracts that actually matter to this account: every futures/
+   option position it holds, and the Dashboard's own cached 5% CSP/5% CC
+   legs -- see [On-demand refresh](#on-demand-refresh-the-refresh-bar)
+   below.
 2. **Where your holdings/positions come from.** Picking Dhan or Zerodha
    reveals a credential form and a "Sync now" button right there in
    Settings; picking the default shows nothing further to connect.

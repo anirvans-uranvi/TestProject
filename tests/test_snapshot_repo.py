@@ -1,5 +1,6 @@
 """Tests for snapshot_repo's bulk-fetch helpers."""
 import types
+from datetime import date
 
 from src.repositories import snapshot_repo
 
@@ -125,6 +126,10 @@ class _FakeLivePricesTable:
         self._filters[column] = value
         return self
 
+    def neq(self, column, value):
+        self._filters[column] = ("neq", value)
+        return self
+
     def in_(self, column, values):
         self._filters[column] = ("in", set(values))
         return self
@@ -133,6 +138,9 @@ class _FakeLivePricesTable:
         for column, expected in self._filters.items():
             if isinstance(expected, tuple) and expected[0] == "in":
                 if row.get(column) not in expected[1]:
+                    return False
+            elif isinstance(expected, tuple) and expected[0] == "neq":
+                if row.get(column) == expected[1]:
                     return False
             elif row.get(column) != expected:
                 return False
@@ -187,4 +195,60 @@ class TestUserLivePrices:
     def test_upsert_with_no_prices_is_a_no_op(self):
         client = _FakeLivePricesClient()
         snapshot_repo.upsert_user_live_prices(client, "u1", {})
+        assert client.store == []
+
+    def test_equity_rows_are_invisible_to_the_fo_reader(self):
+        # option_type='EQ' rows and F&O rows share one table (migration
+        # 0032) -- confirms the two read paths never cross-contaminate.
+        client = _FakeLivePricesClient()
+        snapshot_repo.upsert_user_live_prices(client, "u1", {"RELIANCE": 2950.0})
+
+        contract = ("RELIANCE", date(2026, 8, 27), 3000.0, "CE")
+        assert snapshot_repo.get_user_live_fo_prices(client, "u1", [contract]) == {}
+
+
+class TestUserLiveFoPrices:
+    def test_upsert_then_get_round_trips(self):
+        client = _FakeLivePricesClient()
+        future = ("RELIANCE", date(2026, 8, 27), 0.0, "FUT")
+        call = ("SBIN", date(2026, 8, 27), 800.0, "CE")
+        snapshot_repo.upsert_user_live_fo_prices(client, "u1", {future: 2950.0, call: 12.5})
+
+        result = snapshot_repo.get_user_live_fo_prices(client, "u1", [future, call])
+
+        assert result == {future: 2950.0, call: 12.5}
+
+    def test_get_only_returns_requested_contracts_not_every_fo_row(self):
+        client = _FakeLivePricesClient()
+        wanted = ("RELIANCE", date(2026, 8, 27), 3000.0, "CE")
+        other = ("RELIANCE", date(2026, 8, 27), 2900.0, "PE")
+        snapshot_repo.upsert_user_live_fo_prices(client, "u1", {wanted: 45.5, other: 32.0})
+
+        assert snapshot_repo.get_user_live_fo_prices(client, "u1", [wanted]) == {wanted: 45.5}
+
+    def test_fo_rows_are_invisible_to_the_equity_reader(self):
+        client = _FakeLivePricesClient()
+        contract = ("RELIANCE", date(2026, 8, 27), 3000.0, "CE")
+        snapshot_repo.upsert_user_live_fo_prices(client, "u1", {contract: 45.5})
+
+        assert snapshot_repo.get_user_live_prices(client, "u1", ["RELIANCE"]) == {}
+
+    def test_upsert_replaces_only_the_given_contracts(self):
+        client = _FakeLivePricesClient()
+        put = ("RELIANCE", date(2026, 8, 27), 2900.0, "PE")
+        call = ("RELIANCE", date(2026, 8, 27), 3000.0, "CE")
+        snapshot_repo.upsert_user_live_fo_prices(client, "u1", {put: 32.0, call: 45.5})
+
+        snapshot_repo.upsert_user_live_fo_prices(client, "u1", {put: 33.0})
+
+        result = snapshot_repo.get_user_live_fo_prices(client, "u1", [put, call])
+        assert result == {put: 33.0, call: 45.5}
+
+    def test_get_with_no_contracts_returns_empty_dict_without_querying(self):
+        client = _FakeLivePricesClient()
+        assert snapshot_repo.get_user_live_fo_prices(client, "u1", []) == {}
+
+    def test_upsert_with_no_prices_is_a_no_op(self):
+        client = _FakeLivePricesClient()
+        snapshot_repo.upsert_user_live_fo_prices(client, "u1", {})
         assert client.store == []

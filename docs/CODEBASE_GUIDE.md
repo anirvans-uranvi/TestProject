@@ -705,6 +705,37 @@ separate schedule:
   reason (a truly instant on-demand path). If you change the CSP/CC
   calculation in `fo_service.py`, mirror it here too.
 
+**Live F&O override for Dhan accounts (migration `0032`)**: the cache
+above is still what's *stored* -- it stays bhavcopy-sourced, updated once
+per Market Data Refresh -- but for an account whose Data Provider is Dhan,
+the Dashboard now overlays a live premium on top of it at render time.
+`src/utils/refresh_bar.py::_dhan_fo_universe` builds the set of contracts
+worth live-pricing: every futures/option leg the account's own
+`portfolio_positions` actually holds, plus the exact CSP-strike/CC-strike
+legs `dashboard_fo_metrics` already cached (not the full chain -- there's
+no cached concept of "every strike" to widen from). `_refresh_user_live_prices`
+resolves each contract to a Dhan `security_id` (`DhanProvider.get_fo_quotes`,
+`resolve_fo_security_id` against a *second*, F&O-filtered instrument-master
+download -- `_load_fo_instrument_master`, separate from the equity-only one
+`resolve_security_id` already used) and caches the live premium in
+`user_live_prices`, widened by migration `0032` from an equity-only
+`(user_id, symbol)` table to `(user_id, symbol, expiry_date, strike_price,
+option_type)` -- `option_type='EQ'` (default) for the pre-existing equity/
+ETF rows, `'FUT'`/`'CE'`/`'PE'` for the new F&O rows, sharing one table
+rather than adding a second. `pages/1_Dashboard.py` then recomputes
+`csp_pct`/`cc_pct` from the live premium using the exact same formulas
+`fo_service.csp_5pct_for_rows`/`cc_5pct_for_rows` already document (`put_price
+/ strike * 100`, `premium / spot * 100`) -- only the premium is live, the
+cached strike/spot are left as-is. `src/utils/portfolio_page.py::load_positions`
+applies the same override to every position leg's own `ltp` (clearing
+`ltp_as_of` on a live hit, same "never stale" rule the equity override
+already follows), which is what makes My Positions/My Trades/My CSP/
+Analyse Trade all pick it up for free -- they all read positions through
+that one shared loader. Zerodha has no F&O instrument-lookup mechanism in
+this codebase at all (only a tradingsymbol *decoder* for already-known
+broker rows, `portfolio_service.parse_zerodha_option_instrument`) -- a
+Zerodha-provider account's refresh is unchanged, equity LTP only.
+
 **A real bug this caused**: `recompute_dashboard_metrics` (and its
 TypeScript port) only ever *upserted* -- `dashboard_metrics_rows` emits a
 symbol's *current* up-to-3 nearest expiries each run, but a month that

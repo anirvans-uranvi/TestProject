@@ -96,6 +96,94 @@ def resolve_security_id(symbol: str) -> str:
     return str(match.iloc[0]["security_id"])
 
 
+@lru_cache(maxsize=1)
+def _load_fo_instrument_master() -> pd.DataFrame:
+    """Download and cache the NSE-F&O slice of Dhan's instrument master --
+    the same CSV `_load_instrument_master` above already downloads for
+    equities, filtered instead to derivative rows (instrument type
+    FUTSTK/OPTSTK -- stock futures/options; index instruments (FUTIDX/
+    OPTIDX) are out of scope here, matching this app's own NSE-only
+    stock-option scope, see migration 0031).
+
+    CAUTION -- the exact column names resolved below (underlying symbol,
+    expiry, strike, option type) are taken from Dhan's community-
+    documented compact-CSV schema (SEM_* prefixed columns), not verified
+    against a live download in this codebase. Same fuzzy find_col()
+    keyword-matching `_load_instrument_master` already relies on for
+    exactly this kind of drift risk -- if resolve_fo_security_id starts
+    raising "schema unrecognized" or matching the wrong row, download a
+    real api-scrip-master.csv and check these keyword guesses first.
+    """
+    try:
+        df = pd.read_csv(INSTRUMENT_MASTER_URL, low_memory=False)
+    except Exception as exc:  # noqa: BLE001
+        raise ProviderError(f"failed to download Dhan instrument master: {exc}") from exc
+
+    def find_col(*keywords: str) -> str | None:
+        for col in df.columns:
+            upper = col.upper()
+            if all(k in upper for k in keywords):
+                return col
+        return None
+
+    sec_id_col = find_col("SECURITY", "ID")
+    exch_col = find_col("EXCH")
+    instrument_col = find_col("INSTRUMENT")
+    underlying_col = find_col("UNDERLYING") or find_col("SM_SYMBOL_NAME") or find_col("SYMBOL", "NAME")
+    expiry_col = find_col("EXPIRY", "DATE")
+    strike_col = find_col("STRIKE")
+    option_type_col = find_col("OPTION", "TYPE")
+
+    if not all([sec_id_col, exch_col, instrument_col, underlying_col, expiry_col, strike_col, option_type_col]):
+        raise ProviderError("Dhan F&O instrument master schema unrecognized; update column resolution")
+
+    df = df.rename(
+        columns={
+            sec_id_col: "security_id",
+            underlying_col: "underlying_symbol",
+            expiry_col: "expiry_date",
+            strike_col: "strike_price",
+            option_type_col: "option_type",
+        }
+    )
+    df = df[df[exch_col].astype(str).str.upper().str.contains("NSE", na=False)]
+    df = df[df[instrument_col].astype(str).str.upper().isin(["FUTSTK", "OPTSTK"])]
+    df["expiry_date"] = pd.to_datetime(df["expiry_date"], errors="coerce").dt.date
+    df["strike_price"] = pd.to_numeric(df["strike_price"], errors="coerce").fillna(0.0)
+    # A future's raw option_type is blank/None/some Dhan placeholder
+    # ("XX" seen in other brokers' feeds) rather than a consistent single
+    # sentinel -- normalize by allow-list instead of trying to enumerate
+    # every possible "missing" representation: anything that isn't
+    # exactly CE/PE becomes 'FUT'.
+    option_type = df["option_type"].astype(str).str.upper().str.strip()
+    df["option_type"] = option_type.where(option_type.isin(["CE", "PE"]), "FUT")
+    return df[["security_id", "underlying_symbol", "expiry_date", "strike_price", "option_type"]]
+
+
+def resolve_fo_security_id(symbol: str, expiry_date: date, strike_price: float, option_type: str) -> str:
+    """Resolves one F&O contract (underlying + expiry + strike + right)
+    to its Dhan security_id -- the derivatives counterpart of
+    resolve_security_id above. `option_type='FUT'` matches a futures
+    contract (`strike_price` is ignored, a future has none); `'CE'`/`'PE'`
+    matches an option at that exact strike. Same natural key
+    (symbol, expiry_date, strike_price, option_type) this app already
+    uses for option_contracts (migration 0007) and user_live_prices'
+    F&O rows (migration 0032)."""
+    master = _load_fo_instrument_master()
+    match = master[
+        (master["underlying_symbol"].astype(str).str.upper() == symbol.upper())
+        & (master["expiry_date"] == expiry_date)
+        & (master["option_type"] == option_type)
+    ]
+    if option_type != "FUT":
+        match = match[(match["strike_price"] - strike_price).abs() < 0.01]
+    if match.empty:
+        raise ProviderError(
+            f"no Dhan security_id found for {symbol!r} {expiry_date} {option_type} {strike_price!r}"
+        )
+    return str(match.iloc[0]["security_id"])
+
+
 class DhanProvider(PriceDataProvider):
     name = "dhan"
 
@@ -249,3 +337,35 @@ class DhanProvider(PriceDataProvider):
             for sec_id, entry in segment_data.items():
                 result[str(sec_id)] = entry["last_price"]
         return result
+
+    def get_fo_quotes(self, contracts: list[tuple[str, date, float, str]]) -> dict[tuple[str, date, float, str], float]:
+        """Live LTP for a batch of futures/option contracts -- each a
+        (symbol, expiry_date, strike_price, option_type) tuple, same
+        natural key user_live_prices' F&O rows use (migration 0032).
+        `option_type='FUT'` for a futures contract, 'CE'/'PE' for an
+        option (`strike_price` is ignored for a future, still present in
+        the key for a uniform shape). Resolves each contract to a Dhan
+        security_id via resolve_fo_security_id and batches them all into
+        one get_ltp_by_security_id call (single NSE_FNO POST, same
+        multi-instrument batching get_quotes already relies on for
+        equities). A contract Dhan's F&O master doesn't resolve (an
+        expired/delisted strike, an index leg, a schema-drift miss) is
+        silently skipped rather than aborting the whole batch -- this
+        feeds a best-effort live-price overlay (Dashboard CSP/CC,
+        portfolio positions), not an all-or-nothing fetch."""
+        if not contracts:
+            return {}
+        security_id_to_contract: dict[str, tuple[str, date, float, str]] = {}
+        for contract in contracts:
+            symbol, expiry_date, strike_price, option_type = contract
+            try:
+                security_id = resolve_fo_security_id(symbol, expiry_date, strike_price, option_type)
+            except ProviderError:
+                continue
+            security_id_to_contract[security_id] = contract
+        prices_by_security_id = self.get_ltp_by_security_id({"NSE_FNO": list(security_id_to_contract)})
+        return {
+            contract: prices_by_security_id[security_id]
+            for security_id, contract in security_id_to_contract.items()
+            if security_id in prices_by_security_id
+        }

@@ -94,6 +94,7 @@ def get_user_live_prices(client: Client, user_id: str, symbols: list[str]) -> di
         client.table("user_live_prices")
         .select("symbol, latest_price")
         .eq("user_id", user_id)
+        .eq("option_type", "EQ")
         .in_("symbol", symbols)
         .execute()
     )
@@ -107,12 +108,92 @@ def upsert_user_live_prices(client: Client, user_id: str, prices: dict[str, floa
     replace_broker_holdings) rather than a partial per-row upsert. Symbols
     not in `prices` (this account's provider didn't quote them this time)
     are left untouched, not cleared -- a transient miss shouldn't erase a
-    still-good previous value."""
+    still-good previous value. Writes `option_type='EQ'` rows only -- see
+    get_user_live_fo_prices/upsert_user_live_fo_prices below for the
+    futures/options counterpart (migration 0032)."""
     if not prices:
         return
-    client.table("user_live_prices").delete().eq("user_id", user_id).in_("symbol", list(prices)).execute()
+    client.table("user_live_prices").delete().eq("user_id", user_id).eq("option_type", "EQ").in_(
+        "symbol", list(prices)
+    ).execute()
     payload = [
-        {"user_id": user_id, "symbol": symbol, "latest_price": price} for symbol, price in prices.items()
+        {"user_id": user_id, "symbol": symbol, "latest_price": price, "option_type": "EQ"}
+        for symbol, price in prices.items()
+    ]
+    client.table("user_live_prices").insert(payload).execute()
+
+
+# A futures/option contract identity -- (symbol, expiry_date, strike_price,
+# option_type), option_type one of 'FUT'/'CE'/'PE'. strike_price is
+# meaningless for a future (sentinel 0, matching migration 0032's DB
+# default) but always present here for a uniform key shape.
+FOContractKey = tuple[str, date, float, str]
+
+
+def get_user_live_fo_prices(client: Client, user_id: str, contracts: list[FOContractKey]) -> dict[FOContractKey, float]:
+    """This account's own cached live F&O LTP (user_live_prices,
+    migration 0032) for the given contracts -- the futures/options
+    counterpart of get_user_live_prices above. Written by "Market Data
+    Refresh" only for a Dhan-provider account (src/utils/refresh_bar.py,
+    src/data_providers/dhan_provider.py's get_fo_quotes) -- Zerodha has no
+    F&O instrument resolver yet, so a Zerodha-provider account simply
+    never has rows here. Callers merge this over whatever EOD/broker-sync
+    LTP they already have, same {**shared, **live} pattern
+    get_user_live_prices' own callers use."""
+    if not contracts:
+        return {}
+    symbols = sorted({c[0] for c in contracts})
+    resp = (
+        client.table("user_live_prices")
+        .select("symbol, expiry_date, strike_price, option_type, latest_price")
+        .eq("user_id", user_id)
+        .neq("option_type", "EQ")
+        .in_("symbol", symbols)
+        .execute()
+    )
+    wanted = set(contracts)
+    result: dict[FOContractKey, float] = {}
+    for row in resp.data or []:
+        key: FOContractKey = (
+            row["symbol"],
+            date.fromisoformat(row["expiry_date"]) if isinstance(row["expiry_date"], str) else row["expiry_date"],
+            float(row["strike_price"]),
+            row["option_type"],
+        )
+        if key in wanted:
+            result[key] = float(row["latest_price"])
+    return result
+
+
+def upsert_user_live_fo_prices(client: Client, user_id: str, prices: dict[FOContractKey, float]) -> None:
+    """Replaces this account's cached live F&O LTP for exactly the given
+    contracts -- same delete-then-insert "replace" convention as
+    upsert_user_live_prices, scoped to option_type != 'EQ' rows only so
+    the two functions never touch each other's rows even though they
+    share one table."""
+    if not prices:
+        return
+    for (symbol, expiry_date, strike_price, option_type), price in prices.items():
+        (
+            client.table("user_live_prices")
+            .delete()
+            .eq("user_id", user_id)
+            .eq("symbol", symbol)
+            .eq("expiry_date", expiry_date.isoformat())
+            .eq("strike_price", strike_price)
+            .eq("option_type", option_type)
+            .execute()
+        )
+    payload = [
+        {
+            "user_id": user_id,
+            "symbol": symbol,
+            "expiry_date": expiry_date.isoformat(),
+            "strike_price": strike_price,
+            "option_type": option_type,
+            "latest_price": price,
+        }
+        for (symbol, expiry_date, strike_price, option_type), price in prices.items()
     ]
     client.table("user_live_prices").insert(payload).execute()
 

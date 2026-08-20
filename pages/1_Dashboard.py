@@ -370,8 +370,52 @@ metrics_by_symbol = (
     if selected_month is not None
     else {}
 )
-filtered["csp_5pct"] = filtered["symbol"].map(lambda s: (metrics_by_symbol.get(s) or {}).get("csp_pct"))
-filtered["cc_5pct"] = filtered["symbol"].map(lambda s: (metrics_by_symbol.get(s) or {}).get("cc_pct"))
+
+# ---------------------------------------------------------------------
+# Live F&O override (Dhan only, migration 0032) -- "Market Data Refresh"
+# also live-prices the exact CSP/CC legs cached above for a Dhan-provider
+# account (see src/utils/refresh_bar.py's _dhan_fo_universe); recompute
+# csp_pct/cc_pct from the live premium using the same formulas
+# fo_service.csp_5pct_for_rows/cc_5pct_for_rows already document
+# (csp_pct = put_price / strike * 100, cc_pct = premium / spot * 100) --
+# only the premium itself is live, the cached strike/spot are unchanged.
+# ---------------------------------------------------------------------
+live_fo_premiums: dict = {}
+if user_settings.data_provider == "dhan" and metrics_by_symbol:
+    fo_contracts = []
+    for m in metrics_by_symbol.values():
+        expiry = date.fromisoformat(m["expiry_date"])
+        if m.get("csp_strike") is not None:
+            fo_contracts.append((m["symbol"], expiry, float(m["csp_strike"]), "PE"))
+        if m.get("cc_strike") is not None:
+            fo_contracts.append((m["symbol"], expiry, float(m["cc_strike"]), "CE"))
+    live_fo_premiums = snapshot_repo.get_user_live_fo_prices(client, user_id, fo_contracts)
+
+
+def _csp_pct(symbol: str) -> float | None:
+    m = metrics_by_symbol.get(symbol)
+    if not m or m.get("csp_strike") is None:
+        return (m or {}).get("csp_pct")
+    key = (symbol, date.fromisoformat(m["expiry_date"]), float(m["csp_strike"]), "PE")
+    live_price = live_fo_premiums.get(key)
+    if live_price is not None:
+        return live_price / m["csp_strike"] * 100
+    return m.get("csp_pct")
+
+
+def _cc_pct(symbol: str) -> float | None:
+    m = metrics_by_symbol.get(symbol)
+    if not m or m.get("cc_strike") is None:
+        return (m or {}).get("cc_pct")
+    key = (symbol, date.fromisoformat(m["expiry_date"]), float(m["cc_strike"]), "CE")
+    live_price = live_fo_premiums.get(key)
+    if live_price is not None and m.get("spot"):
+        return live_price / m["spot"] * 100
+    return m.get("cc_pct")
+
+
+filtered["csp_5pct"] = filtered["symbol"].map(_csp_pct)
+filtered["cc_5pct"] = filtered["symbol"].map(_cc_pct)
 
 filtered = filtered.sort_values("symbol", ascending=True, na_position="last")
 
