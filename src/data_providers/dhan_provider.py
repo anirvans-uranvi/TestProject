@@ -53,6 +53,21 @@ def _load_instrument_master() -> pd.DataFrame:
 
     Column names in Dhan's compact CSV have varied across releases, so we
     resolve them by fuzzy match instead of hardcoding exact headers.
+
+    The equity filter used to test whether the SEGMENT column *contained*
+    "EQ" -- confirmed live to be wrong: a real download's segment column
+    (`SEM_SEGMENT`) holds a single letter per asset class ('E' for
+    equity, 'D' for derivatives, 'C' for currency, ...), never the
+    two-letter substring "EQ" the old filter looked for, so it matched
+    *zero* rows and silently broke every equity resolution -- get_quotes
+    then returned {} for a whole batch with no exception at all (nothing
+    to catch: an *empty* instrument master isn't a download/parse
+    failure, just a completely unmatched filter). "EQ" does appear
+    elsewhere in a real row (`SEM_SERIES`), which is what makes this kind
+    of near-miss so easy to not notice without a live download. Filters
+    on the instrument-type column instead (`SEM_INSTRUMENT_NAME ==
+    'EQUITY'`), the same exact-match-on-instrument-type approach
+    `_load_fo_instrument_master` already uses for FUTSTK/OPTSTK.
     """
     try:
         df = pd.read_csv(INSTRUMENT_MASTER_URL, low_memory=False)
@@ -69,7 +84,7 @@ def _load_instrument_master() -> pd.DataFrame:
     sec_id_col = find_col("SECURITY", "ID")
     symbol_col = find_col("TRADING", "SYMBOL") or find_col("SYMBOL")
     exch_col = find_col("EXCH")
-    segment_col = find_col("SEGMENT") or find_col("INSTRUMENT")
+    instrument_col = find_col("INSTRUMENT", "NAME")
 
     if not all([sec_id_col, symbol_col]):
         raise ProviderError("Dhan instrument master schema unrecognized; update column resolution")
@@ -77,8 +92,13 @@ def _load_instrument_master() -> pd.DataFrame:
     df = df.rename(columns={sec_id_col: "security_id", symbol_col: "trading_symbol"})
     if exch_col:
         df = df[df[exch_col].astype(str).str.upper().str.contains("NSE", na=False)]
-    if segment_col:
-        df = df[df[segment_col].astype(str).str.upper().str.contains("EQ", na=False)]
+    if instrument_col:
+        df = df[df[instrument_col].astype(str).str.upper() == "EQUITY"]
+    if df.empty:
+        raise ProviderError(
+            "Dhan instrument master matched zero NSE equity rows -- exchange/instrument-type column "
+            "resolution is likely wrong for this download; update column resolution"
+        )
     return df[["security_id", "trading_symbol"]].drop_duplicates("trading_symbol")
 
 
@@ -176,6 +196,11 @@ def _load_fo_instrument_master() -> pd.DataFrame:
     df["underlying_symbol"] = [
         _underlying_from_trading_symbol(ts, ot) for ts, ot in zip(df["trading_symbol"], df["option_type"])
     ]
+    if df.empty:
+        raise ProviderError(
+            "Dhan F&O instrument master matched zero NSE FUTSTK/OPTSTK rows -- exchange/instrument-type "
+            "column resolution is likely wrong for this download; update column resolution"
+        )
     return df[["security_id", "underlying_symbol", "expiry_date", "strike_price", "option_type"]]
 
 
@@ -293,6 +318,19 @@ class DhanProvider(PriceDataProvider):
         return self.get_quotes([symbol])[symbol]
 
     def get_quotes(self, symbols: list[str]) -> dict[str, Quote]:
+        # Loads (and lets a systemic failure from) the instrument master
+        # propagate BEFORE the per-symbol loop below -- confirmed live as
+        # its own separate bug: _load_instrument_master's equity filter
+        # used to match zero rows (see its docstring), and because
+        # @lru_cache never caches a raised exception, every one of the 60+
+        # symbols in the loop below re-triggered a fresh failing download
+        # attempt and got silently caught by the per-symbol `except
+        # ProviderError: continue` -- so a total, systemic resolution
+        # failure looked identical to "just didn't resolve", and got
+        # swallowed into an empty result with no error at all, not even
+        # the DhanAuthError/ProviderError _refresh_user_live_prices knows
+        # how to surface.
+        _load_instrument_master()
         # A symbol resolve_security_id can't find (an ETF/fund Dhan's
         # equity instrument master doesn't carry, a renamed/delisted
         # ticker) is skipped rather than aborting the whole batch --
@@ -390,6 +428,15 @@ class DhanProvider(PriceDataProvider):
         portfolio positions), not an all-or-nothing fetch."""
         if not contracts:
             return {}
+        # Loads (and lets a systemic failure propagate from) the F&O
+        # instrument master BEFORE the per-contract loop below -- same
+        # fix as get_quotes' own equivalent call, and for the same
+        # reason: @lru_cache never caches a raised exception, so a
+        # systemic failure would otherwise re-trigger on every single
+        # contract in the loop and get silently caught by the
+        # per-contract `except ProviderError: continue`, indistinguishable
+        # from "just didn't resolve".
+        _load_fo_instrument_master()
         security_id_to_contract: dict[str, tuple[str, date, float, str]] = {}
         for contract in contracts:
             symbol, expiry_date, strike_price, option_type = contract

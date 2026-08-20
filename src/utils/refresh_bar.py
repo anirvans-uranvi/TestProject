@@ -168,7 +168,7 @@ def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
         )
     snapshot_repo.upsert_user_live_prices(client, user_id, prices)
 
-    fo_quoted, fo_total = 0, 0
+    fo_quoted, fo_total, fo_error = 0, 0, None
     if broker == "Dhan":
         contracts = _dhan_fo_universe(client, user_id)
         fo_total = len(contracts)
@@ -177,17 +177,26 @@ def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
                 fo_prices = DhanProvider(
                     client_id=connection.client_id, access_token=connection.access_token
                 ).get_fo_quotes(contracts)
-            except (DhanAuthError, ProviderError):
-                # Same "best effort, don't fail the whole refresh" stance
-                # load_live_dhan_prices takes for the equity leg -- an
-                # expired token or a transient Dhan error here shouldn't
-                # sink the stock/fundamentals/F&O-bhavcopy tasks running
-                # concurrently alongside this one.
+            except (DhanAuthError, ProviderError) as exc:
+                # Best-effort, not fatal to the whole refresh -- the
+                # equity leg above already succeeded and shouldn't be
+                # discarded over an F&O-only failure -- but still
+                # surfaced (not silently swallowed into "0 of N" with no
+                # explanation, the exact bug that made the equity leg's
+                # own real failure undiagnosable before this).
                 fo_prices = {}
+                fo_error = str(exc)
             snapshot_repo.upsert_user_live_fo_prices(client, user_id, fo_prices)
             fo_quoted = len(fo_prices)
 
-    return {"broker": broker, "quoted": len(prices), "total": len(symbols), "fo_quoted": fo_quoted, "fo_total": fo_total}
+    return {
+        "broker": broker,
+        "quoted": len(prices),
+        "total": len(symbols),
+        "fo_quoted": fo_quoted,
+        "fo_total": fo_total,
+        "fo_error": fo_error,
+    }
 
 
 def _run_all(client, user_id: str, data_provider: str) -> None:
@@ -261,6 +270,8 @@ def _render_live_prices_summary() -> None:
     if summary.get("fo_total"):
         message += f" Plus {summary['fo_quoted']} of {summary['fo_total']} futures/option contracts."
     st.success(message)
+    if summary.get("fo_error"):
+        st.warning(f"Futures/option live pricing failed: {summary['fo_error']}")
 
 
 def render_global_refresh_bar(client) -> None:

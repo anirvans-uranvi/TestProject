@@ -78,13 +78,25 @@ class TestGetHoldings:
         assert not isinstance(exc_info.value, DhanAuthError)
 
 
+# Shaped like a real download (confirmed live against
+# https://images.dhan.co/api-data/api-scrip-master.csv): SEM_SEGMENT is
+# a single letter ('E' for equity, not "EQ" -- see _load_instrument_master's
+# docstring for the real bug this caused), the instrument-type column
+# (SEM_INSTRUMENT_NAME) is what actually says "EQUITY".
 _EQUITY_MASTER_FIXTURE = pd.DataFrame(
     [
-        {"SECURITY_ID": "1001", "TRADING_SYMBOL": "RELIANCE", "EXCH": "NSE", "SEGMENT": "EQ"},
-        {"SECURITY_ID": "1002", "TRADING_SYMBOL": "TCS", "EXCH": "NSE", "SEGMENT": "EQ"},
+        {"SEM_SMST_SECURITY_ID": "1001", "SEM_TRADING_SYMBOL": "RELIANCE", "SEM_EXM_EXCH_ID": "NSE", "SEM_SEGMENT": "E", "SEM_INSTRUMENT_NAME": "EQUITY"},
+        {"SEM_SMST_SECURITY_ID": "1002", "SEM_TRADING_SYMBOL": "TCS", "SEM_EXM_EXCH_ID": "NSE", "SEM_SEGMENT": "E", "SEM_INSTRUMENT_NAME": "EQUITY"},
+        # A derivatives-segment row sharing NSE -- must be excluded by
+        # the instrument-type filter, not just the exchange one.
+        {"SEM_SMST_SECURITY_ID": "1003", "SEM_TRADING_SYMBOL": "RELIANCE-Aug2026-FUT", "SEM_EXM_EXCH_ID": "NSE", "SEM_SEGMENT": "D", "SEM_INSTRUMENT_NAME": "FUTSTK"},
         # No row for "BADETF" -- simulates a tracked symbol Dhan's equity
         # instrument master doesn't carry.
     ]
+)
+
+_EMPTY_MASTER_FIXTURE = pd.DataFrame(
+    columns=["SEM_SMST_SECURITY_ID", "SEM_TRADING_SYMBOL", "SEM_EXM_EXCH_ID", "SEM_SEGMENT", "SEM_INSTRUMENT_NAME"]
 )
 
 
@@ -129,6 +141,41 @@ class TestGetQuotes:
         provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
 
         assert provider.get_quotes(["BADETF1", "BADETF2"]) == {}
+        dhan_provider._load_instrument_master.cache_clear()
+
+    def test_instrument_master_matching_zero_rows_raises_instead_of_looking_like_no_symbols_resolved(self, monkeypatch):
+        # Regression: _load_instrument_master's equity filter used to
+        # silently match zero rows against a real download (see its
+        # docstring) -- confirms that's a loud ProviderError now, not a
+        # quietly empty master indistinguishable from "these particular
+        # symbols don't exist".
+        dhan_provider._load_instrument_master.cache_clear()
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _EMPTY_MASTER_FIXTURE)
+
+        with pytest.raises(ProviderError, match="zero"):
+            dhan_provider._load_instrument_master()
+        dhan_provider._load_instrument_master.cache_clear()
+
+    def test_systemic_instrument_master_failure_propagates_not_swallowed_per_symbol(self, monkeypatch):
+        # Regression: get_quotes used to call resolve_security_id (and
+        # therefore _load_instrument_master) inside the per-symbol
+        # try/except ProviderError loop -- since @lru_cache never caches
+        # a raised exception, a systemic failure (download error, or the
+        # zero-rows case above) re-triggered on every symbol and got
+        # silently caught there too, indistinguishable from "just didn't
+        # resolve". get_quotes now loads the master once, up front,
+        # outside that loop, so this propagates as a real exception.
+        dhan_provider._load_instrument_master.cache_clear()
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _EMPTY_MASTER_FIXTURE)
+
+        def fake_post(*args, **kwargs):
+            raise AssertionError("should never reach the network call")
+
+        monkeypatch.setattr(httpx, "post", fake_post)
+        provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
+
+        with pytest.raises(ProviderError, match="zero"):
+            provider.get_quotes(["SBIN", "TCS", "RELIANCE"])
         dhan_provider._load_instrument_master.cache_clear()
 
 
@@ -284,6 +331,18 @@ class TestLoadFoInstrumentMaster:
 
         assert master[master["security_id"] == "50004"].iloc[0]["underlying_symbol"] == "NAM-INDIA"
 
+    def test_matching_zero_rows_raises_instead_of_returning_an_unusable_empty_master(self, monkeypatch):
+        empty = pd.DataFrame(
+            columns=[
+                "SEM_SMST_SECURITY_ID", "SEM_EXM_EXCH_ID", "SEM_INSTRUMENT_NAME", "SEM_TRADING_SYMBOL",
+                "SEM_EXPIRY_DATE", "SEM_STRIKE_PRICE", "SEM_OPTION_TYPE",
+            ]
+        )
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: empty)
+
+        with pytest.raises(ProviderError, match="zero"):
+            dhan_provider._load_fo_instrument_master()
+
 
 class TestResolveFoSecurityId:
     def test_resolves_future(self, monkeypatch):
@@ -374,3 +433,25 @@ class TestGetFoQuotes:
         provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
 
         assert provider.get_fo_quotes([]) == {}
+
+    def test_systemic_instrument_master_failure_propagates_not_swallowed_per_contract(self, monkeypatch):
+        # Same fix as get_quotes' equivalent test -- the F&O master is
+        # now loaded once, up front, outside the per-contract try/except,
+        # so a systemic failure (e.g. the zero-rows case) is a real
+        # exception instead of silently skipping every contract.
+        empty = pd.DataFrame(
+            columns=[
+                "SEM_SMST_SECURITY_ID", "SEM_EXM_EXCH_ID", "SEM_INSTRUMENT_NAME", "SEM_TRADING_SYMBOL",
+                "SEM_EXPIRY_DATE", "SEM_STRIKE_PRICE", "SEM_OPTION_TYPE",
+            ]
+        )
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: empty)
+
+        def fake_request(*args, **kwargs):
+            raise AssertionError("should never reach the network call")
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
+
+        with pytest.raises(ProviderError, match="zero"):
+            provider.get_fo_quotes([("RELIANCE", date(2026, 8, 27), 3000.0, "CE")])
