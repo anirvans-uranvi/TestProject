@@ -49,7 +49,7 @@ from src.data_providers.dhan_provider import DhanAuthError, DhanProvider
 from src.models.enums import CompanyType
 from src.repositories import companies_repo, fetch_log_repo, fo_repo, portfolio_repo, settings_repo, snapshot_repo
 from src.services import edge_refresh
-from src.utils.portfolio_page import load_live_dhan_prices, load_live_zerodha_prices
+from src.utils.portfolio_page import load_live_zerodha_prices
 from src.utils.session import current_user_id
 from src.utils.timezones import format_ist
 
@@ -132,11 +132,36 @@ def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
     symbols = tuple(sorted(equity_etf_symbols))
     # A unique cache_bust per click -- this is a user-initiated "fetch
     # fresh now" action, not something that should reuse
-    # load_live_*_prices' own 60s @st.cache_data TTL from an earlier,
-    # possibly-stale call.
+    # load_live_zerodha_prices' own 60s @st.cache_data TTL from an
+    # earlier, possibly-stale call.
     cache_bust = time.time()
     if broker == "Dhan":
-        prices = load_live_dhan_prices(connection.client_id, connection.access_token, symbols, cache_bust)
+        # Calls DhanProvider directly rather than going through
+        # load_live_dhan_prices (which swallows DhanAuthError/
+        # ProviderError into a silent {}) -- confirmed live: that made a
+        # real failure (an expired token, or a Dhan account missing the
+        # separate paid "Data APIs" subscription market quotes require --
+        # see portfolio_service.apply_fallback_option_ltp's docstring for
+        # the same 401 already seen on the positions-sync path)
+        # indistinguishable from "nothing to quote", showing a misleading
+        # green "0 of N" instead of a real error. No caching benefit lost
+        # here either way -- the fresh cache_bust above already busts
+        # load_live_dhan_prices' own cache on every call.
+        try:
+            quotes = DhanProvider(client_id=connection.client_id, access_token=connection.access_token).get_quotes(
+                list(symbols)
+            )
+        except DhanAuthError as exc:
+            return {
+                "error": (
+                    f"Dhan rejected the access token (401): {exc}. Reconnect in Settings' Data Provider section, "
+                    'or confirm this Dhan account has the separate paid "Data APIs" subscription -- live market '
+                    "quotes need it even though holdings/positions sync doesn't."
+                )
+            }
+        except ProviderError as exc:
+            return {"error": f"Dhan live-price fetch failed: {exc}"}
+        prices = {symbol: quote.latest_price for symbol, quote in quotes.items()}
     else:
         prices = load_live_zerodha_prices(
             connection.client_id, connection.api_secret, connection.access_token, symbols, cache_bust
