@@ -109,7 +109,7 @@ class TestRefreshUserLivePrices:
         assert captured["access_token"] == "TOKEN1"
         assert set(captured["symbols"]) == {"SBIN", "TCS", "JIOFIN"}  # union, no duplicates
         assert upsert_calls == [{"SBIN": 811.9, "TCS": 4100.0}]
-        assert result == {"broker": "Dhan", "quoted": 2, "total": 3, "fo_quoted": 0, "fo_total": 0, "fo_error": None}
+        assert result == {"broker": "Dhan", "quoted": 2, "total": 3, "fo_quoted": 0, "fo_total": 0, "fo_error": None, "fo_missing": []}
 
     def test_dhan_widens_the_equity_universe_with_every_tracked_etf(self, monkeypatch):
         connection = BrokerConnection(user_id="u1", broker="Dhan", client_id="CID1", access_token="TOKEN1")
@@ -203,6 +203,24 @@ class TestRefreshUserLivePrices:
         assert result["fo_total"] == 3
         assert fo_upsert_calls == [{}]
 
+    def test_partial_fo_miss_is_named_not_just_counted(self, monkeypatch):
+        connection = BrokerConnection(user_id="u1", broker="Dhan", client_id="CID1", access_token="TOKEN1")
+        monkeypatch.setattr(refresh_bar.portfolio_repo, "get_broker_connection", lambda client, user_id, broker: connection)
+        position = PortfolioPosition(
+            user_id="u1", portfolio_name="My Portfolio", broker="Dhan", raw_name="RELIANCE FUT",
+            symbol="RELIANCE", expiry_date=date(2026, 8, 27), qty=1, avg_price=2900.0,
+        )
+        _patch_universe(monkeypatch, constituents=(), portfolio_symbols=(), positions=[position])
+        # Dhan quotes the RELIANCE future but the fake never resolves it
+        # (fo_quotes stays empty) -- simulates a real partial miss.
+        _patch_dhan_provider(monkeypatch, fo_quotes={})
+        monkeypatch.setattr(refresh_bar.snapshot_repo, "upsert_user_live_prices", lambda *a, **k: None)
+        monkeypatch.setattr(refresh_bar.snapshot_repo, "upsert_user_live_fo_prices", lambda *a, **k: None)
+
+        result = refresh_bar._refresh_user_live_prices(client=object(), user_id="u1", broker="Dhan")
+
+        assert result["fo_missing"] == [("RELIANCE", date(2026, 8, 27), 0.0, "FUT")]
+
     def test_dhan_fo_auth_error_does_not_fail_the_equity_leg(self, monkeypatch):
         # Equity quotes already succeeded and got cached -- a *separate*
         # F&O-only failure (e.g. the F&O instrument master 401ing on its
@@ -256,7 +274,7 @@ class TestRefreshUserLivePrices:
         result = refresh_bar._refresh_user_live_prices(client=object(), user_id="u1", broker="Zerodha")
 
         assert captured == {"api_key": "KEY1", "api_secret": "SECRET1", "access_token": "TOKEN1"}
-        assert result == {"broker": "Zerodha", "quoted": 1, "total": 1, "fo_quoted": 0, "fo_total": 0, "fo_error": None}
+        assert result == {"broker": "Zerodha", "quoted": 1, "total": 1, "fo_quoted": 0, "fo_total": 0, "fo_error": None, "fo_missing": []}
 
     def test_no_symbols_quoted_still_upserts_the_empty_dict(self, monkeypatch):
         # upsert_user_live_prices itself no-ops on an empty dict (see
@@ -274,4 +292,4 @@ class TestRefreshUserLivePrices:
         result = refresh_bar._refresh_user_live_prices(client=object(), user_id="u1", broker="Dhan")
 
         assert upsert_calls == [{}]
-        assert result == {"broker": "Dhan", "quoted": 0, "total": 1, "fo_quoted": 0, "fo_total": 0, "fo_error": None}
+        assert result == {"broker": "Dhan", "quoted": 0, "total": 1, "fo_quoted": 0, "fo_total": 0, "fo_error": None, "fo_missing": []}

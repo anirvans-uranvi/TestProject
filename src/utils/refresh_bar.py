@@ -168,7 +168,7 @@ def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
         )
     snapshot_repo.upsert_user_live_prices(client, user_id, prices)
 
-    fo_quoted, fo_total, fo_error = 0, 0, None
+    fo_quoted, fo_total, fo_error, fo_missing = 0, 0, None, []
     if broker == "Dhan":
         contracts = _dhan_fo_universe(client, user_id)
         fo_total = len(contracts)
@@ -188,6 +188,11 @@ def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
                 fo_error = str(exc)
             snapshot_repo.upsert_user_live_fo_prices(client, user_id, fo_prices)
             fo_quoted = len(fo_prices)
+            # A partial miss (some, not all, contracts quoted) is still
+            # worth naming -- same "don't just say N failed, say WHICH
+            # ones" convention _render_stock_summary's symbolsFailed
+            # already follows for the equity/fundamentals refresh.
+            fo_missing = [c for c in contracts if c not in fo_prices]
 
     return {
         "broker": broker,
@@ -196,6 +201,7 @@ def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
         "fo_quoted": fo_quoted,
         "fo_total": fo_total,
         "fo_error": fo_error,
+        "fo_missing": fo_missing,
     }
 
 
@@ -259,6 +265,14 @@ def _render_fo_summary(key: str, exchange_label: str) -> None:
         st.info(summary.get("message", f"{exchange_label} F&O data is already up to date."))
 
 
+def _fmt_fo_contract(contract: tuple) -> str:
+    symbol, expiry_date, strike_price, option_type = contract
+    expiry = expiry_date.strftime("%d-%b-%y") if hasattr(expiry_date, "strftime") else str(expiry_date)
+    if option_type == "FUT":
+        return f"{symbol} {expiry} FUT"
+    return f"{symbol} {expiry} {strike_price:g} {option_type}"
+
+
 def _render_live_prices_summary() -> None:
     summary = st.session_state.pop("_refresh_bar_live_prices", None)
     if not summary:
@@ -272,6 +286,14 @@ def _render_live_prices_summary() -> None:
     st.success(message)
     if summary.get("fo_error"):
         st.warning(f"Futures/option live pricing failed: {summary['fo_error']}")
+    elif summary.get("fo_missing"):
+        # Capped at 20 -- a partial miss is worth naming (which
+        # contracts, not just how many), but a truly large list would
+        # just be noise in a one-line caption.
+        shown = summary["fo_missing"][:20]
+        names = ", ".join(_fmt_fo_contract(c) for c in shown)
+        suffix = f", +{len(summary['fo_missing']) - 20} more" if len(summary["fo_missing"]) > 20 else ""
+        st.caption(f"Not live-priced (Dhan has no matching contract, or it's simply not trading): {names}{suffix}")
 
 
 def render_global_refresh_bar(client) -> None:
