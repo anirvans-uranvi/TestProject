@@ -266,7 +266,8 @@ _FO_MASTER_FIXTURE = pd.DataFrame(
             "SEM_STRIKE_PRICE": 720.0,
             "SEM_OPTION_TYPE": "CE",
         },
-        # Same underlying/expiry/strike on BSE -- must be excluded (NSE-only).
+        # Same underlying/expiry/strike on BSE -- must be excluded: stock
+        # legs stay NSE-only even now that index legs are cross-exchange.
         {
             "SEM_SMST_SECURITY_ID": "99999",
             "SEM_EXM_EXCH_ID": "BSE",
@@ -276,7 +277,8 @@ _FO_MASTER_FIXTURE = pd.DataFrame(
             "SEM_STRIKE_PRICE": 2900.0,
             "SEM_OPTION_TYPE": "PE",
         },
-        # A plain equity row -- must be excluded (FUTSTK/OPTSTK only).
+        # A plain equity row -- must be excluded (derivative instrument
+        # types only).
         {
             "SEM_SMST_SECURITY_ID": "11111",
             "SEM_EXM_EXCH_ID": "NSE",
@@ -285,6 +287,31 @@ _FO_MASTER_FIXTURE = pd.DataFrame(
             "SEM_EXPIRY_DATE": None,
             "SEM_STRIKE_PRICE": None,
             "SEM_OPTION_TYPE": None,
+        },
+        # NIFTY index option on NSE -- must be included (confirmed live:
+        # excluding FUTIDX/OPTIDX entirely silently dropped every index
+        # CSP/CC leg and index position from live pricing).
+        {
+            "SEM_SMST_SECURITY_ID": "60001",
+            "SEM_EXM_EXCH_ID": "NSE",
+            "SEM_INSTRUMENT_NAME": "OPTIDX",
+            "SEM_TRADING_SYMBOL": "NIFTY-Aug2026-25900-CE",
+            "SEM_EXPIRY_DATE": "2026-08-25",
+            "SEM_STRIKE_PRICE": 25900.0,
+            "SEM_OPTION_TYPE": "CE",
+        },
+        # SENSEX index option on BSE -- must ALSO be included, unlike a
+        # BSE stock leg: index legs are legitimately cross-exchange
+        # (SENSEX/BANKEX only ever list on BSE), confirmed live no NSE
+        # SENSEX row exists to prefer instead.
+        {
+            "SEM_SMST_SECURITY_ID": "70001",
+            "SEM_EXM_EXCH_ID": "BSE",
+            "SEM_INSTRUMENT_NAME": "OPTIDX",
+            "SEM_TRADING_SYMBOL": "SENSEX-Aug2026-81000-CE",
+            "SEM_EXPIRY_DATE": "2026-08-27",
+            "SEM_STRIKE_PRICE": 81000.0,
+            "SEM_OPTION_TYPE": "CE",
         },
     ]
 )
@@ -298,12 +325,40 @@ def _clear_fo_master_cache():
 
 
 class TestLoadFoInstrumentMaster:
-    def test_filters_to_nse_futstk_optstk_only(self, monkeypatch):
+    def test_filters_to_nse_stock_legs_plus_nse_and_bse_index_legs(self, monkeypatch):
         monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
 
         master = dhan_provider._load_fo_instrument_master()
 
-        assert set(master["security_id"]) == {"50001", "50002", "50003", "50004"}
+        # 50001-50004: NSE stock legs. 60001: NSE index leg. 70001: BSE
+        # index leg. 99999 (BSE stock leg) and 11111 (equity) excluded.
+        assert set(master["security_id"]) == {"50001", "50002", "50003", "50004", "60001", "70001"}
+
+    def test_nse_index_leg_resolves_by_underlying(self, monkeypatch):
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
+
+        master = dhan_provider._load_fo_instrument_master()
+
+        assert master[master["security_id"] == "60001"].iloc[0]["underlying_symbol"] == "NIFTY"
+
+    def test_bse_index_leg_is_not_excluded_by_the_nse_only_stock_rule(self, monkeypatch):
+        # Regression: an earlier version of this function excluded
+        # FUTIDX/OPTIDX entirely, silently dropping every index CSP/CC
+        # leg and index position from live pricing -- confirmed live via
+        # the "Not live-priced" diagnostic naming NIFTY/BANKNIFTY/
+        # FINNIFTY/SENSEX contracts a user's account actually holds.
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
+
+        master = dhan_provider._load_fo_instrument_master()
+
+        assert master[master["security_id"] == "70001"].iloc[0]["underlying_symbol"] == "SENSEX"
+
+    def test_bse_stock_leg_still_excluded_despite_index_legs_now_allowed_cross_exchange(self, monkeypatch):
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
+
+        master = dhan_provider._load_fo_instrument_master()
+
+        assert "99999" not in set(master["security_id"])
 
     def test_normalizes_xx_option_type_to_fut(self, monkeypatch):
         # Dhan's real feed uses 'XX' (not blank) for a future's option
@@ -369,6 +424,16 @@ class TestResolveFoSecurityId:
         monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
 
         assert resolve_fo_security_id("RELIANCE", date(2026, 8, 27), 2900.0, "PE") == "50003"
+
+    def test_resolves_nse_index_option(self, monkeypatch):
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
+
+        assert resolve_fo_security_id("NIFTY", date(2026, 8, 25), 25900.0, "CE") == "60001"
+
+    def test_resolves_bse_index_option(self, monkeypatch):
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
+
+        assert resolve_fo_security_id("SENSEX", date(2026, 8, 27), 81000.0, "CE") == "70001"
 
 
 class TestGetFoQuotes:

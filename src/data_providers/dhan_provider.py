@@ -136,14 +136,11 @@ def _underlying_from_trading_symbol(trading_symbol: str, option_type: str) -> st
 
 @lru_cache(maxsize=1)
 def _load_fo_instrument_master() -> pd.DataFrame:
-    """Download and cache the NSE-F&O slice of Dhan's instrument master --
+    """Download and cache the F&O slice of Dhan's instrument master --
     the same CSV `_load_instrument_master` above already downloads for
-    equities, filtered instead to derivative rows (instrument type
-    FUTSTK/OPTSTK -- stock futures/options; index instruments (FUTIDX/
-    OPTIDX) are out of scope here, matching this app's own NSE-only
-    stock-option scope, see migration 0031). Confirmed against a live
-    download of https://images.dhan.co/api-data/api-scrip-master.csv --
-    real header: SEM_EXM_EXCH_ID, SEM_SEGMENT, SEM_SMST_SECURITY_ID,
+    equities, filtered instead to derivative rows. Confirmed against a
+    live download of https://images.dhan.co/api-data/api-scrip-master.csv
+    -- real header: SEM_EXM_EXCH_ID, SEM_SEGMENT, SEM_SMST_SECURITY_ID,
     SEM_INSTRUMENT_NAME, SEM_EXPIRY_CODE, SEM_TRADING_SYMBOL,
     SEM_LOT_UNITS, SEM_CUSTOM_SYMBOL, SEM_EXPIRY_DATE, SEM_STRIKE_PRICE,
     SEM_OPTION_TYPE, SEM_TICK_SIZE, SEM_EXPIRY_FLAG,
@@ -151,7 +148,21 @@ def _load_fo_instrument_master() -> pd.DataFrame:
     by keyword rather than hardcoded, matching `_load_instrument_master`'s
     own defensiveness against Dhan renaming a column -- but
     `underlying_symbol` is deliberately NOT taken from any single column
-    (see _underlying_from_trading_symbol's docstring for why)."""
+    (see _underlying_from_trading_symbol's docstring for why).
+
+    Exchange/instrument-type combination kept mirrors this app's own
+    existing bhavcopy split exactly (nse_fo_provider.py /
+    bse_fo_provider.py, migration 0031's "stock options are NSE-only"
+    guarantee): stock futures/options (FUTSTK/OPTSTK) NSE-only, index
+    futures/options (FUTIDX/OPTIDX -- NIFTY/BANKNIFTY/FINNIFTY on NSE,
+    SENSEX/BANKEX on BSE) from either exchange. Confirmed live there's no
+    cross-exchange collision (no BSE NIFTY/BANKNIFTY row, no NSE
+    SENSEX/BANKEX row) -- first-fix history: an earlier version of this
+    function excluded FUTIDX/OPTIDX entirely, which silently dropped
+    every index CSP/CC leg and index position (NIFTY, BANKNIFTY,
+    FINNIFTY, SENSEX) from live pricing -- confirmed live via the
+    "Not live-priced" diagnostic (see refresh_bar.py's _fmt_fo_contract)
+    naming exactly those symbols."""
     try:
         df = pd.read_csv(INSTRUMENT_MASTER_URL, low_memory=False)
     except Exception as exc:  # noqa: BLE001
@@ -184,8 +195,11 @@ def _load_fo_instrument_master() -> pd.DataFrame:
             option_type_col: "option_type",
         }
     )
-    df = df[df[exch_col].astype(str).str.upper().str.contains("NSE", na=False)]
-    df = df[df[instrument_col].astype(str).str.upper().isin(["FUTSTK", "OPTSTK"])]
+    exch = df[exch_col].astype(str).str.upper()
+    instrument = df[instrument_col].astype(str).str.upper()
+    is_index = instrument.isin(["FUTIDX", "OPTIDX"])
+    is_stock = instrument.isin(["FUTSTK", "OPTSTK"])
+    df = df[(is_index & exch.isin(["NSE", "BSE"])) | (is_stock & (exch == "NSE"))]
     df["expiry_date"] = pd.to_datetime(df["expiry_date"], errors="coerce").dt.date
     df["strike_price"] = pd.to_numeric(df["strike_price"], errors="coerce").fillna(0.0)
     # A future's raw option_type is "XX" (confirmed live) rather than
@@ -198,8 +212,8 @@ def _load_fo_instrument_master() -> pd.DataFrame:
     ]
     if df.empty:
         raise ProviderError(
-            "Dhan F&O instrument master matched zero NSE FUTSTK/OPTSTK rows -- exchange/instrument-type "
-            "column resolution is likely wrong for this download; update column resolution"
+            "Dhan F&O instrument master matched zero stock/index futures or option rows -- exchange/"
+            "instrument-type column resolution is likely wrong for this download; update column resolution"
         )
     return df[["security_id", "underlying_symbol", "expiry_date", "strike_price", "option_type"]]
 
