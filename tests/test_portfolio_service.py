@@ -639,6 +639,28 @@ class TestDhanPositionsFromApi:
         assert p["avg_price"] == 10.15
         assert p["ltp"] == 1.1
 
+    def test_equity_etf_position_with_dhan_no_expiry_sentinel_gets_no_expiry_date(self):
+        # Regression, confirmed live: an ETF (SILVERBEES) intraday
+        # position via /v2/positions still carries a drvExpiryDate key,
+        # but Dhan's own documented sentinel for "no real F&O expiry" --
+        # "0001-01-01" -- not null/omitted. A plain truthiness check on
+        # that string treated it as a real expiry, producing a position
+        # with a bogus far-past expiry but no strike/option_type -- which
+        # src/utils/refresh_bar.py's _dhan_fo_universe then misread as a
+        # phantom futures contract for a symbol that was never a
+        # derivative (rendered in the UI as "SILVERBEES 01-Jan-01 FUT").
+        rows = [
+            {
+                "tradingSymbol": "SILVERBEES", "securityId": "500", "exchangeSegment": "NSE_EQ",
+                "netQty": 100, "costPrice": 85.5,
+                "drvExpiryDate": "0001-01-01", "drvStrikePrice": 0, "drvOptionType": "",
+            }
+        ]
+        positions = portfolio_service.dhan_positions_from_api(rows, {})
+        assert positions[0]["expiry_date"] is None
+        assert positions[0]["strike_price"] is None
+        assert positions[0]["option_type"] is None
+
     def test_accepts_both_ce_pe_codes_and_call_put_words(self):
         rows = [
             {"tradingSymbol": "A-1", "securityId": "1", "netQty": 1, "costPrice": 1, "drvOptionType": "CE"},

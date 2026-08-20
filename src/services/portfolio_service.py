@@ -158,6 +158,20 @@ def _dhan_underlying_symbol(trading_symbol: str) -> str | None:
 _DHAN_OPTION_TYPES = {"PUT": OptionType.PE, "PE": OptionType.PE, "CALL": OptionType.CE, "CE": OptionType.CE}
 
 
+# Dhan's documented sentinel for "this position has no real F&O expiry"
+# -- confirmed live: an equity/ETF position (e.g. an intraday SILVERBEES
+# trade showing up via /v2/positions, not just /v2/holdings) still comes
+# back with a `drvExpiryDate` key, but set to this placeholder rather
+# than null/omitted. A plain `if expiry_raw:` truthiness check treats
+# that non-empty string as a real expiry, producing a position with a
+# bogus far-past "expiry" but no strike/option_type -- which this app's
+# own "expiry set, strike/type both blank -> must be a future" heuristic
+# (src/utils/refresh_bar.py's _dhan_fo_universe) then misreads as a
+# phantom futures contract for a symbol that was never a derivative at
+# all.
+_DHAN_NO_EXPIRY_SENTINEL = "0001-01-01"
+
+
 def dhan_positions_from_api(rows: list[dict], ltp_by_security_id: dict[str, float]) -> list[dict]:
     """Translates GET /v2/positions rows into this app's own position-dict
     shape. Unlike Zerodha, expiry/strike/type come
@@ -182,13 +196,18 @@ def dhan_positions_from_api(rows: list[dict], ltp_by_security_id: dict[str, floa
         else:
             avg_price = float(row.get("sellAvg") or 0)
         expiry_raw = row.get("drvExpiryDate")
+        expiry_str = str(expiry_raw)[:10] if expiry_raw else None
         option_type_raw = str(row.get("drvOptionType") or "").strip().upper()
         strike_raw = row.get("drvStrikePrice")
         positions.append(
             {
                 "raw_name": trading_symbol or security_id,
                 "symbol": _dhan_underlying_symbol(trading_symbol) if trading_symbol else None,
-                "expiry_date": date.fromisoformat(str(expiry_raw)[:10]) if expiry_raw else None,
+                "expiry_date": (
+                    date.fromisoformat(expiry_str)
+                    if expiry_str and expiry_str != _DHAN_NO_EXPIRY_SENTINEL
+                    else None
+                ),
                 "strike_price": float(strike_raw) if strike_raw else None,
                 "option_type": _DHAN_OPTION_TYPES.get(option_type_raw),
                 "qty": float(qty),
