@@ -96,6 +96,24 @@ def resolve_security_id(symbol: str) -> str:
     return str(match.iloc[0]["security_id"])
 
 
+def _underlying_from_trading_symbol(trading_symbol: str, option_type: str) -> str:
+    """Dhan's compact CSV has no usable underlying-symbol column for a
+    stock F&O row -- confirmed live: `SM_SYMBOL_NAME` (the obvious
+    candidate) is blank for every single NSE FUTSTK/OPTSTK row in a real
+    download, not just occasionally missing. The underlying has to be
+    parsed out of `SEM_TRADING_SYMBOL` instead, e.g.
+    "RELIANCE-Sep2026-700-CE" or "RELIANCE-Aug2026-FUT". Split from the
+    RIGHT, not the left: a future always has exactly 2 trailing
+    hyphen-separated tokens (expiry, "FUT"), an option always has exactly
+    3 (expiry, strike, "CE"/"PE") -- confirmed live -- but the underlying
+    ITSELF can also contain a hyphen (real NSE symbols: "NAM-INDIA",
+    "BAJAJ-AUTO"), so splitting on the *first* hyphen would wrongly cut
+    "NAM-INDIA-Aug2026-720-CE" down to just "NAM"."""
+    parts = str(trading_symbol).split("-")
+    trailing = 2 if option_type == "FUT" else 3
+    return "-".join(parts[: len(parts) - trailing]) if len(parts) > trailing else parts[0]
+
+
 @lru_cache(maxsize=1)
 def _load_fo_instrument_master() -> pd.DataFrame:
     """Download and cache the NSE-F&O slice of Dhan's instrument master --
@@ -103,17 +121,17 @@ def _load_fo_instrument_master() -> pd.DataFrame:
     equities, filtered instead to derivative rows (instrument type
     FUTSTK/OPTSTK -- stock futures/options; index instruments (FUTIDX/
     OPTIDX) are out of scope here, matching this app's own NSE-only
-    stock-option scope, see migration 0031).
-
-    CAUTION -- the exact column names resolved below (underlying symbol,
-    expiry, strike, option type) are taken from Dhan's community-
-    documented compact-CSV schema (SEM_* prefixed columns), not verified
-    against a live download in this codebase. Same fuzzy find_col()
-    keyword-matching `_load_instrument_master` already relies on for
-    exactly this kind of drift risk -- if resolve_fo_security_id starts
-    raising "schema unrecognized" or matching the wrong row, download a
-    real api-scrip-master.csv and check these keyword guesses first.
-    """
+    stock-option scope, see migration 0031). Confirmed against a live
+    download of https://images.dhan.co/api-data/api-scrip-master.csv --
+    real header: SEM_EXM_EXCH_ID, SEM_SEGMENT, SEM_SMST_SECURITY_ID,
+    SEM_INSTRUMENT_NAME, SEM_EXPIRY_CODE, SEM_TRADING_SYMBOL,
+    SEM_LOT_UNITS, SEM_CUSTOM_SYMBOL, SEM_EXPIRY_DATE, SEM_STRIKE_PRICE,
+    SEM_OPTION_TYPE, SEM_TICK_SIZE, SEM_EXPIRY_FLAG,
+    SEM_EXCH_INSTRUMENT_TYPE, SEM_SERIES, SM_SYMBOL_NAME. Still resolved
+    by keyword rather than hardcoded, matching `_load_instrument_master`'s
+    own defensiveness against Dhan renaming a column -- but
+    `underlying_symbol` is deliberately NOT taken from any single column
+    (see _underlying_from_trading_symbol's docstring for why)."""
     try:
         df = pd.read_csv(INSTRUMENT_MASTER_URL, low_memory=False)
     except Exception as exc:  # noqa: BLE001
@@ -128,19 +146,19 @@ def _load_fo_instrument_master() -> pd.DataFrame:
 
     sec_id_col = find_col("SECURITY", "ID")
     exch_col = find_col("EXCH")
-    instrument_col = find_col("INSTRUMENT")
-    underlying_col = find_col("UNDERLYING") or find_col("SM_SYMBOL_NAME") or find_col("SYMBOL", "NAME")
+    instrument_col = find_col("INSTRUMENT", "NAME")
+    trading_symbol_col = find_col("TRADING", "SYMBOL")
     expiry_col = find_col("EXPIRY", "DATE")
     strike_col = find_col("STRIKE")
     option_type_col = find_col("OPTION", "TYPE")
 
-    if not all([sec_id_col, exch_col, instrument_col, underlying_col, expiry_col, strike_col, option_type_col]):
+    if not all([sec_id_col, exch_col, instrument_col, trading_symbol_col, expiry_col, strike_col, option_type_col]):
         raise ProviderError("Dhan F&O instrument master schema unrecognized; update column resolution")
 
     df = df.rename(
         columns={
             sec_id_col: "security_id",
-            underlying_col: "underlying_symbol",
+            trading_symbol_col: "trading_symbol",
             expiry_col: "expiry_date",
             strike_col: "strike_price",
             option_type_col: "option_type",
@@ -150,13 +168,14 @@ def _load_fo_instrument_master() -> pd.DataFrame:
     df = df[df[instrument_col].astype(str).str.upper().isin(["FUTSTK", "OPTSTK"])]
     df["expiry_date"] = pd.to_datetime(df["expiry_date"], errors="coerce").dt.date
     df["strike_price"] = pd.to_numeric(df["strike_price"], errors="coerce").fillna(0.0)
-    # A future's raw option_type is blank/None/some Dhan placeholder
-    # ("XX" seen in other brokers' feeds) rather than a consistent single
-    # sentinel -- normalize by allow-list instead of trying to enumerate
-    # every possible "missing" representation: anything that isn't
-    # exactly CE/PE becomes 'FUT'.
+    # A future's raw option_type is "XX" (confirmed live) rather than
+    # blank/CE/PE -- normalize by allow-list instead of hardcoding that
+    # one placeholder: anything that isn't exactly CE/PE becomes 'FUT'.
     option_type = df["option_type"].astype(str).str.upper().str.strip()
     df["option_type"] = option_type.where(option_type.isin(["CE", "PE"]), "FUT")
+    df["underlying_symbol"] = [
+        _underlying_from_trading_symbol(ts, ot) for ts, ot in zip(df["trading_symbol"], df["option_type"])
+    ]
     return df[["security_id", "underlying_symbol", "expiry_date", "strike_price", "option_type"]]
 
 
@@ -274,7 +293,23 @@ class DhanProvider(PriceDataProvider):
         return self.get_quotes([symbol])[symbol]
 
     def get_quotes(self, symbols: list[str]) -> dict[str, Quote]:
-        id_to_symbol = {resolve_security_id(s): s for s in symbols}
+        # A symbol resolve_security_id can't find (an ETF/fund Dhan's
+        # equity instrument master doesn't carry, a renamed/delisted
+        # ticker) is skipped rather than aborting the whole batch --
+        # confirmed live: widening the watched-symbol universe to every
+        # tracked ETF (migration 0032) meant one unresolvable ETF made
+        # this raise ProviderError, which load_live_dhan_prices' caller
+        # catches and turns into an EMPTY result for every symbol in the
+        # batch, not just the bad one -- a single bad ETF was silently
+        # wiping out live pricing for the entire Nifty50 universe too.
+        id_to_symbol: dict[str, str] = {}
+        for symbol in symbols:
+            try:
+                id_to_symbol[resolve_security_id(symbol)] = symbol
+            except ProviderError:
+                continue
+        if not id_to_symbol:
+            return {}
         payload = {"NSE_EQ": [int(sid) for sid in id_to_symbol]}
         data = self._post(LTP_ENDPOINT, payload)
         now = datetime.now(IST)

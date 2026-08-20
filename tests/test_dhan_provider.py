@@ -1,14 +1,18 @@
 """Tests for DhanProvider's per-user portfolio-sync methods (get_holdings,
 get_positions, get_ltp_by_security_id) -- header construction and the
 401 -> DhanAuthError mapping used by pages/6_My_Broker.py's "Connect Dhan
-account" flow. The pre-existing price-pipeline methods (get_quote/
-get_quotes/get_historical_daily) are untouched and untested here.
+account" flow. get_historical_daily is untouched and untested here.
 
 Also covers the F&O instrument resolution added for live ETF/futures/
 option LTP (migration 0032): _load_fo_instrument_master's column
 resolution and NSE/FUTSTK-OPTSTK filtering, resolve_fo_security_id's
 underlying+expiry+strike+option_type matching, and get_fo_quotes'
-batching/skip-unresolved behavior."""
+batching/skip-unresolved behavior -- plus get_quotes' own matching
+skip-unresolved fix, added after a live regression: widening the
+watched-symbol universe to every tracked ETF (migration 0032) meant one
+ETF Dhan's equity instrument master didn't carry made get_quotes raise
+and silently wipe out live pricing for the ENTIRE batch, not just that
+one symbol."""
 from datetime import date
 
 import httpx
@@ -74,6 +78,60 @@ class TestGetHoldings:
         assert not isinstance(exc_info.value, DhanAuthError)
 
 
+_EQUITY_MASTER_FIXTURE = pd.DataFrame(
+    [
+        {"SECURITY_ID": "1001", "TRADING_SYMBOL": "RELIANCE", "EXCH": "NSE", "SEGMENT": "EQ"},
+        {"SECURITY_ID": "1002", "TRADING_SYMBOL": "TCS", "EXCH": "NSE", "SEGMENT": "EQ"},
+        # No row for "BADETF" -- simulates a tracked symbol Dhan's equity
+        # instrument master doesn't carry.
+    ]
+)
+
+
+class TestGetQuotes:
+    def test_unresolvable_symbol_is_skipped_not_fatal_to_the_whole_batch(self, monkeypatch):
+        # Regression: before this fix, one unresolvable symbol (e.g. an
+        # ETF Dhan's equity master doesn't carry) made resolve_security_id
+        # raise inside the dict comprehension, aborting get_quotes
+        # entirely -- load_live_dhan_prices' caller then caught that as a
+        # ProviderError and returned {} for the WHOLE batch, silently
+        # wiping out live pricing for every other (perfectly resolvable)
+        # symbol too. Confirmed live after widening the watched-symbol
+        # universe to every tracked ETF (migration 0032).
+        dhan_provider._load_instrument_master.cache_clear()
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _EQUITY_MASTER_FIXTURE)
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            assert set(json["NSE_EQ"]) == {1001, 1002}
+            return _FakeResponse(
+                200,
+                json_data={"data": {"NSE_EQ": {"1001": {"last_price": 2950.0}, "1002": {"last_price": 4100.0}}}},
+            )
+
+        monkeypatch.setattr(httpx, "post", fake_post)
+        provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
+
+        result = provider.get_quotes(["RELIANCE", "TCS", "BADETF"])
+
+        assert set(result) == {"RELIANCE", "TCS"}
+        assert result["RELIANCE"].latest_price == 2950.0
+        assert result["TCS"].latest_price == 4100.0
+        dhan_provider._load_instrument_master.cache_clear()
+
+    def test_all_symbols_unresolvable_returns_empty_without_a_request(self, monkeypatch):
+        dhan_provider._load_instrument_master.cache_clear()
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _EQUITY_MASTER_FIXTURE)
+
+        def fake_post(*args, **kwargs):
+            raise AssertionError("should not make a request when nothing resolved")
+
+        monkeypatch.setattr(httpx, "post", fake_post)
+        provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
+
+        assert provider.get_quotes(["BADETF1", "BADETF2"]) == {}
+        dhan_provider._load_instrument_master.cache_clear()
+
+
 class TestGetPositions:
     def test_returns_raw_rows(self, monkeypatch):
         monkeypatch.setattr(httpx, "request", lambda *a, **k: _FakeResponse(200, json_data=[{"netQty": -780}]))
@@ -115,24 +173,28 @@ class TestGetLtpBySecurityId:
         assert provider.get_ltp_by_security_id({}) == {}
 
 
+# Shaped exactly like a real download (confirmed live against
+# https://images.dhan.co/api-data/api-scrip-master.csv): SM_SYMBOL_NAME
+# is blank for every stock F&O row (not modeled here at all -- the
+# resolver never reads it), strike_price/option_type are real sentinels
+# for a future ("-0.01"/"XX", not blank), and the underlying has to come
+# from SEM_TRADING_SYMBOL. NAM-INDIA covers a hyphenated underlying.
 _FO_MASTER_FIXTURE = pd.DataFrame(
     [
-        # RELIANCE future -- option_type/strike blank in the raw feed,
-        # normalized to option_type='FUT'/strike=0 by _load_fo_instrument_master.
         {
             "SEM_SMST_SECURITY_ID": "50001",
             "SEM_EXM_EXCH_ID": "NSE",
             "SEM_INSTRUMENT_NAME": "FUTSTK",
-            "UNDERLYING_SYMBOL": "RELIANCE",
+            "SEM_TRADING_SYMBOL": "RELIANCE-Aug2026-FUT",
             "SEM_EXPIRY_DATE": "2026-08-27",
-            "SEM_STRIKE_PRICE": None,
-            "SEM_OPTION_TYPE": None,
+            "SEM_STRIKE_PRICE": -0.01,
+            "SEM_OPTION_TYPE": "XX",
         },
         {
             "SEM_SMST_SECURITY_ID": "50002",
             "SEM_EXM_EXCH_ID": "NSE",
             "SEM_INSTRUMENT_NAME": "OPTSTK",
-            "UNDERLYING_SYMBOL": "RELIANCE",
+            "SEM_TRADING_SYMBOL": "RELIANCE-Aug2026-3000-CE",
             "SEM_EXPIRY_DATE": "2026-08-27",
             "SEM_STRIKE_PRICE": 3000.0,
             "SEM_OPTION_TYPE": "CE",
@@ -141,17 +203,28 @@ _FO_MASTER_FIXTURE = pd.DataFrame(
             "SEM_SMST_SECURITY_ID": "50003",
             "SEM_EXM_EXCH_ID": "NSE",
             "SEM_INSTRUMENT_NAME": "OPTSTK",
-            "UNDERLYING_SYMBOL": "RELIANCE",
+            "SEM_TRADING_SYMBOL": "RELIANCE-Aug2026-2900-PE",
             "SEM_EXPIRY_DATE": "2026-08-27",
             "SEM_STRIKE_PRICE": 2900.0,
             "SEM_OPTION_TYPE": "PE",
+        },
+        # Hyphenated underlying -- confirms right-anchored parsing, not a
+        # naive split-on-first-hyphen.
+        {
+            "SEM_SMST_SECURITY_ID": "50004",
+            "SEM_EXM_EXCH_ID": "NSE",
+            "SEM_INSTRUMENT_NAME": "OPTSTK",
+            "SEM_TRADING_SYMBOL": "NAM-INDIA-Aug2026-720-CE",
+            "SEM_EXPIRY_DATE": "2026-08-27",
+            "SEM_STRIKE_PRICE": 720.0,
+            "SEM_OPTION_TYPE": "CE",
         },
         # Same underlying/expiry/strike on BSE -- must be excluded (NSE-only).
         {
             "SEM_SMST_SECURITY_ID": "99999",
             "SEM_EXM_EXCH_ID": "BSE",
             "SEM_INSTRUMENT_NAME": "OPTSTK",
-            "UNDERLYING_SYMBOL": "RELIANCE",
+            "SEM_TRADING_SYMBOL": "RELIANCE-Aug2026-2900-PE",
             "SEM_EXPIRY_DATE": "2026-08-27",
             "SEM_STRIKE_PRICE": 2900.0,
             "SEM_OPTION_TYPE": "PE",
@@ -161,7 +234,7 @@ _FO_MASTER_FIXTURE = pd.DataFrame(
             "SEM_SMST_SECURITY_ID": "11111",
             "SEM_EXM_EXCH_ID": "NSE",
             "SEM_INSTRUMENT_NAME": "EQUITY",
-            "UNDERLYING_SYMBOL": "RELIANCE",
+            "SEM_TRADING_SYMBOL": "RELIANCE",
             "SEM_EXPIRY_DATE": None,
             "SEM_STRIKE_PRICE": None,
             "SEM_OPTION_TYPE": None,
@@ -183,16 +256,33 @@ class TestLoadFoInstrumentMaster:
 
         master = dhan_provider._load_fo_instrument_master()
 
-        assert set(master["security_id"]) == {"50001", "50002", "50003"}
+        assert set(master["security_id"]) == {"50001", "50002", "50003", "50004"}
 
-    def test_normalizes_blank_option_type_to_fut(self, monkeypatch):
+    def test_normalizes_xx_option_type_to_fut(self, monkeypatch):
+        # Dhan's real feed uses 'XX' (not blank) for a future's option
+        # type -- confirmed live.
         monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
 
         master = dhan_provider._load_fo_instrument_master()
 
         future_row = master[master["security_id"] == "50001"].iloc[0]
         assert future_row["option_type"] == "FUT"
-        assert future_row["strike_price"] == 0.0
+
+    def test_underlying_symbol_parsed_from_trading_symbol_not_the_blank_sm_symbol_name_column(self, monkeypatch):
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
+
+        master = dhan_provider._load_fo_instrument_master()
+
+        assert master[master["security_id"] == "50002"].iloc[0]["underlying_symbol"] == "RELIANCE"
+
+    def test_underlying_symbol_with_internal_hyphen_is_not_truncated(self, monkeypatch):
+        # "NAM-INDIA-Aug2026-720-CE" -- a naive split-on-first-hyphen
+        # would wrongly resolve this to "NAM".
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
+
+        master = dhan_provider._load_fo_instrument_master()
+
+        assert master[master["security_id"] == "50004"].iloc[0]["underlying_symbol"] == "NAM-INDIA"
 
 
 class TestResolveFoSecurityId:
