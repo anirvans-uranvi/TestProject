@@ -175,7 +175,7 @@ three `Index` rows, and redefines `latest_screener_view` a third time;
 - `alerts` — alert configs
 - `notification_log` — alert-fired history, deduped via a unique `dedupe_key`
 - `portfolio_holdings` — broker-synced holdings (migration `0012`, `portfolio_name` added in `0014`), keyed `(user_id, portfolio_name, broker, raw_name)`. The schema still allows multiple independently-named portfolios to coexist per user, but there is no longer any UI that creates a second one: CSV upload (the only way that used to happen) was dropped entirely along with `pages/6_My_Broker.py`, and the Dhan/Zerodha portfolio sync (connecting in Settings, or the Portfolio Refresh button) now always targets the account's one resolved name (`portfolio_repo.get_or_default_portfolio_name` — see the Portfolio pages section below). `symbol` is nullable and deliberately **not** FK'd to `companies` -- a resolved symbol may not exist there yet (an ETF/fund or non-Nifty50 stock the screener doesn't otherwise track); see the Portfolio pages section below for how it gets registered.
-- `portfolio_positions` — broker-synced F&O positions (migration `0016`), same keying/RLS shape as `portfolio_holdings`. `symbol`/`expiry_date`/`strike_price`/`option_type` are nullable together (an undecoded instrument format), and `qty` keeps its broker-reported sign (negative = short). See the Portfolio pages section's My Positions subsection.
+- `portfolio_positions` — broker-synced F&O positions (migration `0016`), same keying/RLS shape as `portfolio_holdings`. `symbol`/`expiry_date`/`strike_price`/`option_type` are nullable together (an undecoded instrument format), and `qty` keeps its broker-reported sign (negative = short). `raw_name` (part of the primary key) is not guaranteed unique straight from a broker's API -- see `dhan_positions_from_api`/`zerodha_positions_from_api`'s dedup pass in the Portfolio pages section's My Positions subsection. See that subsection for the full table.
 - `broker_connections` — saved Dhan/Zerodha API credentials, one row per `(user_id, broker)` (migration `0017`; `api_secret` + nullable `access_token` added by `0022` for Zerodha; `portfolio_name` dropped and the primary key narrowed from `(user_id, portfolio_name, broker)` to `(user_id, broker)` by migration `0029`, once the Data Provider choice became account-wide rather than per-portfolio) -- an account's one resolved portfolio (see `portfolio_holdings` above) syncs holdings/positions directly from a broker's API through this credential. Credentials are stored as entered, protected only by this table's own RLS policy -- no application-level encryption. See the Portfolio pages section's "Connect Dhan account" / "Connect Zerodha account" subsections.
 - `user_live_prices` — per-user cache of live stock LTPs pulled from whichever broker `data_provider` points at (migration `0030`), keyed `(user_id, symbol)`, columns `latest_price`/`fetched_at`. Written by the "Stock & Option Data Refresh" button (`src/utils/refresh_bar.py`) only when `data_provider` is `"dhan"`/`"zerodha"`; read by Dashboard/Stock Detail as an override on top of the shared `daily_screener_snapshots` value (`snapshot_repo.get_user_live_prices`/`upsert_user_live_prices`). See the Streamlit app section's `1_Dashboard.py`/`2_Stock_Detail.py` bullets below.
 - `portfolio_trade_groups` — manual "Trade" grouping overrides for one holding or F&O position leg (migration `0020`), keyed `(user_id, portfolio_name, broker, raw_name)` -- the leg's own natural identity, not a `portfolio_holdings`/`portfolio_positions` row id, so it survives those tables' delete-then-insert replace semantics. See the Portfolio pages section's My Trades subsection.
@@ -200,6 +200,23 @@ PostgREST can't resolve the embedded-resource query
 `companies_repo.list_current_constituents()` uses (`select("symbol,
 companies(...)")`); PostgREST needs a declared FK to know how to join two
 tables via that syntax.
+
+**A recurring gotcha, hit twice**: `0002`'s "shared tables are SELECT-only,
+writes go through the service-role key" assumption breaks the moment a
+*Streamlit page itself* needs to write shared/log data -- there's no
+service-role path from Streamlit (that key must never live in page code,
+see the Edge Functions section's own reasoning). `provider_fetch_log` was
+exactly this: `0034` added an authenticated INSERT policy (narrowly scoped
+by *value*, since the table has no `user_id` to scope by --
+`fetch_type='portfolio_sync'`) after the new Portfolio Refresh button hit
+`42501` logging its own sync; `0036` had to add a near-identical policy for
+`fetch_type='dhan_instrument_master'` after the *same* class of error hit
+again once migration `0035`'s instrument-master loaders started logging
+their own downloads from inside a user's session. If a future change makes
+a Streamlit page write to any table whose RLS policy predates it, check
+whether that table's policies actually cover an ordinary authenticated
+write, not just the service-role path -- `0002`'s policies don't, by
+design, for every shared table that existed when it was written.
 
 ## Domain models (`src/models/`)
 
@@ -738,7 +755,11 @@ insert, same convention as `fo_repo.clear_dashboard_fo_metrics`/
 `upsert_dashboard_fo_metrics`) before being cached in-memory, so the *next*
 process/user skips the download too. `client=None` keeps the exact old
 in-memory-only behavior (`factory.py::get_price_provider`'s plain-cron path
-never has a Supabase client to give a generic `PriceDataProvider`).
+never has a Supabase client to give a generic `PriceDataProvider`). Hit the
+same RLS gap described above: `0035` itself granted `dhan_equity_instruments`/
+`dhan_fo_instruments` their own authenticated write policies, but the
+`provider_fetch_log` insert those loaders also make needed a *separate*
+follow-up (`0036`) -- confirmed live, same `42501` as `0034`'s.
 `DhanProvider.__init__` gained one new optional kwarg, `supabase_client`,
 threaded through to both loaders from `get_quotes`/`get_fo_quotes`/
 `get_historical_daily`; `refresh_bar.py::_refresh_user_live_prices` and
@@ -1595,6 +1616,27 @@ involved anymore -- see "Two brokers, no CSV" above):
   a from-scratch year-inference heuristic — was deleted along with the
   rest of CSV upload; the API's own structured fields make all of that
   unnecessary.)
+
+**`raw_name` collisions are disambiguated, not assumed unique** — both
+`dhan_positions_from_api` and `zerodha_positions_from_api` end with a
+`Counter`-based dedup pass over the batch before returning. `raw_name` is
+the broker's tradingSymbol, and `portfolio_positions`' primary key is
+`(user_id, portfolio_name, broker, raw_name)` — confirmed live via
+`postgrest.exceptions.APIError` `23505` (`duplicate key value violates
+unique constraint "portfolio_positions_pkey"`): the same tradingSymbol can
+legitimately appear twice in one sync (Dhan allows the same contract held
+under two `productType`s at once, e.g. an INTRADAY trade alongside a
+carried-forward CNC/NRML position; Kite's `product` field the same way for
+CNC/MIS/NRML). The dedup is exhaustive, not just a `productType`/`product`
+suffix — a second live account hit a collision with **no**
+intraday/overnight overlap at all, meaning Dhan can apparently return
+same-symbol rows sharing one `productType` too — so it falls back through
+`productType`/`product` → `securityId` → a bare ordinal `#2`/`#3` suffix,
+guaranteeing a unique `raw_name` regardless of cause. Only the *colliding*
+rows get renamed (e.g. `"RELIANCE (INTRADAY)"`); an account with no overlap
+keeps today's exact `raw_name`, so existing `trade_date`/`stop_loss`/
+trade-group links (all keyed on `(broker, raw_name)`, see My CSP/Analyse
+Trade below) survive the next sync unchanged.
 
 **P&L is recomputed, not trusted from the broker's own response, and
 doesn't use `ltp`+`avg_price` alone from Zerodha's own reported P&L** —
