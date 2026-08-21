@@ -16,7 +16,7 @@ from src.utils.session import (
     set_new_password,
     sign_out,
 )
-from src.utils.refresh_bar import render_global_refresh_bar
+from src.utils.refresh_bar import render_fundamental_and_bhavcopy_refresh
 from src.utils.timezones import format_ist
 from src.utils.ui import inject_global_styles, render_alert_row, render_disclaimer, render_pill
 
@@ -31,7 +31,7 @@ inject_global_styles(current.theme)  # re-inject with the user's actual theme --
 
 st.title("⚙️ Settings")
 render_disclaimer()
-render_global_refresh_bar(client)
+render_fundamental_and_bhavcopy_refresh(client)
 
 st.subheader("Screening thresholds")
 st.caption("These control what counts as a passing criterion for you. Changes apply immediately across the app.")

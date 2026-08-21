@@ -131,8 +131,8 @@ scripts/
 supabase/
   migrations/                      Schema, RLS policies, views/functions, in numbered order
   seed.sql                          Current Nifty 50 constituents + companies (reference data only)
-  functions/manual-refresh/         Edge Function (Deno/TypeScript) behind the stock-data half of "🔄 Market Data Refresh"
-  functions/fo-refresh/              Edge Function (Deno/TypeScript) behind the F&O half of "🔄 Market Data Refresh" (exchange param)
+  functions/manual-refresh/         Edge Function (Deno/TypeScript) behind Stock/Fundamental Data Refresh (mode param)
+  functions/fo-refresh/              Edge Function (Deno/TypeScript) behind Bhavcopy Refresh (exchange param)
 tests/                             Pytest suite -- almost entirely calculations/services, no network
 ```
 
@@ -174,10 +174,10 @@ three `Index` rows, and redefines `latest_screener_view` a third time;
 - `user_positions` — entry/target/stop-loss/notes per symbol
 - `alerts` — alert configs
 - `notification_log` — alert-fired history, deduped via a unique `dedupe_key`
-- `portfolio_holdings` — broker-synced holdings (migration `0012`, `portfolio_name` added in `0014`), keyed `(user_id, portfolio_name, broker, raw_name)`. The schema still allows multiple independently-named portfolios to coexist per user, but there is no longer any UI that creates a second one: CSV upload (the only way that used to happen) was dropped entirely along with `pages/6_My_Broker.py`, and the Dhan/Zerodha "Sync now" flow now always targets the account's one resolved name (`portfolio_repo.get_or_default_portfolio_name` — see the Portfolio pages section below). `symbol` is nullable and deliberately **not** FK'd to `companies` -- a resolved symbol may not exist there yet (an ETF/fund or non-Nifty50 stock the screener doesn't otherwise track); see the Portfolio pages section below for how it gets registered.
+- `portfolio_holdings` — broker-synced holdings (migration `0012`, `portfolio_name` added in `0014`), keyed `(user_id, portfolio_name, broker, raw_name)`. The schema still allows multiple independently-named portfolios to coexist per user, but there is no longer any UI that creates a second one: CSV upload (the only way that used to happen) was dropped entirely along with `pages/6_My_Broker.py`, and the Dhan/Zerodha portfolio sync (connecting in Settings, or the Portfolio Refresh button) now always targets the account's one resolved name (`portfolio_repo.get_or_default_portfolio_name` — see the Portfolio pages section below). `symbol` is nullable and deliberately **not** FK'd to `companies` -- a resolved symbol may not exist there yet (an ETF/fund or non-Nifty50 stock the screener doesn't otherwise track); see the Portfolio pages section below for how it gets registered.
 - `portfolio_positions` — broker-synced F&O positions (migration `0016`), same keying/RLS shape as `portfolio_holdings`. `symbol`/`expiry_date`/`strike_price`/`option_type` are nullable together (an undecoded instrument format), and `qty` keeps its broker-reported sign (negative = short). See the Portfolio pages section's My Positions subsection.
 - `broker_connections` — saved Dhan/Zerodha API credentials, one row per `(user_id, broker)` (migration `0017`; `api_secret` + nullable `access_token` added by `0022` for Zerodha; `portfolio_name` dropped and the primary key narrowed from `(user_id, portfolio_name, broker)` to `(user_id, broker)` by migration `0029`, once the Data Provider choice became account-wide rather than per-portfolio) -- an account's one resolved portfolio (see `portfolio_holdings` above) syncs holdings/positions directly from a broker's API through this credential. Credentials are stored as entered, protected only by this table's own RLS policy -- no application-level encryption. See the Portfolio pages section's "Connect Dhan account" / "Connect Zerodha account" subsections.
-- `user_live_prices` — per-user cache of live stock LTPs pulled from whichever broker `data_provider` points at (migration `0030`), keyed `(user_id, symbol)`, columns `latest_price`/`fetched_at`. Written by the "🔄 Market Data Refresh" button (`src/utils/refresh_bar.py`) only when `data_provider` is `"dhan"`/`"zerodha"`; read by Dashboard/Stock Detail as an override on top of the shared `daily_screener_snapshots` value (`snapshot_repo.get_user_live_prices`/`upsert_user_live_prices`). See the Streamlit app section's `1_Dashboard.py`/`2_Stock_Detail.py` bullets below.
+- `user_live_prices` — per-user cache of live stock LTPs pulled from whichever broker `data_provider` points at (migration `0030`), keyed `(user_id, symbol)`, columns `latest_price`/`fetched_at`. Written by the "Stock & Option Data Refresh" button (`src/utils/refresh_bar.py`) only when `data_provider` is `"dhan"`/`"zerodha"`; read by Dashboard/Stock Detail as an override on top of the shared `daily_screener_snapshots` value (`snapshot_repo.get_user_live_prices`/`upsert_user_live_prices`). See the Streamlit app section's `1_Dashboard.py`/`2_Stock_Detail.py` bullets below.
 - `portfolio_trade_groups` — manual "Trade" grouping overrides for one holding or F&O position leg (migration `0020`), keyed `(user_id, portfolio_name, broker, raw_name)` -- the leg's own natural identity, not a `portfolio_holdings`/`portfolio_positions` row id, so it survives those tables' delete-then-insert replace semantics. See the Portfolio pages section's My Trades subsection.
 - `portfolio_trade_meta` — trade-*level* underlying-label/trade-type overrides (migration `0021`), keyed `(user_id, portfolio_name, trade_id)` -- a different grain from `portfolio_trade_groups` above (many legs share one `trade_id`). See the Portfolio pages section's My Trades subsection.
 
@@ -651,8 +651,8 @@ log line is `F&O ingest complete: ...`) before assuming it's a data bug.
   exchange. Tolerant of `portfolio_holdings` not existing yet (migration
   `0012`).
 
-**On-demand refresh**: clicking the single **🔄 Market Data Refresh**
-button (`src/utils/refresh_bar.py`, see the Utils section below) fires
+**On-demand refresh**: clicking **Bhavcopy Refresh** (Settings only,
+`src/utils/refresh_bar.py`, see the Utils section below) fires
 two concurrent POST calls to the *same* second Edge Function,
 `supabase/functions/fo-refresh/` (see the Edge Functions section below),
 one parameterized `{"exchange": "NSE"}` and one `{"exchange": "BSE"}` — a
@@ -672,7 +672,7 @@ Edge Functions section for why; BSE needs no zip handling at all. Its
 `fetch_fo_data.py` above (mirrored in TypeScript via the same
 `resolveTrackedSymbols`/`portfolioSymbols.ts` helper `manual-refresh`
 already uses), so a symbol newly tracked from a portfolio sync starts
-getting its F&O data via the next Market Data Refresh click too, not just
+getting its F&O data via the next Bhavcopy Refresh click too, not just
 a manual backfill run.
 
 **Dashboard cache (`dashboard_fo_metrics`, migration `0011`)**: the
@@ -694,9 +694,9 @@ correct immediately after any refresh finishes rather than on some
 separate schedule:
 - `scripts/run_refresh.py`'s `screener`/`all` modes (cron) — spot changed.
 - `scripts/fetch_fo_data.py` — option data changed.
-- `manual-refresh`/`fo-refresh` Edge Functions — the two tasks the shared
-  "🔄 Market Data Refresh" button (`render_global_refresh_bar`) fires
-  concurrently on every page, not just the Dashboard. These can't call the Python implementation
+- `manual-refresh`/`fo-refresh` Edge Functions — behind Stock Data
+  Refresh (every page) and Bhavcopy Refresh (Settings only), respectively
+  (`src/utils/refresh_bar.py`). These can't call the Python implementation
   (no service-role key in Streamlit), so the calculation is ported to
   TypeScript too: `supabase/functions/_shared/dashboardMetrics.ts`
   (`cspFivePct`/`ccFivePct`/`recomputeDashboardMetrics`, tested in
@@ -707,7 +707,7 @@ separate schedule:
 
 **Live F&O override for Dhan accounts (migration `0032`)**: the cache
 above is still what's *stored* -- it stays bhavcopy-sourced, updated once
-per Market Data Refresh -- but for an account whose Data Provider is Dhan,
+per Bhavcopy Refresh -- but for an account whose Data Provider is Dhan,
 the Dashboard now overlays a live premium on top of it at render time.
 `src/utils/refresh_bar.py::_dhan_fo_universe` builds the set of contracts
 worth live-pricing: every futures/option leg the account's own
@@ -1019,9 +1019,9 @@ page's own `st.set_page_config(page_title=..., page_icon=...)` call
 (browser-tab metadata) is unaffected too -- it's independent of `st.Page`'s
 `title=` (sidebar label).
 
-- **`1_Dashboard.py`** — loads `latest_screener_view` via `snapshot_repo.get_latest_screener()`, applies the signed-in user's thresholds via `threshold_override.apply_user_thresholds()`, renders metric cards (also usable as quick filters, wired through `st.session_state["status_filter"]`), sidebar filters, and the screener table. The Status sidebar filter is a `st.multiselect` over `ALL_STATUSES = ["Green", "Amber", "Red", "Unavailable"]` — `status_filter` is always a *list* (any combination, not one-or-all), and the final row filter is a single `df["status"].isin([...])`, so selecting all four is equivalent to no filter at all. Saved filter presets normalize old single-string `"status"` values (from before this was a multiselect) into a list on load for backward compatibility. The "Minimum dividend yield" / "Minimum PEG" sidebar filters default to `0.0`, **not** `user_settings.dividend_yield_threshold`/`peg_threshold` — they're a separate display filter from the criterion A/C pass/fail thresholds, and defaulting them to the threshold value silently hid every stock below it on first load (a real bug, since fixed). Keep these two concepts distinct if you touch this page: the Settings-page thresholds decide Green/Amber/Red/Unavailable; these sidebar inputs just additionally hide rows below a value the user dials in themselves, and should default to "show everything." Right after the title/disclaimer, `render_global_refresh_bar(client)` (`src/utils/refresh_bar.py`, see the Utils section below) renders the single **"🔄 Market Data Refresh"** button — this used to be three separate buttons (Stock Data Refresh, NSE F&O Data Refresh, BSE F&O Data Refresh), collapsed into one on request; a click now fires all applicable fetches *concurrently* via a `ThreadPoolExecutor` rather than the user clicking each one in turn (see the Utils section's `refresh_bar.py` bullet for the full task list, including the new Dhan/Zerodha live-price refresh). It's a shared component called identically from every page (Dashboard, Stock Detail, Options, My Trades, My Holdings, My Positions, My CSP, Analyse Trade, Settings), so refreshing data never requires navigating back here specifically. Below the title, a "Data sources" caption reads `user_settings.data_provider` (the signed-in account's own Settings > Data Provider choice — `"dhan"`/`"zerodha"`/`"yfinance_bhavcopy"`, migration `0028`) for stock prices, `get_settings().fundamentals_provider` for PE/PEG/dividends (this one stays an app-wide `.env`-driven setting -- fundamentals are never provider-branched per account, see the `refresh_bar.py` bullet below), and states the options/F&O source as a fixed string, "NSE + BSE Bhavcopy (end-of-day) — always, regardless of Data Provider" — there's no configurable per-account F&O provider (neither broker's API exposes a bhavcopy-equivalent full options chain, see the Futures & Options section). The header's "Data freshness" line covers stock refresh only now (`last_fetch_at`, still needed for `get_market_state()`'s staleness check); the per-exchange F&O refresh timestamps live in the shared refresh bar's own captions instead of a Dashboard-only line. "Latest NSE Bhavcopy: <date>" / "Latest BSE Bhavcopy: <date>" are still Dashboard-specific, each from its own `fo_repo.get_latest_fo_trade_date(client, source_prefix=...)` call (`"nse_fo_bhavcopy"` / `"bse_fo_bhavcopy"` -- same `source`-prefix scoping the fo-refresh Edge Function's own watermark query uses, and for the same reason: NSE and BSE publish on the same trading days, so one combined "latest bhavcopy" figure couldn't tell you which exchange's file was actually newest, and a single shared line was exactly what made a real BSE-side false-success bug easy to miss -- see the Edge Functions section's "A third real bug, once BSE was added"). Each is deliberately **not** that exchange's own last-successful-fetch timestamp: a bhavcopy is published for a specific trading day and a run on a non-trading day finds nothing new, so a refresh can succeed today while the loaded data is still from a prior session -- these lines surface that distinction. Wrapped in the same `except APIError: None` degrade as the rest of this page's optional F&O reads, for a deployment that hasn't applied migration `0007` yet.
+- **`1_Dashboard.py`** — loads `latest_screener_view` via `snapshot_repo.get_latest_screener()`, applies the signed-in user's thresholds via `threshold_override.apply_user_thresholds()`, renders metric cards (also usable as quick filters, wired through `st.session_state["status_filter"]`), sidebar filters, and the screener table. The Status sidebar filter is a `st.multiselect` over `ALL_STATUSES = ["Green", "Amber", "Red", "Unavailable"]` — `status_filter` is always a *list* (any combination, not one-or-all), and the final row filter is a single `df["status"].isin([...])`, so selecting all four is equivalent to no filter at all. Saved filter presets normalize old single-string `"status"` values (from before this was a multiselect) into a list on load for backward compatibility. The "Minimum dividend yield" / "Minimum PEG" sidebar filters default to `0.0`, **not** `user_settings.dividend_yield_threshold`/`peg_threshold` — they're a separate display filter from the criterion A/C pass/fail thresholds, and defaulting them to the threshold value silently hid every stock below it on first load (a real bug, since fixed). Keep these two concepts distinct if you touch this page: the Settings-page thresholds decide Green/Amber/Red/Unavailable; these sidebar inputs just additionally hide rows below a value the user dials in themselves, and should default to "show everything." Right after the title/disclaimer, `render_stock_refresh_button(client, user_id, user_settings.data_provider)` (`src/utils/refresh_bar.py`, see the Utils section below) renders **Stock Data Refresh** or **Stock & Option Data Refresh** (exactly one, by Data Provider setting) — this used to be a single bundled **"🔄 Market Data Refresh"** button firing every fetch (stock, fundamentals, F&O bhavcopy, broker live prices) at once; it's now five independent, narrower buttons across Settings and the other pages (see the Utils section's `refresh_bar.py` bullet for the full breakdown). `render_stock_refresh_button` is called identically from every page except Settings (Dashboard, Stock Detail, Options, My Trades, My Holdings, My Positions, My CSP, Analyse Trade), so refreshing stock data never requires navigating back here specifically. Below the title, a "Data sources" caption reads `user_settings.data_provider` (the signed-in account's own Settings > Data Provider choice — `"dhan"`/`"zerodha"`/`"yfinance_bhavcopy"`, migration `0028`) for stock prices, `get_settings().fundamentals_provider` for PE/PEG/dividends (this one stays an app-wide `.env`-driven setting -- fundamentals are never provider-branched per account, see the `refresh_bar.py` bullet below), and states the options/F&O source as a fixed string, "NSE + BSE Bhavcopy (end-of-day) — always, regardless of Data Provider" — there's no configurable per-account F&O provider (neither broker's API exposes a bhavcopy-equivalent full options chain, see the Futures & Options section). The header's "Data freshness" line covers stock refresh only now (`last_fetch_at`, still needed for `get_market_state()`'s staleness check); the per-exchange F&O refresh timestamps live in the shared refresh bar's own captions instead of a Dashboard-only line. "Latest NSE Bhavcopy: <date>" / "Latest BSE Bhavcopy: <date>" are still Dashboard-specific, each from its own `fo_repo.get_latest_fo_trade_date(client, source_prefix=...)` call (`"nse_fo_bhavcopy"` / `"bse_fo_bhavcopy"` -- same `source`-prefix scoping the fo-refresh Edge Function's own watermark query uses, and for the same reason: NSE and BSE publish on the same trading days, so one combined "latest bhavcopy" figure couldn't tell you which exchange's file was actually newest, and a single shared line was exactly what made a real BSE-side false-success bug easy to miss -- see the Edge Functions section's "A third real bug, once BSE was added"). Each is deliberately **not** that exchange's own last-successful-fetch timestamp: a bhavcopy is published for a specific trading day and a run on a non-trading day finds nothing new, so a refresh can succeed today while the loaded data is still from a prior session -- these lines surface that distinction. Wrapped in the same `except APIError: None` degrade as the rest of this page's optional F&O reads, for a deployment that hasn't applied migration `0007` yet.
 
-  **Live price override (migration `0030`, `user_live_prices`)**: once `df` is built from `latest_screener_view`, if `user_settings.data_provider != "yfinance_bhavcopy"` the page calls `snapshot_repo.get_user_live_prices(client, user_id, df["symbol"].tolist())` and overwrites `df["latest_price"]` for any symbol that call returns — the account's own cached live LTP from whichever broker "🔄 Market Data Refresh" last pulled it from (see the `refresh_bar.py` bullet below), taking priority over the shared, possibly-Yahoo-delayed `daily_screener_snapshots` value. A symbol this account hasn't live-priced yet (no broker connected, an unwatched symbol, an expired token) simply keeps its snapshot value — same `{**shared, **live}` merge pattern `src/utils/portfolio_page.py::load_live_broker_prices` already established for the portfolio pages. This same `live_prices` lookup is also consulted by the "(as of <date>)" stale-fallback marker described below — a row with a live-overridden LTP skips that suffix even if the *snapshot* row backing its 52W/returns/PEG columns is stale, since the LTP itself is fresh.
+  **Live price override (migration `0030`, `user_live_prices`)**: once `df` is built from `latest_screener_view`, if `user_settings.data_provider != "yfinance_bhavcopy"` the page calls `snapshot_repo.get_user_live_prices(client, user_id, df["symbol"].tolist())` and overwrites `df["latest_price"]` for any symbol that call returns — the account's own cached live LTP from whichever broker "Stock & Option Data Refresh" last pulled it from (see the `refresh_bar.py` bullet below), taking priority over the shared, possibly-Yahoo-delayed `daily_screener_snapshots` value. A symbol this account hasn't live-priced yet (no broker connected, an unwatched symbol, an expired token) simply keeps its snapshot value — same `{**shared, **live}` merge pattern `src/utils/portfolio_page.py::load_live_broker_prices` already established for the portfolio pages. This same `live_prices` lookup is also consulted by the "(as of <date>)" stale-fallback marker described below — a row with a live-overridden LTP skips that suffix even if the *snapshot* row backing its 52W/returns/PEG columns is stale, since the LTP itself is fresh.
 
   **Metric cards**: seven buttons in a row (`st.columns(7)`) — `Total stocks`, `🟢 Green`/`🟠 Amber`/`🔴 Red` (each sets the status filter to just that one status), and `Yield > threshold`/`All momentum +ve`/`PEG ≤ threshold` (each sets `criterion_filter` instead). There is deliberately no `Unavailable` button — the status itself is still fully selectable via the sidebar's Status multiselect and still counts toward `ALL_STATUSES`, but it wasn't considered a useful one-click quick filter and was dropped to declutter the row (a purely cosmetic trim, not a behavior change to filtering).
 
@@ -1127,7 +1127,7 @@ is unchanged and still theoretically supports several coexisting
 `portfolio_name`s per user, but there's no UI left anywhere that creates
 a second one: `portfolio_repo.get_or_default_portfolio_name(client,
 user_id) -> str` (plus a `DEFAULT_PORTFOLIO_NAME = "My Portfolio"`
-constant) is what the Dhan/Zerodha "Sync now" flow
+constant) is what the Dhan/Zerodha portfolio sync flow
 (`_sync_dhan`/`_sync_zerodha` in `src/utils/data_provider_settings.py`,
 see the "Connect Dhan account" / "Connect Zerodha account" subsections
 below) calls instead of taking a free-text portfolio-name input — it
@@ -1592,7 +1592,7 @@ every render** — there's no equivalent *live* source for options the way
 there is for equities: `nse_fo_provider.py` is EOD-only for every
 underlying, index or stock (see "This is end-of-day data" above), so a
 position's premium can only ever be as fresh as whatever the broker's
-own API returned at "Sync now" time, or (for Dhan, when its own quote is
+own API returned at sync time, or (for Dhan, when its own quote is
 unavailable) this app's own EOD F&O bhavcopy as a fallback. Zerodha's
 positions response includes `last_price` directly, so
 `zerodha_positions_from_api` needs no separate quote call or fallback at
@@ -1631,10 +1631,14 @@ since migration `0029`)** — selecting "Dhan" as the Data Provider in
 Settings (`src/utils/data_provider_settings.py::_render_dhan_connect_section`,
 the CSV-upload-era `pages/6_My_Broker.py` this section used to live on
 having been deleted) reveals a credential form; saving a Client ID +
-Access Token (`upsert_broker_connection`) and clicking "Save & Sync" (or,
-once already connected, "Sync now") drives the sync (`_sync_dhan`,
-targeting the account's one resolved portfolio -- see "One portfolio per
-account now, in practice" above). This reuses
+Access Token (`upsert_broker_connection`) and clicking "Save & Sync"
+drives the sync (`_sync_dhan`, targeting the account's one resolved
+portfolio -- see "One portfolio per account now, in practice" above).
+Once already connected, re-syncing happens via the **Portfolio Refresh**
+button on My Trades/My Holdings/My Positions/My CSP instead (Settings no
+longer has its own standalone sync button -- see the `refresh_bar.py`
+bullet below), calling the same `_sync_dhan` through
+`sync_broker_portfolio`. This reuses
 `src/data_providers/dhan_provider.py`'s existing `DhanProvider` class —
 already present in this codebase as an alternative live-price source for
 the main screener pipeline (`Settings.market_data_provider == "dhan"`,
@@ -1652,7 +1656,7 @@ that same class: `get_holdings()` (`GET /v2/holdings`), `get_positions()`
 `NSE_FNO`/`IDX_I`, unlike the existing `get_quotes()` which is hardcoded
 to `NSE_EQ` for the equity pipeline). These deliberately skip the
 `@retry`-decorated, auto-backoff `_post()` the price pipeline uses — a
-manual "Sync now" click should fail fast (especially on an expired token)
+manual sync click should fail fast (especially on an expired token)
 rather than silently retrying for up to ~20s — and instead go through a
 plain `_request()` that raises `DhanAuthError` (a `ProviderError`
 subclass) specifically on a 401, so the page can show "your token expired"
@@ -1849,7 +1853,7 @@ without disturbing a still-valid session" for the "Update API Key /
 Secret" form.
 
 **A real bug found right after shipping**: the page showed "Connected --
-session started 1 minute(s) ago" and a working-looking "Sync now" button
+session started 1 minute(s) ago" and a working-looking connected state
 immediately after just saving API Key/Secret -- *before* ever clicking
 "Log in to Zerodha" at all. Cause: `broker_connections.token_saved_at`
 is `not null default now()` (migration `0017`); the credentials-only
@@ -2246,8 +2250,8 @@ account-wide collapse could still be present):
   portfolio-sync trio `get_holdings`/`get_positions`/`generate_session`,
   none of which quote an arbitrary symbol live).
 
-Both branches reuse the **same account-wide credentials "Sync now"
-already saved** (migration `0029` -- see "One portfolio per account now,
+Both branches reuse the **same account-wide credentials already
+saved** (migration `0029` -- see "One portfolio per account now,
 in practice" above) — no separate app-wide broker credentials needed for
 either. The two dicts are merged with `dict.update` (Zerodha applied
 second, so it wins on a symbol both brokers happen to quote — an
@@ -2267,7 +2271,7 @@ alone the other broker's results. Each is cached with the same `ttl=60`
 convention as `load_latest_prices` right above it;
 `load_live_broker_prices` itself is deliberately *not*
 `@st.cache_data`-wrapped, so its `get_broker_connection` lookups always
-see the latest saved connection (e.g. right after a "Sync now" or
+see the latest saved connection (e.g. right after a Portfolio Refresh or
 "Log in to Zerodha" bumps `portfolio_cache_bust`) even though the two
 provider calls it delegates to are each cached individually.
 
@@ -2381,9 +2385,9 @@ this table).
   every leg's current `trade_date` via `portfolio_repo.list_position_meta`
   first and only calls `set_position_trade_date` for a leg that has
   none — never overwrites one already set (whether entered by the user
-  or defaulted by an earlier sync). Now wired into both live "Sync now"
-  flows unconditionally -- there's no CSV-upload path left to have
-  excluded it from anymore.
+  or defaulted by an earlier sync). Now wired into both live sync
+  flows (`_sync_dhan`/`_sync_zerodha`) unconditionally -- there's no
+  CSV-upload path left to have excluded it from anymore.
 - `portfolio_service.csp_target_pnl(max_credit, trade_date, expiry_date,
   as_of=None)` — `max(max_credit * 0.5, min(max_credit * 0.95,
   max_credit * (duration_held / duration_to_expiry) * 1.2))` (`as_of`
@@ -2471,7 +2475,12 @@ every page re-injects with the user's actual `Theme` setting once loaded
 - **`session.py`** — all Supabase Auth + `st.session_state` handling: `sign_in`/`sign_up`/`sign_out`, `request_password_reset`/`verify_recovery_code`/`set_new_password`, `require_login()` (the gate every page calls), `get_user_client_cached()`.
 - **`formatting.py`** — Indian-numbering-system currency formatting (`format_inr`, lakh/crore grouping), `format_pct`, `direction_arrow`, `pass_fail_badge` (✅ Pass/❌ Fail/N/A, with text), `pass_fail_icon` (✅/❌/—, symbol only — used throughout the Dashboard table's Momentum/Dividend yield/PEG/Fundamentals columns; `pass_fail_badge` is kept for spots that still want the text, e.g. Stock Detail's scorecard). `alert_type_label()`/`summarize_alert_config()` — pure functions turning an `AlertType` + its raw `config` dict into human-readable text (e.g. "Price crosses above ₹1,000.00"), replacing what used to be a literal `f"config={a.config}"` Python-dict dump shown on both Stock Detail and the Alerts screen (now folded into Settings); the exact `config` keys each branch reads (`level`/`direction`, `period`/`direction`, `threshold`/`direction`, `entry_price`, `target_price`/`stop_loss`) must stay in sync with whatever keys the alert-creation forms in `2_Stock_Detail.py`/`4_Settings.py` actually write. **A real bug found here**: `format_inr`/`format_crores`/`format_pct`/`direction_arrow` all checked `value is None`, but `pages/1_Dashboard.py`'s `pd.DataFrame([r.model_dump() for r in rows])` silently converts a Pydantic model's correct `None` into `float('nan')` for any column that has real float values elsewhere in the same column (confirmed directly: a mixed-value column comes back `float64` dtype with `None` cells as `nan`, `nan is None` is `False`) — a genuinely-missing `return_1d` rendered as the literal string `"nan%"` on screen instead of `"—"`. All four formatters now route through a shared `_is_missing(value)` helper that also checks `math.isnan()`.
 - **`timezones.py`** — `now_ist()`/`to_ist()`/`format_ist()`, thin wrappers around `pytz`.
-- **`refresh_bar.py`** — `render_global_refresh_bar(client)`, the single **"🔄 Market Data Refresh"** button called at the same spot (right after the title/disclaimer) on every page (see the Pages section's `1_Dashboard.py` bullet for what it replaced there). Originally three separate buttons ("Stock Data Refresh", "NSE F&O Data Refresh", "BSE F&O Data Refresh"), each firing its own fetch independently; collapsed into one on request, and a click now fires every applicable task **concurrently** via `concurrent.futures.ThreadPoolExecutor` (`_run_all`) rather than the user clicking three buttons in sequence — real wall-clock savings, since these are blocking HTTP calls to two different Edge Functions (and, conditionally, a broker API) that don't depend on each other. The task dict `_run_all` builds always has three entries — `"stock"` (`edge_refresh.trigger_manual_refresh`, Yahoo-sourced stock+fundamentals+screener), `"nse_fo"`/`"bse_fo"` (`edge_refresh.trigger_fo_refresh(..., "NSE"/"BSE")`) — and conditionally a fourth, `"live_prices"`, only when the signed-in account's `user_settings.data_provider` is `"dhan"` or `"zerodha"` (`_BROKER_BY_PROVIDER` maps the two to their broker name). Fundamentals/PEG/dividend and the full F&O chain are **never** provider-branched -- neither Dhan nor Zerodha's API exposes that data, so `"stock"`/`"nse_fo"`/`"bse_fo"` always run regardless of Data Provider; only the new fourth task is conditional, and it only ever affects stock LTP. `_refresh_user_live_prices(client, user_id, broker)` (the `"live_prices"` task) loads the account's `broker_connections` row for that broker, builds the full watched-symbol universe (Nifty50 constituents ∪ this account's own `portfolio_repo.list_portfolio_symbols` -- the same union Stock Detail/Options already use to widen their pickers), calls the existing `load_live_dhan_prices`/`load_live_zerodha_prices` (`src/utils/portfolio_page.py`) across it with a fresh `cache_bust` (not reusing those functions' own 60s `@st.cache_data` TTL, since this is a user-initiated "fetch now"), and writes the result via `snapshot_repo.upsert_user_live_prices(client, user_id, prices)` (`user_live_prices`, migration `0030`) -- what Dashboard/Stock Detail read as an LTP override (see those pages' bullets above). Each task's result is stashed in `st.session_state` and rendered on the next script run (the same "can't render across an `st.rerun()`" pattern the old Dashboard-only buttons used: `_render_stock_summary`/`_render_fo_summary`/`_render_live_prices_summary`), and every click ends with a blanket `st.cache_data.clear()` -- not a page-local cache-bust counter -- specifically so a refresh triggered from, say, the Options page also invalidates the Dashboard's cached screener rows for whenever the user navigates there next. Above the button, three-to-four `st.caption()` lines show "Last stock refresh"/"Last NSE F&O refresh"/"Last BSE F&O refresh" (`fetch_log_repo.get_last_successful_fetch`) plus, only when a broker is connected, "Stock LTP source: live `<Broker>` quotes (Data Provider setting, in Settings)". `_universe_breakdown()` is the same "(X stocks, Y ETFs/funds)" stock-refresh message logic that used to live in `pages/1_Dashboard.py` as `_load_universe_counts`, moved here so the message stays identical regardless of which page triggered the refresh.
+- **`refresh_bar.py`** — five independent, targeted refresh renderers, replacing what used to be one bundled **"🔄 Market Data Refresh"** button (`render_global_refresh_bar`/`_run_all`, which fired every fetch concurrently regardless of what the page actually needed). Each renderer fetches independently -- no shared cooldown or thread pool across buttons, since each is now its own single-purpose click:
+  - `render_fundamental_and_bhavcopy_refresh(client)` -- Settings only, a new "Data Refresh" `st.subheader`. **Fundamental Data Refresh** calls `edge_refresh.trigger_manual_refresh(token, mode="fundamentals")` (fresh Yahoo fundamentals only, no price/screener writes); **Bhavcopy Refresh** fires `trigger_fo_refresh(token, "NSE")` and `"BSE"` concurrently via a 2-worker `ThreadPoolExecutor` (the one place concurrency is still used, since it's one button covering two independent exchanges).
+  - `render_stock_refresh_button(client, user_id, data_provider)` -- every page except Settings; shows exactly one of **Stock Data Refresh** (`data_provider == "yfinance_bhavcopy"`, calls `trigger_manual_refresh(token, mode="price")` -- price/dividends + a screener recompute using carried-forward fundamentals) or **Stock & Option Data Refresh** (`data_provider in ("dhan", "zerodha")`). The latter is exactly the old bundled button's broker-live-price task, promoted to its own handler: `_refresh_user_live_prices(client, user_id, broker)` loads the account's `broker_connections` row, builds the full watched-symbol universe (Nifty50 constituents ∪ this account's own `portfolio_repo.list_portfolio_symbols`, plus every tracked ETF for Dhan), calls `DhanProvider.get_quotes`/`load_live_zerodha_prices` with a fresh `cache_bust`, writes `user_live_prices` (migration `0030`), and (Dhan only, migration `0032`) also refetches every F&O contract `_dhan_fo_universe` returns via `DhanProvider.get_fo_quotes`, written to `user_live_fo_prices`.
+  - `render_portfolio_refresh_button(client, user_id, data_provider)` -- My Trades/My Holdings/My Positions/My CSP only; no-ops for `yfinance_bhavcopy` (no broker to sync from). Otherwise renders **Portfolio Refresh**, calling `data_provider_settings.sync_broker_portfolio` -- the same `_sync_dhan`/`_sync_zerodha` Settings' "Save & Sync"/"Update credentials" forms call, now also reachable without visiting Settings. Settings no longer has its own standalone "Sync now" button.
+
+  Every click still ends with a blanket `st.cache_data.clear()` -- not a page-local cache-bust counter -- before `st.rerun()`, same reasoning as before: a refresh triggered from, say, the Options page must also invalidate the Dashboard's cached screener rows. Each button's own `_render_*_summary()` function is stashed in `st.session_state` and rendered on the *next* script run (the "can't render across an `st.rerun()`" pattern this module has always used): `_render_stock_summary`/`_render_fundamentals_summary`/`_render_fo_summary`/`_render_live_prices_summary`. `_universe_breakdown()` is unchanged, still the same "(X stocks, Y ETFs/funds)" message logic. `_last_fetch_caption()` is unchanged too, now called with a `"portfolio_sync"` fetch_type (migration `0033`) for the new Portfolio Refresh caption, in addition to its existing `"price"`/`"fundamentals"`/`"fo"` uses.
 - **`ui.py`** — shared fragments: `status_badge()` (colored HTML span with text, e.g. Stock Detail's header), `market_state_label()`, `buy_sell_label()` (Green→"Model Buy Watch" etc., per the spec's no-guarantee wording), `render_disclaimer()`, `plotly_template()`, `inject_tailwind()`, plus the design-system layer described below: `ACCENT` (the "Classic Institutional" slate/navy palette constants), `inject_global_styles()`/`inject_design_system()`, `_surface_classes()`, `render_card()`, `render_pill()`, `render_stat_tile()`/`render_stat_grid()`, `render_alert_row()`.
 - **`logging.py`** — `get_logger(name)`, configures `logging.basicConfig` once from `Settings.log_level`.
 
@@ -2594,7 +2603,7 @@ project's Edge Functions from this development environment directly, so
 `deno test`/`deno check` are as far as verification goes without the
 user actually deploying and clicking the button themselves.
 
-`fo-refresh/` backs the F&O half of **"🔄 Market Data Refresh"** -- one
+`fo-refresh/` backs **Bhavcopy Refresh** (Settings only) -- one
 Edge Function, not two, selected via the POST body's `exchange` field
 (called twice per click, once per exchange, concurrently with the stock
 half -- see `refresh_bar.py`'s bullet above) -- same reasoning and runtime as `manual-refresh/`

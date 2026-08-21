@@ -86,10 +86,16 @@ class FetchType(StrEnum):
     FUNDAMENTALS = "fundamentals"
     DIVIDEND = "dividend"
     CONSTITUENTS = "constituents"
-    ALL = "all"  # logged by the on-demand manual-refresh Edge Function,
-    # which does price+dividend+fundamentals+screener in one invocation
-    # rather than the Python cron path's separate --mode values
+    ALL = "all"  # legacy -- logged by the on-demand manual-refresh Edge
+    # Function back when it bundled price+dividend+fundamentals+screener
+    # into one invocation; that function now logs PRICE or FUNDAMENTALS
+    # per its `mode`, same as the Python cron path's separate --mode
+    # values, but old rows with this value still exist
     FO = "fo"  # logged by the on-demand fo-refresh Edge Function
+    PORTFOLIO_SYNC = "portfolio_sync"  # logged by a broker portfolio sync
+    # (Settings' "Save & Sync"/"Update credentials", or the Portfolio
+    # Refresh button on My Trades/My Holdings/My Positions/My CSP -- see
+    # src/utils/data_provider_settings.py's sync_broker_portfolio)
 
 
 class FetchStatus(StrEnum):

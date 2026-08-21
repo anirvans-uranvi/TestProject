@@ -23,7 +23,7 @@ from src.utils.portfolio_page import (
     load_trade_meta,
     slug,
 )
-from src.utils.refresh_bar import render_global_refresh_bar
+from src.utils.refresh_bar import render_portfolio_refresh_button, render_stock_refresh_button
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.ui import inject_global_styles, render_disclaimer
 
@@ -37,7 +37,8 @@ inject_global_styles(user_settings.theme)  # re-inject with the user's actual th
 
 st.title("\U0001f4b0 My CSP")
 render_disclaimer()
-render_global_refresh_bar(client)
+render_stock_refresh_button(client, user_id, user_settings.data_provider)
+render_portfolio_refresh_button(client, user_id, user_settings.data_provider)
 st.caption(
     'Every position leg from a Trade whose Trade Type is "CSP". Go to My Trades, select a trade, click '
     '"Analyse Trade", and rename its Trade Type to "CSP" to have it show up here. Set each leg\'s Trade Date '

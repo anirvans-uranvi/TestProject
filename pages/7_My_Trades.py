@@ -17,7 +17,7 @@ from src.utils.portfolio_page import (
     load_trade_meta,
     slug,
 )
-from src.utils.refresh_bar import render_global_refresh_bar
+from src.utils.refresh_bar import render_portfolio_refresh_button, render_stock_refresh_button
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.ui import inject_global_styles, render_disclaimer
 
@@ -31,7 +31,8 @@ inject_global_styles(user_settings.theme)  # re-inject with the user's actual th
 
 st.title("\U0001f4bc My Trades")
 render_disclaimer()
-render_global_refresh_bar(client)
+render_stock_refresh_button(client, user_id, user_settings.data_provider)
+render_portfolio_refresh_button(client, user_id, user_settings.data_provider)
 st.caption(
     "Holdings and F&O positions sharing an underlying, grouped into one Trade. Select a row and click "
     "\"Analyse Trade\" to see its legs, correct the underlying, rename the trade type, or merge/split trades."

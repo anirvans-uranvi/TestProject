@@ -10,7 +10,7 @@ from postgrest.exceptions import APIError
 from src.repositories import companies_repo, fo_repo, portfolio_repo, settings_repo, snapshot_repo
 from src.services import fo_service, portfolio_service
 from src.utils.formatting import format_inr, format_pct
-from src.utils.refresh_bar import render_global_refresh_bar
+from src.utils.refresh_bar import render_stock_refresh_button
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.ui import inject_global_styles, plotly_template, render_disclaimer, render_stat_grid
 
@@ -24,7 +24,7 @@ inject_global_styles(user_settings.theme)  # re-inject with the user's actual th
 
 st.title("📊 Options & Futures")
 render_disclaimer()
-render_global_refresh_bar(client)
+render_stock_refresh_button(client, user_id, user_settings.data_provider)
 
 
 def _fmt_int(value) -> str:

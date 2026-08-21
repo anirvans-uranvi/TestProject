@@ -9,8 +9,10 @@ sync holdings/positions.
 Replaces pages/6_My_Broker.py's per-portfolio "Connect ... account" flow
 (migration 0029 collapsed broker_connections to one row per (user_id,
 broker), no longer scoped to an individual portfolio_name). CSV upload is
-dropped entirely -- the Dhan/Zerodha "Sync now" flows below are now the
-only way to populate holdings/positions, always targeting
+dropped entirely -- connecting here (which always syncs immediately) and
+the Portfolio Refresh button on My Trades/My Holdings/My Positions/My CSP
+(src/utils/refresh_bar.py, via this module's sync_broker_portfolio) are
+now the only ways to populate holdings/positions, always targeting
 portfolio_repo.get_or_default_portfolio_name's one resolved portfolio (see
 that function's docstring for why there's no portfolio-name picker here
 anymore).
@@ -25,9 +27,11 @@ from postgrest.exceptions import APIError
 from src.data_providers.base import ProviderError
 from src.data_providers.dhan_provider import DhanAuthError, DhanProvider
 from src.data_providers.zerodha_provider import ZerodhaAuthError, ZerodhaProvider
+from src.models.enums import FetchStatus, FetchType
+from src.models.fetch_log import ProviderFetchLog
 from src.models.portfolio import BrokerConnection
 from src.models.user import UserSettings
-from src.repositories import fo_repo, portfolio_repo, settings_repo
+from src.repositories import fetch_log_repo, fo_repo, portfolio_repo, settings_repo
 from src.services import portfolio_service
 from src.utils.portfolio_page import ensure_cache_bust
 from src.utils.timezones import now_ist, to_ist
@@ -104,7 +108,11 @@ def _sync_dhan(*, client, user_id: str, connection: BrokerConnection) -> None:
     """Pulls holdings + positions straight from Dhan's API into this
     account's one resolved portfolio (get_or_default_portfolio_name) --
     same repo calls the old CSV upload path used, so the rendered My
-    Holdings/My Positions tables look identical regardless of source."""
+    Holdings/My Positions tables look identical regardless of source.
+    Called both from Settings' "Save & Sync"/"Update credentials" forms
+    and from sync_broker_portfolio (the Portfolio Refresh button on My
+    Trades/My Holdings/My Positions/My CSP)."""
+    started_at = datetime.now(timezone.utc)
     portfolio_name = portfolio_repo.get_or_default_portfolio_name(client, user_id)
     provider = DhanProvider(client_id=connection.client_id, access_token=connection.access_token)
     try:
@@ -141,6 +149,7 @@ def _sync_dhan(*, client, user_id: str, connection: BrokerConnection) -> None:
     portfolio_repo.replace_broker_holdings(client, user_id, portfolio_name, "Dhan", holding_records)
     portfolio_repo.replace_broker_positions(client, user_id, portfolio_name, "Dhan", position_records)
     _default_new_position_trade_dates(client=client, user_id=user_id, portfolio_name=portfolio_name, broker="Dhan", positions=positions)
+    _log_portfolio_sync(client, "Dhan", started_at)
     _bump_cache_bust()
     st.success(
         f"Synced {len(holding_records)} holding(s) and {len(position_records)} position(s) "
@@ -153,10 +162,13 @@ def _sync_zerodha(*, client, user_id: str, connection: BrokerConnection) -> None
     """Pulls holdings + positions straight from Zerodha's Kite Connect
     API into this account's one resolved portfolio. Unlike Dhan, no
     fallback-LTP step is needed -- Kite's responses already include
-    last_price directly."""
+    last_price directly. Called both from Settings' "Log in to Zerodha"
+    redirect handler and from sync_broker_portfolio (the Portfolio
+    Refresh button on My Trades/My Holdings/My Positions/My CSP)."""
     if not connection.access_token or not connection.api_secret:
         st.error('Not logged in yet -- click "Log in to Zerodha" below first.')
         return
+    started_at = datetime.now(timezone.utc)
     portfolio_name = portfolio_repo.get_or_default_portfolio_name(client, user_id)
     provider = ZerodhaProvider(
         api_key=connection.client_id, api_secret=connection.api_secret, access_token=connection.access_token
@@ -181,12 +193,54 @@ def _sync_zerodha(*, client, user_id: str, connection: BrokerConnection) -> None
     portfolio_repo.replace_broker_holdings(client, user_id, portfolio_name, "Zerodha", holding_records)
     portfolio_repo.replace_broker_positions(client, user_id, portfolio_name, "Zerodha", position_records)
     _default_new_position_trade_dates(client=client, user_id=user_id, portfolio_name=portfolio_name, broker="Zerodha", positions=positions)
+    _log_portfolio_sync(client, "Zerodha", started_at)
     _bump_cache_bust()
     st.success(
         f"Synced {len(holding_records)} holding(s) and {len(position_records)} position(s) "
         f"from Zerodha to \"{portfolio_name}\"."
     )
     st.rerun()
+
+
+def _log_portfolio_sync(client, broker: str, started_at: datetime) -> None:
+    """Logs a provider_fetch_log row for a completed broker portfolio
+    sync -- the same table/pattern every other refresh button already
+    writes to, so "Last portfolio refresh" (render_portfolio_refresh_button
+    in src/utils/refresh_bar.py) has something to read. `provider_name` is
+    the lowercased broker, matching the Data Provider setting's own values
+    ("dhan"/"zerodha")."""
+    fetch_log_repo.log_fetch(
+        client,
+        ProviderFetchLog(
+            provider_name=broker.lower(),
+            fetch_type=FetchType.PORTFOLIO_SYNC,
+            status=FetchStatus.SUCCESS,
+            started_at=started_at,
+            finished_at=datetime.now(timezone.utc),
+        ),
+    )
+
+
+def sync_broker_portfolio(*, client, user_id: str, data_provider: str) -> None:
+    """Entry point for the Portfolio Refresh button (My Trades/My
+    Holdings/My Positions/My CSP -- src/utils/refresh_bar.py) -- resolves
+    this account's connected broker from its Data Provider setting and
+    runs the same sync Settings' "Save & Sync"/"Update credentials" forms
+    trigger. Shows an error directing back to Settings if the account has
+    no (or an incomplete) broker connection yet, rather than crashing --
+    a data_provider of "dhan"/"zerodha" doesn't guarantee credentials were
+    ever actually saved."""
+    broker = {"dhan": "Dhan", "zerodha": "Zerodha"}.get(data_provider)
+    if broker is None:
+        return
+    connection = portfolio_repo.get_broker_connection(client, user_id, broker)
+    if connection is None:
+        st.error(f"No connected {broker} account yet -- connect one in Settings' Data Provider section.")
+        return
+    if broker == "Dhan":
+        _sync_dhan(client=client, user_id=user_id, connection=connection)
+    else:
+        _sync_zerodha(client=client, user_id=user_id, connection=connection)
 
 
 def _render_dhan_connect_section(*, client, user_id: str) -> None:
@@ -242,16 +296,12 @@ def _render_dhan_connect_section(*, client, user_id: str) -> None:
     else:
         st.caption(f"Connected -- Client ID {masked_id}.")
 
-    sync_col, disconnect_col = st.columns(2)
-    with sync_col:
-        if st.button("Sync now", key="dhan_sync"):
-            _sync_dhan(client=client, user_id=user_id, connection=connection)
-    with disconnect_col:
-        if st.button("Disconnect", key="dhan_disconnect"):
-            portfolio_repo.delete_broker_connection(client, user_id, "Dhan")
-            _bump_cache_bust()
-            st.success("Disconnected. Previously synced holdings/positions are unaffected.")
-            st.rerun()
+    st.caption('Use the "Portfolio Refresh" button on My Trades/My Holdings/My Positions/My CSP to re-sync.')
+    if st.button("Disconnect", key="dhan_disconnect"):
+        portfolio_repo.delete_broker_connection(client, user_id, "Dhan")
+        _bump_cache_bust()
+        st.success("Disconnected. Previously synced holdings/positions are unaffected.")
+        st.rerun()
 
     with st.expander("Update credentials"):
         with st.form("dhan_update_form"):
@@ -317,16 +367,12 @@ def _render_zerodha_connect_section(*, client, user_id: str) -> None:
         st.caption(
             f"Connected -- API Key {masked_key}, session started {_relative_age(_hours_since(connection.token_saved_at))}."
         )
-        sync_col, disconnect_col = st.columns(2)
-        with sync_col:
-            if st.button("Sync now", key="zerodha_sync"):
-                _sync_zerodha(client=client, user_id=user_id, connection=connection)
-        with disconnect_col:
-            if st.button("Disconnect", key="zerodha_disconnect"):
-                portfolio_repo.delete_broker_connection(client, user_id, "Zerodha")
-                _bump_cache_bust()
-                st.success("Disconnected. Previously synced holdings/positions are unaffected.")
-                st.rerun()
+        st.caption('Use the "Portfolio Refresh" button on My Trades/My Holdings/My Positions/My CSP to re-sync.')
+        if st.button("Disconnect", key="zerodha_disconnect"):
+            portfolio_repo.delete_broker_connection(client, user_id, "Zerodha")
+            _bump_cache_bust()
+            st.success("Disconnected. Previously synced holdings/positions are unaffected.")
+            st.rerun()
     else:
         if connection.access_token is not None:
             st.warning(
@@ -339,8 +385,8 @@ def _render_zerodha_connect_section(*, client, user_id: str) -> None:
 
     with st.expander("Update API Key / Secret"):
         st.caption(
-            "Changing these doesn't clear an existing session -- \"Sync now\" will simply fail and prompt a "
-            "fresh login if it's no longer valid under the new credentials."
+            "Changing these doesn't clear an existing session -- \"Portfolio Refresh\" will simply fail and "
+            "prompt a fresh login if it's no longer valid under the new credentials."
         )
         with st.form("zerodha_update_form"):
             updated_api_key = st.text_input("Kite Connect API Key", value=connection.client_id)

@@ -1,15 +1,23 @@
-// Manual on-demand refresh, triggered from the Dashboard's "Manual
-// refresh" button (src/services/edge_refresh.py). Does the real
-// fetch-from-Yahoo-and-write-to-Supabase work that Streamlit page code
-// can never safely do itself, since that requires the service-role key
-// (bypasses RLS) -- this function holds it as an Edge Runtime env var,
-// never exposed to the browser or to Streamlit.
+// Manual on-demand refresh, triggered from the "Stock Data Refresh" /
+// "Fundamental Data Refresh" buttons (src/utils/refresh_bar.py, via
+// src/services/edge_refresh.py). Does the real fetch-from-Yahoo-and-
+// write-to-Supabase work that Streamlit page code can never safely do
+// itself, since that requires the service-role key (bypasses RLS) --
+// this function holds it as an Edge Runtime env var, never exposed to
+// the browser or to Streamlit.
 //
-// Full parity with `python scripts/run_refresh.py --mode=all`: prices,
-// dividends, fundamentals, and a screener recompute, all in one
-// invocation. See calculations.ts's file header for the real tradeoff
-// this implies (business logic duplicated in a second language) and
-// yahoo.ts's for the Yahoo-endpoint fragility this accepts.
+// The POST body's required `mode` selects which of two independent
+// pieces to run -- mirrors `python scripts/run_refresh.py`'s own
+// separate --mode=eod/--mode=screener vs --mode=fundamentals split,
+// rather than the old single invocation that always did both:
+//   "price"        -- price_history + dividend_events, then a screener
+//                      classification recompute using CARRIED-FORWARD
+//                      fundamentals (no fresh Yahoo fundamentals call).
+//   "fundamentals"  -- fundamental_snapshots only, from a fresh Yahoo
+//                      fundamentals call. No price/screener writes.
+// See calculations.ts's file header for the real tradeoff duplicating
+// this business logic in a second language implies, and yahoo.ts's for
+// the Yahoo-endpoint fragility this accepts.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
   buildClassification,
@@ -69,7 +77,47 @@ type AnyClient = any;
 // this project) means supabase-js's default generics would otherwise
 // infer every `.from(table)` row as `never` -- explicitly loosened here
 // rather than hand-maintaining a parallel schema type.
-async function refreshOneSymbol(
+
+// mode="fundamentals" -- fresh Yahoo fundamentals only, no price/screener
+// writes. Mirrors src/services/refresh_service.py::refresh_fundamentals.
+async function refreshFundamentalsForSymbol(
+  serviceClient: AnyClient,
+  symbol: string,
+  asOfDate: string,
+): Promise<SymbolResult> {
+  try {
+    const fundamentals = await fetchFundamentals(symbol);
+    const fundamentalsPayload: Record<string, unknown> = {
+      symbol,
+      as_of_date: asOfDate,
+      source: "manual_edge",
+      is_stale: false,
+    };
+    // Mirror Python's exclude_none=True upsert: omit null fields entirely
+    // so they don't clobber a same-day row's previously-fetched values.
+    if (fundamentals.peRatio !== null) fundamentalsPayload.pe_ratio = fundamentals.peRatio;
+    if (fundamentals.pegRatio !== null) fundamentalsPayload.peg_ratio = fundamentals.pegRatio;
+    if (fundamentals.eps !== null) fundamentalsPayload.eps = fundamentals.eps;
+    if (fundamentals.marketCap !== null) fundamentalsPayload.market_cap = fundamentals.marketCap;
+    if (fundamentals.week52High !== null) fundamentalsPayload.week_52_high = fundamentals.week52High;
+    if (fundamentals.week52Low !== null) fundamentalsPayload.week_52_low = fundamentals.week52Low;
+    const { error: fundErr } = await serviceClient
+      .from("fundamental_snapshots")
+      .upsert(fundamentalsPayload, { onConflict: "symbol,as_of_date" });
+    if (fundErr) throw new Error(`fundamental_snapshots upsert: ${fundErr.message}`);
+
+    return { symbol, ok: true };
+  } catch (err) {
+    return { symbol, ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// mode="price" -- price_history + dividend_events, then a screener
+// classification recompute using CARRIED-FORWARD fundamentals (no fresh
+// Yahoo fundamentals call here) -- mirrors
+// src/services/refresh_service.py::refresh_eod_prices immediately
+// followed by src/services/screener_service.py::refresh_all_screener_rows.
+async function refreshPriceForSymbol(
   serviceClient: AnyClient,
   symbol: string,
   asOfDate: string,
@@ -112,30 +160,9 @@ async function refreshOneSymbol(
       if (divErr) throw new Error(`dividend_events upsert: ${divErr.message}`);
     }
 
-    // --- fundamental_snapshots --------------------------------------------
-    const fundamentals = await fetchFundamentals(symbol);
-    const fundamentalsPayload: Record<string, unknown> = {
-      symbol,
-      as_of_date: asOfDate,
-      source: "manual_edge",
-      is_stale: false,
-    };
-    // Mirror Python's exclude_none=True upsert: omit null fields entirely
-    // so they don't clobber a same-day row's previously-fetched values.
-    if (fundamentals.peRatio !== null) fundamentalsPayload.pe_ratio = fundamentals.peRatio;
-    if (fundamentals.pegRatio !== null) fundamentalsPayload.peg_ratio = fundamentals.pegRatio;
-    if (fundamentals.eps !== null) fundamentalsPayload.eps = fundamentals.eps;
-    if (fundamentals.marketCap !== null) fundamentalsPayload.market_cap = fundamentals.marketCap;
-    if (fundamentals.week52High !== null) fundamentalsPayload.week_52_high = fundamentals.week52High;
-    if (fundamentals.week52Low !== null) fundamentalsPayload.week_52_low = fundamentals.week52Low;
-    const { error: fundErr } = await serviceClient
-      .from("fundamental_snapshots")
-      .upsert(fundamentalsPayload, { onConflict: "symbol,as_of_date" });
-    if (fundErr) throw new Error(`fundamental_snapshots upsert: ${fundErr.message}`);
-
-    // Carry-forward: today's Yahoo fetch may have gaps (PEG especially),
-    // so pull recent history and use the most recent non-null value per
-    // field -- exactly what fundamentals_repo.get_latest_fundamentals()
+    // Carry-forward: use the most recent non-null value per fundamentals
+    // field already on file (no fresh Yahoo fundamentals call in this
+    // mode) -- exactly what fundamentals_repo.get_latest_fundamentals()
     // does in Python. See calculations.ts::carryForwardFields.
     const { data: recentFundamentals, error: histErr } = await serviceClient
       .from("fundamental_snapshots")
@@ -242,6 +269,21 @@ Deno.serve(async (req: Request) => {
   }
   const accessToken = authHeader.slice("Bearer ".length);
 
+  let mode: "price" | "fundamentals";
+  try {
+    const body = await req.json();
+    if (body?.mode !== "price" && body?.mode !== "fundamentals") {
+      return jsonResponse({ error: 'Body must include mode: "price" or "fundamentals"' }, 400);
+    }
+    mode = body.mode;
+  } catch {
+    return jsonResponse({ error: 'Body must include mode: "price" or "fundamentals"' }, 400);
+  }
+  // Independent per-mode cooldown/logging identity (mirrors fo-refresh's
+  // per-exchange providerName()) -- clicking Fundamental Data Refresh
+  // never blocks Stock Data Refresh, or vice versa.
+  const providerNameForRun = mode === "fundamentals" ? "manual_edge_fundamentals" : "manual_edge_price";
+
   const anonClient: AnyClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   const { data: userData, error: authError } = await anonClient.auth.getUser(accessToken);
   if (authError || !userData?.user) {
@@ -257,8 +299,8 @@ Deno.serve(async (req: Request) => {
   const { data: recentFetches } = await serviceClient
     .from("provider_fetch_log")
     .select("started_at")
-    .eq("provider_name", "manual_edge")
-    .eq("fetch_type", "all")
+    .eq("provider_name", providerNameForRun)
+    .eq("fetch_type", mode)
     .eq("status", "success")
     .order("started_at", { ascending: false })
     .limit(1);
@@ -339,9 +381,10 @@ Deno.serve(async (req: Request) => {
   }
 
   const asOfDate = todayIsoInIst();
+  const refreshSymbol = mode === "fundamentals" ? refreshFundamentalsForSymbol : refreshPriceForSymbol;
   const results: SymbolResult[] = [];
   for (const batch of chunk(symbols, BATCH_SIZE)) {
-    const batchResults = await Promise.all(batch.map((symbol) => refreshOneSymbol(serviceClient, symbol, asOfDate)));
+    const batchResults = await Promise.all(batch.map((symbol) => refreshSymbol(serviceClient, symbol, asOfDate)));
     results.push(...batchResults);
   }
 
@@ -354,18 +397,23 @@ Deno.serve(async (req: Request) => {
   // finishes rather than waiting on the next cron tick. Not fatal if it
   // fails (e.g. the dashboard_fo_metrics migration not applied yet) --
   // the price refresh above already succeeded and shouldn't be reported
-  // as failed over a cache that degrades to "N/A" anyway.
-  try {
-    await recomputeDashboardMetrics(serviceClient);
-  } catch (err) {
-    console.error("dashboard_fo_metrics recompute failed:", err instanceof Error ? err.message : String(err));
+  // as failed over a cache that degrades to "N/A" anyway. Fundamentals
+  // alone never move spot price, so this mode skips the recompute --
+  // mirrors run_refresh.py, where only --mode=screener (which always
+  // follows --mode=eod, never --mode=fundamentals) calls this.
+  if (mode === "price") {
+    try {
+      await recomputeDashboardMetrics(serviceClient);
+    } catch (err) {
+      console.error("dashboard_fo_metrics recompute failed:", err instanceof Error ? err.message : String(err));
+    }
   }
 
   const finishedAt = new Date();
 
   await serviceClient.from("provider_fetch_log").insert({
-    provider_name: "manual_edge",
-    fetch_type: "all",
+    provider_name: providerNameForRun,
+    fetch_type: mode,
     symbol: null,
     status: failed.length === 0 ? "success" : (succeeded.length > 0 ? "success" : "failure"),
     error_message: failed.length > 0 ? `${failed.length} symbol(s) failed: ${failed.map((f) => f.symbol).join(", ")}` : null,

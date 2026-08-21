@@ -1,40 +1,23 @@
-"""Shared "refresh data" bar shown at a consistent location -- right
-after the page title/disclaimer -- on every page (Dashboard, Stock
-Detail, Options, My Trades, My Holdings, My Positions, My CSP, Analyse
-Trade, Settings), so a user never has to navigate back to one specific
-page just to trigger a data refresh.
+"""Five independent, targeted refresh buttons -- replaces the old single
+"🔄 Market Data Refresh" button that fired everything at once regardless
+of what a page actually needed:
 
-One "🔄 Market Data Refresh" button (previously three separate ones --
-Stock Data Refresh, NSE F&O Data Refresh, BSE F&O Data Refresh --
-collapsed into one on request). A click fires every applicable fetch
-*concurrently* via a ThreadPoolExecutor rather than one-after-another
-(these are blocking network calls; running them in parallel cuts wall-
-clock time to roughly the slowest one instead of their sum):
-- Stock prices + fundamentals + screener recompute, via the
-  manual-refresh Edge Function (Yahoo Finance) -- always, regardless of
-  this account's Data Provider setting, since fundamentals (PEG,
-  dividend) aren't available from Dhan/Zerodha's APIs at all.
-- NSE and BSE F&O bhavcopy, via the fo-refresh Edge Function -- also
-  always; neither broker exposes a bhavcopy-equivalent full options
-  chain dump, so F&O ingestion stays bhavcopy-sourced regardless of
-  provider.
-- **New**: if this account's Data Provider setting (Settings page) is
-  Dhan or Zerodha, also refetches live stock LTP from that broker across
-  the full watched-symbol universe and caches it in `user_live_prices`
-  (migration 0030) -- what Dashboard/Stock Detail read as an override on
-  top of the shared daily_screener_snapshots value, see
-  src/repositories/snapshot_repo.py's get_user_live_prices.
-- **New**, Dhan only (migration 0032): also refetches live LTP for every
-  ETF (tracked but not shown on the Screener table), plus every futures/
-  option contract this account's own portfolio holds or the Dashboard's
-  cached 5% CSP/5% CC legs reference -- see _dhan_fo_universe and
-  DhanProvider.get_fo_quotes. Zerodha has no F&O instrument resolver yet,
-  so a Zerodha-provider account's refresh is unchanged (equity LTP only).
+- **Fundamental Data Refresh** / **Bhavcopy Refresh** (NSE + BSE) --
+  Settings only, `render_fundamental_and_bhavcopy_refresh`.
+- **Stock Data Refresh** (YFinance/Bhavcopy accounts) / **Stock & Option
+  Data Refresh** (Dhan/Zerodha accounts) -- every page except Settings,
+  `render_stock_refresh_button` (shows exactly one of the two, by Data
+  Provider setting).
+- **Portfolio Refresh** -- My Trades/My Holdings/My Positions/My CSP
+  only, Dhan/Zerodha accounts only, `render_portfolio_refresh_button`.
 
 A click always calls `st.cache_data.clear()` -- the *entire* app-wide
 cache, not just the current page's -- before `st.rerun()`-ing, so every
 page's own `@st.cache_data` loaders re-fetch fresh data regardless of
-which page the click happened on.
+which page the click happened on. Each button fetches independently (no
+shared cooldown/thread pool across buttons); "Bhavcopy Refresh" still
+fires its NSE + BSE legs concurrently via a `ThreadPoolExecutor`, since
+that's one button covering two independent exchanges.
 """
 from __future__ import annotations
 
@@ -47,10 +30,10 @@ import streamlit as st
 from src.data_providers.base import ProviderError
 from src.data_providers.dhan_provider import DhanAuthError, DhanProvider
 from src.models.enums import CompanyType
-from src.repositories import companies_repo, fetch_log_repo, fo_repo, portfolio_repo, settings_repo, snapshot_repo
+from src.repositories import companies_repo, fetch_log_repo, fo_repo, portfolio_repo, snapshot_repo
 from src.services import edge_refresh
+from src.utils.data_provider_settings import sync_broker_portfolio
 from src.utils.portfolio_page import load_live_zerodha_prices
-from src.utils.session import current_user_id
 from src.utils.timezones import format_ist
 
 _NSE_FO_PROVIDER = "fo_edge_nse"
@@ -113,11 +96,12 @@ def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
     their pickers) from its connected broker, and caches the result in
     user_live_prices for Dashboard/Stock Detail to read as an override.
     Only invoked when this account's Data Provider setting is Dhan/
-    Zerodha -- see render_global_refresh_bar. For Dhan specifically, also
-    widens the equity/ETF universe with every tracked ETF and refetches
-    live LTP for every F&O contract _dhan_fo_universe returns (migration
-    0032) -- Zerodha has no F&O instrument resolver yet, so its branch is
-    unchanged. Returns a small summary dict for _render_live_prices_summary."""
+    Zerodha -- see render_stock_refresh_button. For Dhan specifically,
+    also widens the equity/ETF universe with every tracked ETF and
+    refetches live LTP for every F&O contract _dhan_fo_universe returns
+    (migration 0032) -- Zerodha has no F&O instrument resolver yet, so
+    its branch is unchanged. Returns a small summary dict for
+    _render_live_prices_summary."""
     connection = portfolio_repo.get_broker_connection(client, user_id, broker)
     if connection is None or not connection.access_token:
         return {"error": f"No connected {broker} account yet -- connect one in Settings' Data Provider section."}
@@ -205,20 +189,30 @@ def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
     }
 
 
-def _run_all(client, user_id: str, data_provider: str) -> None:
+def _run_manual_refresh(mode: str, session_key: str) -> None:
     access_token = st.session_state["sb_access_token"]
-    tasks = {
-        "stock": lambda: edge_refresh.trigger_manual_refresh(access_token),
-        "nse_fo": lambda: edge_refresh.trigger_fo_refresh(access_token, "NSE"),
-        "bse_fo": lambda: edge_refresh.trigger_fo_refresh(access_token, "BSE"),
-    }
-    broker = _BROKER_BY_PROVIDER.get(data_provider)
-    if broker:
-        tasks["live_prices"] = lambda: _refresh_user_live_prices(client, user_id, broker)
+    spinner_text = (
+        "Refreshing fundamentals (PE, PEG, dividend yield, 52-week high/low)..."
+        if mode == "fundamentals"
+        else "Refreshing stock prices and recomputing screener status..."
+    )
+    with st.spinner(spinner_text):
+        try:
+            st.session_state[session_key] = edge_refresh.trigger_manual_refresh(access_token, mode=mode)
+        except edge_refresh.ManualRefreshError as exc:
+            st.session_state[session_key] = {"error": str(exc)}
+    st.cache_data.clear()
+    st.rerun()
 
-    with st.spinner("Refreshing market data -- stocks, fundamentals, and NSE + BSE F&O, all at once. This can take a few minutes..."):
-        with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
-            futures = {key: pool.submit(action) for key, action in tasks.items()}
+
+def _run_bhavcopy_refresh() -> None:
+    access_token = st.session_state["sb_access_token"]
+    with st.spinner("Refreshing NSE + BSE F&O bhavcopy..."):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {
+                "nse_fo": pool.submit(edge_refresh.trigger_fo_refresh, access_token, "NSE"),
+                "bse_fo": pool.submit(edge_refresh.trigger_fo_refresh, access_token, "BSE"),
+            }
             for key, future in futures.items():
                 try:
                     st.session_state[f"_refresh_bar_{key}"] = future.result()
@@ -228,11 +222,19 @@ def _run_all(client, user_id: str, data_provider: str) -> None:
     st.rerun()
 
 
+def _run_live_prices_refresh(client, user_id: str, broker: str) -> None:
+    with st.spinner(f"Refreshing live {broker} stock & option quotes..."):
+        st.session_state["_refresh_bar_live_prices"] = _refresh_user_live_prices(client, user_id, broker)
+    st.cache_data.clear()
+    st.rerun()
+
+
 def _render_stock_summary(client) -> None:
-    # Shown once, right after the rerun _run_all() triggers -- a message
-    # set and then immediately st.rerun()-ed away would never actually
-    # render, so this is stashed in session_state and displayed on the
-    # next script run instead (same pattern for every summary below).
+    # Shown once, right after the rerun the triggering function causes --
+    # a message set and then immediately st.rerun()-ed away would never
+    # actually render, so this is stashed in session_state and displayed
+    # on the next script run instead (same pattern for every summary
+    # below).
     summary = st.session_state.pop("_refresh_bar_stock", None)
     if not summary:
         return
@@ -246,6 +248,23 @@ def _render_stock_summary(client) -> None:
         failed_symbols = ", ".join(f["symbol"] for f in summary["symbolsFailed"])
         st.warning(
             f"Refreshed {summary['succeeded']} of {summary['total']} symbols{breakdown} -- "
+            f"{summary['failed']} failed: {failed_symbols}"
+        )
+
+
+def _render_fundamentals_summary() -> None:
+    summary = st.session_state.pop("_refresh_bar_fundamentals", None)
+    if not summary:
+        return
+    if summary.get("error"):
+        st.error(summary["error"])
+        return
+    if summary["failed"] == 0:
+        st.success(f"✅ Refreshed fundamentals for all {summary['succeeded']} symbols.")
+    else:
+        failed_symbols = ", ".join(f["symbol"] for f in summary["symbolsFailed"])
+        st.warning(
+            f"Refreshed fundamentals for {summary['succeeded']} of {summary['total']} symbols -- "
             f"{summary['failed']} failed: {failed_symbols}"
         )
 
@@ -296,26 +315,61 @@ def _render_live_prices_summary() -> None:
         st.caption(f"Not live-priced (Dhan has no matching contract, or it's simply not trading): {names}{suffix}")
 
 
-def render_global_refresh_bar(client) -> None:
-    """Renders the caption(s) + single Market Data Refresh button, plus
-    (once, right after a click) each fetch's own result message. Reads
-    the signed-in user's access token from
-    `st.session_state["sb_access_token"]` -- every page that calls this
-    has already gone through `require_login()`, which sets it."""
-    user_id = current_user_id()
-    user_settings = settings_repo.get_user_settings(client, user_id)
-
-    st.caption(_last_fetch_caption(client, "Last stock refresh", ["intraday_price", "all"]))
+def render_fundamental_and_bhavcopy_refresh(client) -> None:
+    """Settings-only "Data Refresh" section: Fundamental Data Refresh
+    (YFinance fundamentals -- PE, PEG, dividend yield, 52-week high/low)
+    and Bhavcopy Refresh (NSE + BSE F&O, one button covering both
+    exchanges). Neither depends on this account's Data Provider setting
+    -- fundamentals and the full F&O chain always come from YFinance/
+    Bhavcopy regardless of it."""
+    st.subheader("Data Refresh")
+    st.caption(_last_fetch_caption(client, "Last fundamentals refresh", ["fundamentals", "all"]))
     st.caption(_last_fetch_caption(client, "Last NSE F&O refresh", "fo", _NSE_FO_PROVIDER))
     st.caption(_last_fetch_caption(client, "Last BSE F&O refresh", "fo", _BSE_FO_PROVIDER))
-    broker = _BROKER_BY_PROVIDER.get(user_settings.data_provider)
-    if broker:
-        st.caption(f"Stock LTP source: live {broker} quotes (Data Provider setting, in Settings).")
 
-    if st.button("🔄 Market Data Refresh", key="refresh_bar_market_data_btn"):
-        _run_all(client, user_id, user_settings.data_provider)
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Fundamental Data Refresh", key="refresh_bar_fundamentals_btn"):
+            _run_manual_refresh("fundamentals", "_refresh_bar_fundamentals")
+    with col2:
+        if st.button("Bhavcopy Refresh", key="refresh_bar_bhavcopy_btn"):
+            _run_bhavcopy_refresh()
 
-    _render_stock_summary(client)
+    _render_fundamentals_summary()
     _render_fo_summary("nse_fo", "NSE")
     _render_fo_summary("bse_fo", "BSE")
-    _render_live_prices_summary()
+
+
+def render_stock_refresh_button(client, user_id: str, data_provider: str) -> None:
+    """Every page except Settings: shows exactly one of Stock Data
+    Refresh (YFinance/Bhavcopy accounts -- price + screener recompute) or
+    Stock & Option Data Refresh (Dhan/Zerodha accounts -- live broker
+    LTP, plus F&O contracts for Dhan -- see _refresh_user_live_prices),
+    by this account's Data Provider setting (Settings page)."""
+    broker = _BROKER_BY_PROVIDER.get(data_provider)
+    if broker:
+        st.caption(f"Stock LTP source: live {broker} quotes (Data Provider setting, in Settings).")
+        if st.button("Stock & Option Data Refresh", key="refresh_bar_broker_btn"):
+            _run_live_prices_refresh(client, user_id, broker)
+        _render_live_prices_summary()
+    else:
+        st.caption(_last_fetch_caption(client, "Last stock refresh", ["intraday_price", "price", "all"]))
+        if st.button("Stock Data Refresh", key="refresh_bar_stock_btn"):
+            _run_manual_refresh("price", "_refresh_bar_stock")
+        _render_stock_summary(client)
+
+
+def render_portfolio_refresh_button(client, user_id: str, data_provider: str) -> None:
+    """My Trades/My Holdings/My Positions/My CSP only: Portfolio Refresh,
+    visible only for a Dhan/Zerodha-provider account -- re-syncs
+    holdings/positions from that broker via
+    data_provider_settings.sync_broker_portfolio (the same sync Settings'
+    "Save & Sync"/"Update credentials" forms trigger). Renders nothing
+    for a YFinance/Bhavcopy account, which has no broker connection to
+    sync from."""
+    broker = _BROKER_BY_PROVIDER.get(data_provider)
+    if not broker:
+        return
+    st.caption(_last_fetch_caption(client, "Last portfolio refresh", "portfolio_sync", broker.lower()))
+    if st.button("Portfolio Refresh", key="refresh_bar_portfolio_btn"):
+        sync_broker_portfolio(client=client, user_id=user_id, data_provider=data_provider)

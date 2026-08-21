@@ -28,10 +28,13 @@ class ManualRefreshError(Exception):
         self.retriable = retriable
 
 
-def trigger_manual_refresh(access_token: str) -> dict:
+def trigger_manual_refresh(access_token: str, mode: str) -> dict:
     """POSTs to the manual-refresh Edge Function and returns its JSON
     summary: {succeeded, failed, total, symbolsFailed, startedAt, finishedAt}.
-    Raises ManualRefreshError on failure."""
+    `mode` is "price" (price/dividends + a screener recompute, using
+    carried-forward fundamentals) or "fundamentals" (a fresh Yahoo
+    fundamentals fetch only) -- see that function's own docstring for why
+    it's no longer one bundled call. Raises ManualRefreshError on failure."""
     settings = get_settings()
     if not settings.supabase_url:
         raise ManualRefreshError("SUPABASE_URL is not configured")
@@ -41,6 +44,7 @@ def trigger_manual_refresh(access_token: str) -> dict:
         resp = httpx.post(
             url,
             headers={"Authorization": f"Bearer {access_token}"},
+            json={"mode": mode},
             timeout=TIMEOUT_SECONDS,
         )
     except httpx.HTTPError as exc:

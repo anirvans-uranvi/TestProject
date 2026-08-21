@@ -65,8 +65,8 @@ scripts/
 supabase/
   migrations/               Schema, RLS policies, views/functions
   seed.sql                   Current Nifty 50 constituents + companies (reference data only)
-  functions/manual-refresh/  Edge Function "Market Data Refresh" calls for stock data
-  functions/fo-refresh/       Edge Function "Market Data Refresh" calls for NSE/BSE F&O (one function, exchange param)
+  functions/manual-refresh/  Edge Function behind Stock/Fundamental Data Refresh (mode param)
+  functions/fo-refresh/       Edge Function behind Bhavcopy Refresh (one function, exchange param)
 tests/                     Pytest suite (calculations, providers, services)
 ```
 
@@ -355,7 +355,7 @@ Three interchangeable mechanisms, pick one (or run more than one --
    screener recompute, plus one **8pm IST** job that runs a full stock
    refresh (`--mode=all`) **and** NSE + BSE F&O bhavcopy
    (`scripts/fetch_fo_data.py --days 1`) -- the scheduled counterpart to
-   the "Market Data Refresh" button below, for every account still on the
+   the on-demand refresh buttons below, for every account still on the
    default YFinance + Bhavcopy Data Provider. Needs `SUPABASE_URL`,
    `SUPABASE_SERVICE_ROLE_KEY` (and `DHAN_*` if using the live provider)
    as repo secrets.
@@ -373,38 +373,40 @@ retry transient provider failures with exponential backoff
 ## On-demand refresh (the refresh bar)
 
 The scheduled mechanisms above run independently of the Streamlit app.
-One **🔄 Market Data Refresh** button (previously three separate buttons,
-collapsed into one on request) does an actual live fetch on click.
-`src/utils/refresh_bar.py`'s `render_global_refresh_bar()` renders it at
-the same spot on every page (right after the title and disclaimer) --
-**Dashboard, Stock Detail, Options, My Trades, My Holdings, My Positions,
-My CSP, Analyse Trade, and Settings** -- so refreshing data never requires
-navigating back to one specific page. A click clears Streamlit's entire
-cache (`st.cache_data.clear()`) before rerunning, so every page's own
-cached loaders pick up the fresh data regardless of which page triggered
-the refresh.
+Five independent, targeted buttons (`src/utils/refresh_bar.py`) replace
+what used to be one bundled "🔄 Market Data Refresh" click -- each
+visible only where it's relevant, so a user refreshing fundamentals
+doesn't also wait on an F&O bhavcopy download, and vice versa. A click
+always clears Streamlit's entire cache (`st.cache_data.clear()`) before
+rerunning, so every page's own cached loaders pick up the fresh data
+regardless of which page triggered the refresh.
 
-**Every click fires up to four fetches concurrently** (via a
-`ThreadPoolExecutor`, cutting wall-clock time to roughly the slowest one
-instead of their sum, rather than the old sequential one-button-at-a-time
-flow):
+| Button | Pages | Visible when | Renderer |
+|---|---|---|---|
+| **Fundamental Data Refresh** | Settings ("Data Refresh" section) | always | `render_fundamental_and_bhavcopy_refresh` |
+| **Bhavcopy Refresh** (NSE + BSE) | Settings, same section | always | `render_fundamental_and_bhavcopy_refresh` |
+| **Stock Data Refresh** | every page except Settings | Data Provider = YFinance/Bhavcopy | `render_stock_refresh_button` |
+| **Stock & Option Data Refresh** | every page except Settings | Data Provider = Dhan/Zerodha | `render_stock_refresh_button` |
+| **Portfolio Refresh** | My Trades, My Holdings, My Positions, My CSP | Data Provider = Dhan/Zerodha | `render_portfolio_refresh_button` |
 
-- **Stock prices + fundamentals + screener recompute** -- cash-market
-  data via `supabase/functions/manual-refresh/` -- always, regardless of
-  this account's Data Provider setting (fundamentals aren't available
-  from Dhan/Zerodha's APIs at all).
-- **NSE F&O** and **BSE F&O** -- futures + options for each exchange,
-  both via the same `supabase/functions/fo-refresh/` (see below) -- one
-  Edge Function, parameterized by a POST body `{"exchange": "NSE" |
-  "BSE"}` -- always, since neither broker exposes a bhavcopy-equivalent
-  full options chain.
-- **Live broker prices** -- *only* when this account's Data Provider
-  (Settings) is Dhan or Zerodha: refetches this account's connected
+- **Fundamental Data Refresh** -- a fresh Yahoo Finance fundamentals
+  fetch only (PE, PEG, dividend yield, 52-week high/low), via
+  `supabase/functions/manual-refresh/` with `{"mode": "fundamentals"}`.
+  No price/screener writes.
+- **Stock Data Refresh** -- price history + dividends via the same Edge
+  Function with `{"mode": "price"}`, then a screener/Dashboard
+  classification recompute using **carried-forward** fundamentals (no
+  fresh fundamentals call in this mode) -- mirrors the cron's own
+  `--mode=eod` immediately followed by `--mode=screener`.
+- **Bhavcopy Refresh** -- NSE + BSE F&O, fired concurrently (2-worker
+  `ThreadPoolExecutor`) via `supabase/functions/fo-refresh/` -- one Edge
+  Function, parameterized by a POST body `{"exchange": "NSE" | "BSE"}`.
+- **Stock & Option Data Refresh** -- refetches this account's connected
   broker's live quote across the full watched-symbol universe (Nifty50
   constituents + this account's own portfolio symbols) and caches it in
   `user_live_prices` (migration `0030`) for Dashboard/Stock Detail to
   read as an override (`src/utils/refresh_bar.py::_refresh_user_live_prices`).
-  **Dhan accounts only** (migration `0032`): this same fetch also widens
+  **Dhan accounts only** (migration `0032`): this same click also widens
   to every tracked ETF (priced daily but not shown on the Screener table
   itself) and refetches live LTP for every futures/option contract this
   account's own portfolio holds, plus the exact CSP/CC option legs the
@@ -414,19 +416,23 @@ flow):
   actually reference. Zerodha has no F&O instrument-lookup mechanism in
   this codebase yet, so a Zerodha-provider account keeps the equity-only
   behavior above.
+- **Portfolio Refresh** -- re-syncs holdings/positions from the
+  connected broker (`src/utils/data_provider_settings.py::sync_broker_portfolio`,
+  wrapping the same `_sync_dhan`/`_sync_zerodha` Settings' "Save & Sync"/
+  "Update credentials" forms use -- Settings itself no longer has a
+  standalone "Sync now" button).
 
-The first three are each implemented as a **Supabase Edge Function**
-rather than in Streamlit page code -- a real fetch-and-write needs the
-Supabase service-role key (bypasses RLS), which must never live in
-Streamlit page code since Streamlit Cloud runs that code in every
-logged-in user's own browser session. Each Edge Function holds the key
-safely as a Supabase-injected environment variable (runs server-side
-inside Supabase's infrastructure); Streamlit only ever sends the
-*calling user's own* access token (`src/services/edge_refresh.py`),
-never any secret. The fourth (live broker prices) runs entirely in
-Streamlit's own process, using this account's already-saved
-`broker_connections` credentials the same way the portfolio pages'
-broker-live LTP override already does.
+The Fundamental/Stock/Bhavcopy buttons are each implemented as a
+**Supabase Edge Function** rather than in Streamlit page code -- a real
+fetch-and-write needs the Supabase service-role key (bypasses RLS),
+which must never live in Streamlit page code since Streamlit Cloud runs
+that code in every logged-in user's own browser session. Each Edge
+Function holds the key safely as a Supabase-injected environment
+variable (runs server-side inside Supabase's infrastructure); Streamlit
+only ever sends the *calling user's own* access token
+(`src/services/edge_refresh.py`), never any secret. Stock & Option Data
+Refresh and Portfolio Refresh run entirely in Streamlit's own process,
+using this account's already-saved `broker_connections` credentials.
 
 It reimplements price/dividend/fundamentals fetching (via Yahoo Finance,
 unofficial endpoints, see [Limitations](#limitations)) and the
@@ -483,7 +489,7 @@ function's URL is derived from it.
 
 ### F&O data refresh (`supabase/functions/fo-refresh/`)
 
-"Market Data Refresh" calls this Edge Function **twice concurrently** --
+"Bhavcopy Refresh" calls this Edge Function **twice concurrently** --
 once with a POST body of `{"exchange": "NSE"}`, once with `{"exchange":
 "BSE"}` -- both against the *same* Edge Function, `supabase/functions/fo-refresh/`
 (`src/services/edge_refresh.py::trigger_fo_refresh(access_token, exchange)`;
@@ -627,7 +633,7 @@ precomputed cache table (`dashboard_fo_metrics`, migration `0011`, keyed
 by `(symbol, expiry_date)` -- up to 3 rows per symbol, near/next/far)
 instead of recalculating across every open option contract on every page
 load -- every refresh path (the cron script, `fetch_fo_data.py`, and
-"Market Data Refresh" below) recomputes all 3 months as its last step, so
+Stock Data Refresh/Bhavcopy Refresh below) recomputes all 3 months as its last step, so
 it's never more than one refresh out of date. An **"Options month"
 dropdown** lets you pick which of the 3 cached months feeds those two
 columns -- purely a re-render over already-cached rows, no new fetch --
@@ -732,17 +738,17 @@ per-portfolio design), and it governs two things at once:
 1. **Stock LTP everywhere it's shown** (Dashboard, Stock Detail, and the
    portfolio pages below) -- Dhan/Zerodha means a live broker quote,
    cached per-account in `user_live_prices` (migration `0030`) by the
-   **Market Data Refresh** button (see [On-demand refresh](#on-demand-refresh-the-refresh-bar)
+   **Stock & Option Data Refresh** button (see [On-demand refresh](#on-demand-refresh-the-refresh-bar)
    below) and read as an override over the shared, possibly-stale
    `daily_screener_snapshots` value. **Fundamentals (PEG, dividend
    yield) and the full F&O options chain (every strike/expiry on the
    Options page) are never provider-branched** -- neither Dhan nor
    Zerodha's API exposes that data, so those always stay yfinance/NSE+BSE-
    bhavcopy-sourced regardless of this setting. **Dhan only** (migration
-   `0032`), Market Data Refresh separately live-prices the *specific*
-   F&O contracts that actually matter to this account: every futures/
-   option position it holds, and the Dashboard's own cached 5% CSP/5% CC
-   legs -- see [On-demand refresh](#on-demand-refresh-the-refresh-bar)
+   `0032`), Stock & Option Data Refresh separately live-prices the
+   *specific* F&O contracts that actually matter to this account: every
+   futures/option position it holds, and the Dashboard's own cached 5%
+   CSP/5% CC legs -- see [On-demand refresh](#on-demand-refresh-the-refresh-bar)
    below.
 2. **Where your holdings/positions come from.** Picking Dhan or Zerodha
    reveals a credential form and a "Sync now" button right there in
@@ -1161,7 +1167,7 @@ and are silently skipped. Columns, left to right:
   otherwise (or for any symbol no connected broker returns a live quote
   for, e.g. an expired token) falls back to `daily_screener_snapshots` --
   the same source My Holdings' Current Value already reads, only as
-  fresh as the last "Market Data Refresh" (commonly yfinance, ~15-20min
+  fresh as the last Stock Data Refresh (commonly yfinance, ~15-20min
   delayed).
 - **Momentum** -- the exact same "Momentum" criterion (B) the
   Dashboard's screener classifies every stock on

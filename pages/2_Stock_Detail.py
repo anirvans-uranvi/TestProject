@@ -24,7 +24,7 @@ from src.repositories import (
 from src.services.explanation import explain_classification
 from src.services.threshold_override import recompute_with_user_thresholds
 from src.utils.formatting import alert_type_label, format_crores, format_inr, format_pct, pass_fail_badge, summarize_alert_config
-from src.utils.refresh_bar import render_global_refresh_bar
+from src.utils.refresh_bar import render_stock_refresh_button
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.timezones import format_ist, now_ist
 from src.utils.ui import buy_sell_label, inject_global_styles, plotly_template, render_alert_row, render_disclaimer, render_stat_grid, status_badge
@@ -39,7 +39,7 @@ inject_global_styles(user_settings.theme)  # re-inject with the user's actual th
 
 st.title("🔍 Stock Detail")
 render_disclaimer()
-render_global_refresh_bar(client)
+render_stock_refresh_button(client, user_id, user_settings.data_provider)
 
 companies = companies_repo.list_current_constituents(client)
 # Union with this user's own resolved portfolio symbols (ETFs, non-Nifty50

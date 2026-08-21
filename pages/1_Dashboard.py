@@ -13,7 +13,7 @@ from src.repositories import fetch_log_repo, fo_repo, settings_repo, snapshot_re
 from src.services.market_calendar import get_market_state
 from src.services.threshold_override import apply_user_thresholds
 from src.utils.formatting import direction_arrow, format_inr, format_pct, pass_fail_icon
-from src.utils.refresh_bar import render_global_refresh_bar
+from src.utils.refresh_bar import render_stock_refresh_button
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.timezones import now_ist
 from src.utils.ui import inject_global_styles, market_state_label, render_disclaimer, render_pill
@@ -103,7 +103,7 @@ with header_col2:
         st.markdown(f"**Data freshness:** {age_min:.0f} min ago")
 
 render_disclaimer()
-render_global_refresh_bar(client)
+render_stock_refresh_button(client, user_id, user_settings.data_provider)
 
 rows = _load_screener_rows(client, st.session_state["dashboard_cache_bust"])
 rows = apply_user_thresholds(rows, user_settings)

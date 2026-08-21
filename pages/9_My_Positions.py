@@ -11,7 +11,7 @@ from src.repositories import settings_repo
 from src.services import portfolio_service
 from src.utils.formatting import format_inr
 from src.utils.portfolio_page import ensure_cache_bust, load_all_companies, load_holdings, load_positions, slug
-from src.utils.refresh_bar import render_global_refresh_bar
+from src.utils.refresh_bar import render_portfolio_refresh_button, render_stock_refresh_button
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.ui import inject_global_styles, render_disclaimer, render_stat_grid
 
@@ -25,7 +25,8 @@ inject_global_styles(user_settings.theme)  # re-inject with the user's actual th
 
 st.title("\U0001f4bc My Positions")
 render_disclaimer()
-render_global_refresh_bar(client)
+render_stock_refresh_button(client, user_id, user_settings.data_provider)
+render_portfolio_refresh_button(client, user_id, user_settings.data_provider)
 st.caption("Individual F&O legs, one row each. To see them grouped into Trades, go to My Trades.")
 
 ensure_cache_bust()
