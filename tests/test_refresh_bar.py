@@ -46,9 +46,10 @@ def _patch_dhan_provider(monkeypatch, *, quotes=None, quotes_error=None, fo_quot
     captured = {}
 
     class _FakeDhanProvider:
-        def __init__(self, client_id, access_token):
+        def __init__(self, client_id, access_token, supabase_client=None):
             captured["client_id"] = client_id
             captured["access_token"] = access_token
+            captured["supabase_client"] = supabase_client
 
         def get_quotes(self, symbols):
             captured["symbols"] = symbols
@@ -110,6 +111,22 @@ class TestRefreshUserLivePrices:
         assert set(captured["symbols"]) == {"SBIN", "TCS", "JIOFIN"}  # union, no duplicates
         assert upsert_calls == [{"SBIN": 811.9, "TCS": 4100.0}]
         assert result == {"broker": "Dhan", "quoted": 2, "total": 3, "fo_quoted": 0, "fo_total": 0, "fo_error": None, "fo_missing": []}
+
+    def test_supabase_client_is_forwarded_to_dhan_provider(self, monkeypatch):
+        # migration 0035: DhanProvider needs the Supabase client to check/
+        # persist the shared instrument-master cache -- confirm the same
+        # `client` this function was called with is what reaches
+        # DhanProvider, not left as the default None.
+        connection = BrokerConnection(user_id="u1", broker="Dhan", client_id="CID1", access_token="TOKEN1")
+        monkeypatch.setattr(refresh_bar.portfolio_repo, "get_broker_connection", lambda client, user_id, broker: connection)
+        _patch_universe(monkeypatch, constituents=("SBIN",), portfolio_symbols=())
+        captured = _patch_dhan_provider(monkeypatch, quotes={})
+        monkeypatch.setattr(refresh_bar.snapshot_repo, "upsert_user_live_prices", lambda *a, **k: None)
+        sentinel_client = object()
+
+        refresh_bar._refresh_user_live_prices(client=sentinel_client, user_id="u1", broker="Dhan")
+
+        assert captured["supabase_client"] is sentinel_client
 
     def test_dhan_widens_the_equity_universe_with_every_tracked_etf(self, monkeypatch):
         connection = BrokerConnection(user_id="u1", broker="Dhan", client_id="CID1", access_token="TOKEN1")

@@ -89,6 +89,74 @@ def _dhan_fo_universe(client, user_id: str) -> list[tuple[str, date, float, str]
     return list(contracts)
 
 
+def _refresh_dhan_equity_leg(client, user_id: str, connection, symbols: tuple[str, ...]) -> dict:
+    """The equity/ETF half of a Dhan live-price refresh -- resolves and
+    quotes `symbols`, then caches the result. Split out from
+    _refresh_user_live_prices so it can run concurrently with
+    _refresh_dhan_fo_leg (both are independent blocking network calls).
+    Returns {"error": ...} on failure, else {"prices": {...}}."""
+    # Calls DhanProvider directly rather than going through
+    # load_live_dhan_prices (which swallows DhanAuthError/ProviderError
+    # into a silent {}) -- confirmed live: that made a real failure (an
+    # expired token, or a Dhan account missing the separate paid "Data
+    # APIs" subscription market quotes require -- see
+    # portfolio_service.apply_fallback_option_ltp's docstring for the
+    # same 401 already seen on the positions-sync path) indistinguishable
+    # from "nothing to quote", showing a misleading green "0 of N"
+    # instead of a real error.
+    try:
+        quotes = DhanProvider(
+            client_id=connection.client_id, access_token=connection.access_token, supabase_client=client
+        ).get_quotes(list(symbols))
+    except DhanAuthError as exc:
+        return {
+            "error": (
+                f"Dhan rejected the access token (401): {exc}. Reconnect in Settings' Data Provider section, "
+                'or confirm this Dhan account has the separate paid "Data APIs" subscription -- live market '
+                "quotes need it even though holdings/positions sync doesn't."
+            )
+        }
+    except ProviderError as exc:
+        return {"error": f"Dhan live-price fetch failed: {exc}"}
+    prices = {symbol: quote.latest_price for symbol, quote in quotes.items()}
+    snapshot_repo.upsert_user_live_prices(client, user_id, prices)
+    return {"prices": prices}
+
+
+def _refresh_dhan_fo_leg(client, user_id: str, connection) -> dict:
+    """The F&O half of a Dhan live-price refresh (migration 0032) -- every
+    futures/option contract this account's own portfolio holds or the
+    Dashboard's cached CSP/CC legs reference. Split out for the same
+    concurrency reason as _refresh_dhan_equity_leg. Best-effort: a
+    failure here is surfaced (fo_error) but never raised, since the
+    equity leg running alongside it may still have succeeded."""
+    contracts = _dhan_fo_universe(client, user_id)
+    fo_total = len(contracts)
+    fo_quoted, fo_error, fo_missing = 0, None, []
+    if contracts:
+        try:
+            fo_prices = DhanProvider(
+                client_id=connection.client_id, access_token=connection.access_token, supabase_client=client
+            ).get_fo_quotes(contracts)
+        except (DhanAuthError, ProviderError) as exc:
+            # Not fatal to the whole refresh -- the equity leg running
+            # alongside this may still have succeeded and shouldn't be
+            # discarded over an F&O-only failure -- but still surfaced
+            # (not silently swallowed into "0 of N" with no explanation,
+            # the exact bug that made the equity leg's own real failure
+            # undiagnosable before this).
+            fo_prices = {}
+            fo_error = str(exc)
+        snapshot_repo.upsert_user_live_fo_prices(client, user_id, fo_prices)
+        fo_quoted = len(fo_prices)
+        # A partial miss (some, not all, contracts quoted) is still worth
+        # naming -- same "don't just say N failed, say WHICH ones"
+        # convention _render_stock_summary's symbolsFailed already
+        # follows for the equity/fundamentals refresh.
+        fo_missing = [c for c in contracts if c not in fo_prices]
+    return {"fo_quoted": fo_quoted, "fo_total": fo_total, "fo_error": fo_error, "fo_missing": fo_missing}
+
+
 def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
     """Refetches this account's live LTP across the full watched-symbol
     universe (Nifty50 constituents + this account's own portfolio
@@ -100,7 +168,14 @@ def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
     also widens the equity/ETF universe with every tracked ETF and
     refetches live LTP for every F&O contract _dhan_fo_universe returns
     (migration 0032) -- Zerodha has no F&O instrument resolver yet, so
-    its branch is unchanged. Returns a small summary dict for
+    its branch is unchanged (a single call, no F&O leg to parallelize
+    against). The Dhan equity and F&O legs run concurrently
+    (_refresh_dhan_equity_leg/_refresh_dhan_fo_leg, a 2-worker
+    ThreadPoolExecutor) -- each resolves symbols/contracts against Dhan's
+    instrument master (dhan_provider.py, now itself cached in Supabase
+    per migration 0035, shared across users/processes) and makes its own
+    batched live-quote call, so running them one after another wasted
+    real wall-clock time for no benefit. Returns a small summary dict for
     _render_live_prices_summary."""
     connection = portfolio_repo.get_broker_connection(client, user_id, broker)
     if connection is None or not connection.access_token:
@@ -114,69 +189,32 @@ def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
             c.symbol for c in companies_repo.list_all_companies(client) if c.company_type == CompanyType.ETF
         }
     symbols = tuple(sorted(equity_etf_symbols))
-    # A unique cache_bust per click -- this is a user-initiated "fetch
-    # fresh now" action, not something that should reuse
-    # load_live_zerodha_prices' own 60s @st.cache_data TTL from an
-    # earlier, possibly-stale call.
-    cache_bust = time.time()
-    if broker == "Dhan":
-        # Calls DhanProvider directly rather than going through
-        # load_live_dhan_prices (which swallows DhanAuthError/
-        # ProviderError into a silent {}) -- confirmed live: that made a
-        # real failure (an expired token, or a Dhan account missing the
-        # separate paid "Data APIs" subscription market quotes require --
-        # see portfolio_service.apply_fallback_option_ltp's docstring for
-        # the same 401 already seen on the positions-sync path)
-        # indistinguishable from "nothing to quote", showing a misleading
-        # green "0 of N" instead of a real error. No caching benefit lost
-        # here either way -- the fresh cache_bust above already busts
-        # load_live_dhan_prices' own cache on every call.
-        try:
-            quotes = DhanProvider(client_id=connection.client_id, access_token=connection.access_token).get_quotes(
-                list(symbols)
-            )
-        except DhanAuthError as exc:
-            return {
-                "error": (
-                    f"Dhan rejected the access token (401): {exc}. Reconnect in Settings' Data Provider section, "
-                    'or confirm this Dhan account has the separate paid "Data APIs" subscription -- live market '
-                    "quotes need it even though holdings/positions sync doesn't."
-                )
-            }
-        except ProviderError as exc:
-            return {"error": f"Dhan live-price fetch failed: {exc}"}
-        prices = {symbol: quote.latest_price for symbol, quote in quotes.items()}
-    else:
-        prices = load_live_zerodha_prices(
-            connection.client_id, connection.api_secret, connection.access_token, symbols, cache_bust
-        )
-    snapshot_repo.upsert_user_live_prices(client, user_id, prices)
 
-    fo_quoted, fo_total, fo_error, fo_missing = 0, 0, None, []
     if broker == "Dhan":
-        contracts = _dhan_fo_universe(client, user_id)
-        fo_total = len(contracts)
-        if contracts:
-            try:
-                fo_prices = DhanProvider(
-                    client_id=connection.client_id, access_token=connection.access_token
-                ).get_fo_quotes(contracts)
-            except (DhanAuthError, ProviderError) as exc:
-                # Best-effort, not fatal to the whole refresh -- the
-                # equity leg above already succeeded and shouldn't be
-                # discarded over an F&O-only failure -- but still
-                # surfaced (not silently swallowed into "0 of N" with no
-                # explanation, the exact bug that made the equity leg's
-                # own real failure undiagnosable before this).
-                fo_prices = {}
-                fo_error = str(exc)
-            snapshot_repo.upsert_user_live_fo_prices(client, user_id, fo_prices)
-            fo_quoted = len(fo_prices)
-            # A partial miss (some, not all, contracts quoted) is still
-            # worth naming -- same "don't just say N failed, say WHICH
-            # ones" convention _render_stock_summary's symbolsFailed
-            # already follows for the equity/fundamentals refresh.
-            fo_missing = [c for c in contracts if c not in fo_prices]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            equity_future = pool.submit(_refresh_dhan_equity_leg, client, user_id, connection, symbols)
+            fo_future = pool.submit(_refresh_dhan_fo_leg, client, user_id, connection)
+            equity_result = equity_future.result()
+            fo_result = fo_future.result()
+        if equity_result.get("error"):
+            # Matches the pre-parallelization behavior: an equity-leg
+            # failure (most commonly an expired token, which would also
+            # doom the F&O leg) reports just that error, not a partial
+            # F&O result alongside it.
+            return {"error": equity_result["error"]}
+        prices = equity_result["prices"]
+        fo_quoted, fo_total = fo_result["fo_quoted"], fo_result["fo_total"]
+        fo_error, fo_missing = fo_result["fo_error"], fo_result["fo_missing"]
+    else:
+        # A unique cache_bust per click -- this is a user-initiated
+        # "fetch fresh now" action, not something that should reuse
+        # load_live_zerodha_prices' own 60s @st.cache_data TTL from an
+        # earlier, possibly-stale call.
+        prices = load_live_zerodha_prices(
+            connection.client_id, connection.api_secret, connection.access_token, symbols, time.time()
+        )
+        snapshot_repo.upsert_user_live_prices(client, user_id, prices)
+        fo_quoted, fo_total, fo_error, fo_missing = 0, 0, None, []
 
     return {
         "broker": broker,

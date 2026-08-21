@@ -415,7 +415,20 @@ regardless of which page triggered the refresh.
   strike/expiry, just what the Screener and the account's own positions
   actually reference. Zerodha has no F&O instrument-lookup mechanism in
   this codebase yet, so a Zerodha-provider account keeps the equity-only
-  behavior above.
+  behavior above. The equity and F&O legs run **concurrently** (2-worker
+  `ThreadPoolExecutor`, `_refresh_dhan_equity_leg`/`_refresh_dhan_fo_leg`)
+  rather than one after another -- each resolves against Dhan's
+  instrument master independently, so running them sequentially wasted
+  real wall-clock time for no benefit. That instrument master (~211,742
+  rows downloaded from `images.dhan.co`) is itself cached in Supabase,
+  shared across every user and process (`dhan_equity_instruments`/
+  `dhan_fo_instruments`, migration `0035`) -- refreshed at most once per
+  IST calendar day (tracked via `provider_fetch_log`, `fetch_type=
+  "dhan_instrument_master"`), so a cold Streamlit process no longer pays
+  for a fresh multi-MB download from Dhan's CDN on every restart, and
+  the two loaders (`dhan_provider.py::_load_instrument_master`/
+  `_load_fo_instrument_master`) no longer redundantly download the same
+  file twice for the equity vs. F&O slice.
 - **Portfolio Refresh** -- re-syncs holdings/positions from the
   connected broker (`src/utils/data_provider_settings.py::sync_broker_portfolio`,
   wrapping the same `_sync_dhan`/`_sync_zerodha` Settings' "Save & Sync"/

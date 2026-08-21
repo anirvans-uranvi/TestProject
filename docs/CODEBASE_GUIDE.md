@@ -718,6 +718,38 @@ resolves each contract to a Dhan `security_id` (`DhanProvider.get_fo_quotes`,
 `resolve_fo_security_id` against a *second*, F&O-filtered instrument-master
 download -- `_load_fo_instrument_master`, separate from the equity-only one
 `resolve_security_id` already used) and caches the live premium in
+
+**Instrument-master caching (migration `0035`)**: both instrument-master
+downloads (`_load_instrument_master`/`_load_fo_instrument_master`) used to
+independently re-download the same ~211,742-row Dhan CSV
+(`images.dhan.co/api-data/api-scrip-master.csv`) into a per-process
+`@lru_cache(maxsize=1)` -- confirmed live as the dominant cost of a "Stock &
+Option Data Refresh" click, doubly so right after any Streamlit Cloud cold
+start (the `@lru_cache` doesn't survive a process restart). Both loaders now
+take an optional `client: Client | None = None`: with a client, they check a
+day-keyed in-memory dict first, then the shared `dhan_equity_instruments`/
+`dhan_fo_instruments` tables (freshness via `provider_fetch_log`,
+`fetch_type="dhan_instrument_master"`, `provider_name="equity"`/`"fo"`), only
+falling back to a real download (now `_download_equity_master`/
+`_download_fo_master`, the original parse/filter logic unchanged) when
+neither has today's IST-calendar-day data -- a fresh download is persisted
+back via the new `src/repositories/dhan_instrument_repo.py` (delete-then-
+insert, same convention as `fo_repo.clear_dashboard_fo_metrics`/
+`upsert_dashboard_fo_metrics`) before being cached in-memory, so the *next*
+process/user skips the download too. `client=None` keeps the exact old
+in-memory-only behavior (`factory.py::get_price_provider`'s plain-cron path
+never has a Supabase client to give a generic `PriceDataProvider`).
+`DhanProvider.__init__` gained one new optional kwarg, `supabase_client`,
+threaded through to both loaders from `get_quotes`/`get_fo_quotes`/
+`get_historical_daily`; `refresh_bar.py::_refresh_user_live_prices` and
+`portfolio_page.py::load_live_dhan_prices` both now pass their own Supabase
+`client` through. The equity and F&O legs of `_refresh_user_live_prices`
+also now run **concurrently** (`_refresh_dhan_equity_leg`/
+`_refresh_dhan_fo_leg`, a 2-worker `ThreadPoolExecutor`, same pattern
+`_run_bhavcopy_refresh` already used for NSE/BSE) instead of sequentially --
+they're independent blocking calls, so running them one after another
+wasted real wall-clock time for no benefit.
+
 `user_live_prices`, widened by migration `0032` from an equity-only
 `(user_id, symbol)` table to `(user_id, symbol, expiry_date, strike_price,
 option_type)` -- `option_type='EQ'` (default) for the pre-existing equity/

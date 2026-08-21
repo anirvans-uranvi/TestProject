@@ -14,15 +14,19 @@ from __future__ import annotations
 import threading
 import time
 from datetime import date, datetime, timedelta
-from functools import lru_cache
 
 import httpx
 import pandas as pd
 import pytz
+from supabase import Client
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from src.data_providers.base import PriceDataProvider, ProviderError
+from src.models.enums import FetchStatus, FetchType
+from src.models.fetch_log import ProviderFetchLog
 from src.models.market_data import PricePoint, Quote
+from src.repositories import dhan_instrument_repo, fetch_log_repo
+from src.utils.timezones import now_ist, to_ist
 
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -47,12 +51,25 @@ def _throttle() -> None:
         _last_request_at = time.monotonic()
 
 
-@lru_cache(maxsize=1)
-def _load_instrument_master() -> pd.DataFrame:
-    """Download and cache the NSE-equity slice of Dhan's instrument master.
+# In-memory, shared-across-calls-within-this-process cache, keyed by
+# today's IST calendar date so it naturally rolls over without a process
+# restart -- deliberately NOT a Client-keyed @lru_cache (a Client object
+# isn't a stable/hashable identity across sessions, and keying on it would
+# defeat sharing this cache across users within one process). Below this,
+# dhan_equity_instruments/dhan_fo_instruments (migration 0035) persist the
+# same result across *processes* too -- see _load_instrument_master's
+# docstring.
+_equity_master_cache: dict[str, pd.DataFrame] = {}
+_fo_master_cache: dict[str, pd.DataFrame] = {}
+_master_cache_lock = threading.Lock()
 
-    Column names in Dhan's compact CSV have varied across releases, so we
-    resolve them by fuzzy match instead of hardcoding exact headers.
+
+def _download_equity_master() -> pd.DataFrame:
+    """The real download+parse: fetches Dhan's full instrument master CSV
+    (~211,742 rows across every exchange/segment) and filters it down to
+    the NSE-equity slice. Column names in Dhan's compact CSV have varied
+    across releases, so we resolve them by fuzzy match instead of
+    hardcoding exact headers.
 
     The equity filter used to test whether the SEGMENT column *contained*
     "EQ" -- confirmed live to be wrong: a real download's segment column
@@ -67,7 +84,7 @@ def _load_instrument_master() -> pd.DataFrame:
     of near-miss so easy to not notice without a live download. Filters
     on the instrument-type column instead (`SEM_INSTRUMENT_NAME ==
     'EQUITY'`), the same exact-match-on-instrument-type approach
-    `_load_fo_instrument_master` already uses for FUTSTK/OPTSTK.
+    `_download_fo_master` already uses for FUTSTK/OPTSTK.
     """
     try:
         df = pd.read_csv(INSTRUMENT_MASTER_URL, low_memory=False)
@@ -99,7 +116,54 @@ def _load_instrument_master() -> pd.DataFrame:
             "Dhan instrument master matched zero NSE equity rows -- exchange/instrument-type column "
             "resolution is likely wrong for this download; update column resolution"
         )
+    df["security_id"] = df["security_id"].astype(str)
     return df[["security_id", "trading_symbol"]].drop_duplicates("trading_symbol")
+
+
+def _load_instrument_master(client: Client | None = None) -> pd.DataFrame:
+    """Returns the NSE-equity slice of Dhan's instrument master, checking
+    (in order) an in-memory same-process cache, then -- if `client` is
+    given -- the shared `dhan_equity_instruments` table (migration 0035,
+    fresh if refreshed today per `provider_fetch_log`), only falling back
+    to a real Dhan download (`_download_equity_master`) when neither has
+    today's data. A fresh download is persisted back to `client` (so the
+    *next* process/user skips the download too) before being cached
+    in-memory. `client=None` (e.g. no Supabase wiring available) keeps
+    this in-memory-only, same as before this cache existed."""
+    today = now_ist().date().isoformat()
+    with _master_cache_lock:
+        cached = _equity_master_cache.get(today)
+    if cached is not None:
+        return cached
+
+    df: pd.DataFrame | None = None
+    if client is not None:
+        entry = fetch_log_repo.get_last_successful_fetch(client, FetchType.DHAN_INSTRUMENT_MASTER, "equity")
+        if entry is not None and to_ist(entry.finished_at).date().isoformat() == today:
+            rows = dhan_instrument_repo.get_equity_instruments(client)
+            if rows:
+                df = pd.DataFrame(rows)
+
+    if df is None:
+        df = _download_equity_master()
+        if client is not None:
+            started_at = datetime.now(IST)
+            dhan_instrument_repo.replace_equity_instruments(client, df.to_dict("records"))
+            fetch_log_repo.log_fetch(
+                client,
+                ProviderFetchLog(
+                    provider_name="equity",
+                    fetch_type=FetchType.DHAN_INSTRUMENT_MASTER,
+                    status=FetchStatus.SUCCESS,
+                    started_at=started_at,
+                    finished_at=datetime.now(IST),
+                ),
+            )
+
+    with _master_cache_lock:
+        _equity_master_cache.clear()  # only "today" is ever relevant
+        _equity_master_cache[today] = df
+    return df
 
 
 class DhanAuthError(ProviderError):
@@ -108,8 +172,8 @@ class DhanAuthError(ProviderError):
     "regenerate your token" message rather than a generic failure."""
 
 
-def resolve_security_id(symbol: str) -> str:
-    master = _load_instrument_master()
+def resolve_security_id(symbol: str, client: Client | None = None) -> str:
+    master = _load_instrument_master(client)
     match = master[master["trading_symbol"].astype(str).str.upper() == symbol.upper()]
     if match.empty:
         raise ProviderError(f"no Dhan security_id found for symbol {symbol!r}")
@@ -134,12 +198,11 @@ def _underlying_from_trading_symbol(trading_symbol: str, option_type: str) -> st
     return "-".join(parts[: len(parts) - trailing]) if len(parts) > trailing else parts[0]
 
 
-@lru_cache(maxsize=1)
-def _load_fo_instrument_master() -> pd.DataFrame:
-    """Download and cache the F&O slice of Dhan's instrument master --
-    the same CSV `_load_instrument_master` above already downloads for
-    equities, filtered instead to derivative rows. Confirmed against a
-    live download of https://images.dhan.co/api-data/api-scrip-master.csv
+def _download_fo_master() -> pd.DataFrame:
+    """The real download+parse: fetches the same full CSV
+    `_download_equity_master` does, filtered instead to derivative rows.
+    Confirmed against a live download of
+    https://images.dhan.co/api-data/api-scrip-master.csv
     -- real header: SEM_EXM_EXCH_ID, SEM_SEGMENT, SEM_SMST_SECURITY_ID,
     SEM_INSTRUMENT_NAME, SEM_EXPIRY_CODE, SEM_TRADING_SYMBOL,
     SEM_LOT_UNITS, SEM_CUSTOM_SYMBOL, SEM_EXPIRY_DATE, SEM_STRIKE_PRICE,
@@ -148,7 +211,10 @@ def _load_fo_instrument_master() -> pd.DataFrame:
     by keyword rather than hardcoded, matching `_load_instrument_master`'s
     own defensiveness against Dhan renaming a column -- but
     `underlying_symbol` is deliberately NOT taken from any single column
-    (see _underlying_from_trading_symbol's docstring for why).
+    (see _underlying_from_trading_symbol's docstring for why). Called by
+    _load_fo_instrument_master only on a cache miss (in-memory *and* --
+    if a client is given -- the shared dhan_fo_instruments table,
+    migration 0035).
 
     Exchange/instrument-type combination kept mirrors this app's own
     existing bhavcopy split exactly (nse_fo_provider.py /
@@ -215,10 +281,59 @@ def _load_fo_instrument_master() -> pd.DataFrame:
             "Dhan F&O instrument master matched zero stock/index futures or option rows -- exchange/"
             "instrument-type column resolution is likely wrong for this download; update column resolution"
         )
+    df["security_id"] = df["security_id"].astype(str)
     return df[["security_id", "underlying_symbol", "expiry_date", "strike_price", "option_type"]]
 
 
-def resolve_fo_security_id(symbol: str, expiry_date: date, strike_price: float, option_type: str) -> str:
+def _load_fo_instrument_master(client: Client | None = None) -> pd.DataFrame:
+    """F&O counterpart of _load_instrument_master -- same in-memory ->
+    shared dhan_fo_instruments table (migration 0035) -> real download
+    fallback chain, persisted independently from the equity slice
+    (provider_name="fo" vs "equity" in provider_fetch_log)."""
+    today = now_ist().date().isoformat()
+    with _master_cache_lock:
+        cached = _fo_master_cache.get(today)
+    if cached is not None:
+        return cached
+
+    df: pd.DataFrame | None = None
+    if client is not None:
+        entry = fetch_log_repo.get_last_successful_fetch(client, FetchType.DHAN_INSTRUMENT_MASTER, "fo")
+        if entry is not None and to_ist(entry.finished_at).date().isoformat() == today:
+            rows = dhan_instrument_repo.get_fo_instruments(client)
+            if rows:
+                df = pd.DataFrame(rows)
+                df["expiry_date"] = pd.to_datetime(df["expiry_date"]).dt.date
+                df["strike_price"] = df["strike_price"].astype(float)
+
+    if df is None:
+        df = _download_fo_master()
+        if client is not None:
+            started_at = datetime.now(IST)
+            db_rows = df.assign(expiry_date=df["expiry_date"].astype(str), strike_price=df["strike_price"].astype(float)).to_dict(
+                "records"
+            )
+            dhan_instrument_repo.replace_fo_instruments(client, db_rows)
+            fetch_log_repo.log_fetch(
+                client,
+                ProviderFetchLog(
+                    provider_name="fo",
+                    fetch_type=FetchType.DHAN_INSTRUMENT_MASTER,
+                    status=FetchStatus.SUCCESS,
+                    started_at=started_at,
+                    finished_at=datetime.now(IST),
+                ),
+            )
+
+    with _master_cache_lock:
+        _fo_master_cache.clear()  # only "today" is ever relevant
+        _fo_master_cache[today] = df
+    return df
+
+
+def resolve_fo_security_id(
+    symbol: str, expiry_date: date, strike_price: float, option_type: str, client: Client | None = None
+) -> str:
     """Resolves one F&O contract (underlying + expiry + strike + right)
     to its Dhan security_id -- the derivatives counterpart of
     resolve_security_id above. `option_type='FUT'` matches a futures
@@ -227,7 +342,7 @@ def resolve_fo_security_id(symbol: str, expiry_date: date, strike_price: float, 
     (symbol, expiry_date, strike_price, option_type) this app already
     uses for option_contracts (migration 0007) and user_live_prices'
     F&O rows (migration 0032)."""
-    master = _load_fo_instrument_master()
+    master = _load_fo_instrument_master(client)
     match = master[
         (master["underlying_symbol"].astype(str).str.upper() == symbol.upper())
         & (master["expiry_date"] == expiry_date)
@@ -245,12 +360,26 @@ def resolve_fo_security_id(symbol: str, expiry_date: date, strike_price: float, 
 class DhanProvider(PriceDataProvider):
     name = "dhan"
 
-    def __init__(self, client_id: str, access_token: str, timeout: float = 15.0):
+    def __init__(
+        self,
+        client_id: str,
+        access_token: str,
+        timeout: float = 15.0,
+        supabase_client: Client | None = None,
+    ):
         if not client_id or not access_token:
             raise ProviderError("DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN are required for the Dhan provider")
         self._client_id = client_id
         self._access_token = access_token
         self._timeout = timeout
+        # Optional -- when given, the instrument-master loaders persist
+        # their result to the shared dhan_equity_instruments/
+        # dhan_fo_instruments cache (migration 0035) instead of only
+        # caching in-memory for this process. None keeps today's exact
+        # in-memory-only behavior (e.g. the plain cron path via
+        # factory.py::get_price_provider, which has no Supabase client to
+        # give a generic PriceDataProvider).
+        self._supabase_client = supabase_client
 
     @property
     def _headers(self) -> dict:
@@ -280,7 +409,7 @@ class DhanProvider(PriceDataProvider):
         return resp.json()
 
     def get_historical_daily(self, symbol: str, from_date: date, to_date: date) -> list[PricePoint]:
-        security_id = resolve_security_id(symbol)
+        security_id = resolve_security_id(symbol, self._supabase_client)
         points: list[PricePoint] = []
         # Dhan's historical endpoint caps each request window; chunk in ~85 day
         # slices to stay safely under the documented 90-day limit.
@@ -344,7 +473,7 @@ class DhanProvider(PriceDataProvider):
         # swallowed into an empty result with no error at all, not even
         # the DhanAuthError/ProviderError _refresh_user_live_prices knows
         # how to surface.
-        _load_instrument_master()
+        _load_instrument_master(self._supabase_client)
         # A symbol resolve_security_id can't find (an ETF/fund Dhan's
         # equity instrument master doesn't carry, a renamed/delisted
         # ticker) is skipped rather than aborting the whole batch --
@@ -357,7 +486,7 @@ class DhanProvider(PriceDataProvider):
         id_to_symbol: dict[str, str] = {}
         for symbol in symbols:
             try:
-                id_to_symbol[resolve_security_id(symbol)] = symbol
+                id_to_symbol[resolve_security_id(symbol, self._supabase_client)] = symbol
             except ProviderError:
                 continue
         if not id_to_symbol:
@@ -450,12 +579,14 @@ class DhanProvider(PriceDataProvider):
         # contract in the loop and get silently caught by the
         # per-contract `except ProviderError: continue`, indistinguishable
         # from "just didn't resolve".
-        _load_fo_instrument_master()
+        _load_fo_instrument_master(self._supabase_client)
         security_id_to_contract: dict[str, tuple[str, date, float, str]] = {}
         for contract in contracts:
             symbol, expiry_date, strike_price, option_type = contract
             try:
-                security_id = resolve_fo_security_id(symbol, expiry_date, strike_price, option_type)
+                security_id = resolve_fo_security_id(
+                    symbol, expiry_date, strike_price, option_type, self._supabase_client
+                )
             except ProviderError:
                 continue
             security_id_to_contract[security_id] = contract

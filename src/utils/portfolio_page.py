@@ -121,7 +121,9 @@ def load_returns_and_pe(_client, symbols: tuple[str, ...], _cache_bust: int):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def load_live_dhan_prices(client_id: str, access_token: str, symbols: tuple[str, ...], _cache_bust: int) -> dict[str, float]:
+def load_live_dhan_prices(
+    client_id: str, access_token: str, symbols: tuple[str, ...], _cache_bust: int, _client=None
+) -> dict[str, float]:
     """Live NSE equity LTPs straight from Dhan's marketfeed
     (DhanProvider.get_quotes), keyed by symbol. Only meaningful for an
     account with Dhan connected (Settings' "Data Provider" section),
@@ -129,11 +131,18 @@ def load_live_dhan_prices(client_id: str, access_token: str, symbols: tuple[str,
     Dhan credentials required. Returns {}
     on any provider error (expired token, a symbol Dhan's instrument
     master doesn't resolve, network) -- see load_live_broker_prices below
-    for how the caller falls back when this comes back empty."""
+    for how the caller falls back when this comes back empty. `_client`
+    (leading underscore -- excluded from this function's own cache key,
+    same convention load_latest_prices' `_client` above uses) is passed
+    through to DhanProvider so its instrument-master resolution can hit
+    the shared dhan_equity_instruments cache (migration 0035) instead of
+    downloading Dhan's full instrument master on every cache miss."""
     if not symbols:
         return {}
     try:
-        quotes = DhanProvider(client_id=client_id, access_token=access_token).get_quotes(list(symbols))
+        quotes = DhanProvider(client_id=client_id, access_token=access_token, supabase_client=_client).get_quotes(
+            list(symbols)
+        )
     except (DhanAuthError, ProviderError):
         return {}
     return {symbol: quote.latest_price for symbol, quote in quotes.items()}
@@ -180,12 +189,16 @@ def load_live_broker_prices(_client, user_id: str, symbols: tuple[str, ...], cac
     not a special case here, just an empty/partial dict. Not itself
     `@st.cache_data`-wrapped (the two loaders it calls already are) so
     that a fresh get_broker_connection lookup always sees the latest
-    saved connection state (e.g. right after "Sync now" bumps
+    saved connection state (e.g. right after a Portfolio Refresh bumps
     portfolio_cache_bust)."""
     live: dict[str, float] = {}
     dhan_connection = portfolio_repo.get_broker_connection(_client, user_id, "Dhan")
     if dhan_connection is not None and dhan_connection.access_token:
-        live.update(load_live_dhan_prices(dhan_connection.client_id, dhan_connection.access_token, symbols, cache_bust))
+        live.update(
+            load_live_dhan_prices(
+                dhan_connection.client_id, dhan_connection.access_token, symbols, cache_bust, _client
+            )
+        )
     zerodha_connection = portfolio_repo.get_broker_connection(_client, user_id, "Zerodha")
     if zerodha_connection is not None and zerodha_connection.access_token and zerodha_connection.api_secret:
         live.update(

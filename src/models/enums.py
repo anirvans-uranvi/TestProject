@@ -96,6 +96,10 @@ class FetchType(StrEnum):
     # (Settings' "Save & Sync"/"Update credentials", or the Portfolio
     # Refresh button on My Trades/My Holdings/My Positions/My CSP -- see
     # src/utils/data_provider_settings.py's sync_broker_portfolio)
+    DHAN_INSTRUMENT_MASTER = "dhan_instrument_master"  # logged when
+    # src/data_providers/dhan_provider.py's instrument-master loaders
+    # download+persist a fresh shared copy to dhan_equity_instruments/
+    # dhan_fo_instruments -- provider_name is "equity" or "fo"
 
 
 class FetchStatus(StrEnum):

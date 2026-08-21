@@ -13,7 +13,7 @@ watched-symbol universe to every tracked ETF (migration 0032) meant one
 ETF Dhan's equity instrument master didn't carry made get_quotes raise
 and silently wipe out live pricing for the ENTIRE batch, not just that
 one symbol."""
-from datetime import date
+from datetime import date, datetime
 
 import httpx
 import pandas as pd
@@ -22,6 +22,15 @@ import pytest
 import src.data_providers.dhan_provider as dhan_provider
 from src.data_providers.base import ProviderError
 from src.data_providers.dhan_provider import DhanAuthError, DhanProvider, resolve_fo_security_id
+
+
+class _FakeFetchLogEntry:
+    """Stand-in for fetch_log_repo.get_last_successful_fetch's return
+    value -- only `finished_at` is read by the instrument-master loaders'
+    freshness check."""
+
+    def __init__(self, on_date: date):
+        self.finished_at = datetime.combine(on_date, datetime.min.time()).replace(hour=12, tzinfo=dhan_provider.IST)
 
 
 class _FakeResponse:
@@ -110,7 +119,6 @@ class TestGetQuotes:
         # wiping out live pricing for every other (perfectly resolvable)
         # symbol too. Confirmed live after widening the watched-symbol
         # universe to every tracked ETF (migration 0032).
-        dhan_provider._load_instrument_master.cache_clear()
         monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _EQUITY_MASTER_FIXTURE)
 
         def fake_post(url, json=None, headers=None, timeout=None):
@@ -128,10 +136,8 @@ class TestGetQuotes:
         assert set(result) == {"RELIANCE", "TCS"}
         assert result["RELIANCE"].latest_price == 2950.0
         assert result["TCS"].latest_price == 4100.0
-        dhan_provider._load_instrument_master.cache_clear()
 
     def test_all_symbols_unresolvable_returns_empty_without_a_request(self, monkeypatch):
-        dhan_provider._load_instrument_master.cache_clear()
         monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _EQUITY_MASTER_FIXTURE)
 
         def fake_post(*args, **kwargs):
@@ -141,7 +147,6 @@ class TestGetQuotes:
         provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
 
         assert provider.get_quotes(["BADETF1", "BADETF2"]) == {}
-        dhan_provider._load_instrument_master.cache_clear()
 
     def test_instrument_master_matching_zero_rows_raises_instead_of_looking_like_no_symbols_resolved(self, monkeypatch):
         # Regression: _load_instrument_master's equity filter used to
@@ -149,12 +154,10 @@ class TestGetQuotes:
         # docstring) -- confirms that's a loud ProviderError now, not a
         # quietly empty master indistinguishable from "these particular
         # symbols don't exist".
-        dhan_provider._load_instrument_master.cache_clear()
         monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _EMPTY_MASTER_FIXTURE)
 
         with pytest.raises(ProviderError, match="zero"):
             dhan_provider._load_instrument_master()
-        dhan_provider._load_instrument_master.cache_clear()
 
     def test_systemic_instrument_master_failure_propagates_not_swallowed_per_symbol(self, monkeypatch):
         # Regression: get_quotes used to call resolve_security_id (and
@@ -165,7 +168,6 @@ class TestGetQuotes:
         # silently caught there too, indistinguishable from "just didn't
         # resolve". get_quotes now loads the master once, up front,
         # outside that loop, so this propagates as a real exception.
-        dhan_provider._load_instrument_master.cache_clear()
         monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _EMPTY_MASTER_FIXTURE)
 
         def fake_post(*args, **kwargs):
@@ -176,7 +178,71 @@ class TestGetQuotes:
 
         with pytest.raises(ProviderError, match="zero"):
             provider.get_quotes(["SBIN", "TCS", "RELIANCE"])
-        dhan_provider._load_instrument_master.cache_clear()
+
+
+class TestLoadInstrumentMasterDbCache:
+    """Migration 0035: the shared dhan_equity_instruments table. `client`
+    is never touched for real here -- dhan_instrument_repo/fetch_log_repo
+    are monkeypatched directly, so any non-None sentinel stands in for a
+    real Supabase client."""
+
+    def test_fresh_db_entry_is_used_without_downloading(self, monkeypatch):
+        today = dhan_provider.now_ist().date()
+
+        def fail_download(*a, **k):
+            raise AssertionError("should not download when the DB cache is fresh")
+
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", fail_download)
+        monkeypatch.setattr(
+            dhan_provider.fetch_log_repo,
+            "get_last_successful_fetch",
+            lambda client, fetch_type, provider_name: _FakeFetchLogEntry(today),
+        )
+        monkeypatch.setattr(
+            dhan_provider.dhan_instrument_repo,
+            "get_equity_instruments",
+            lambda client: [{"security_id": "1001", "trading_symbol": "RELIANCE"}],
+        )
+
+        df = dhan_provider._load_instrument_master(client=object())
+
+        assert df["trading_symbol"].tolist() == ["RELIANCE"]
+
+    def test_stale_or_missing_db_entry_downloads_and_persists(self, monkeypatch):
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _EQUITY_MASTER_FIXTURE)
+        monkeypatch.setattr(
+            dhan_provider.fetch_log_repo, "get_last_successful_fetch", lambda client, fetch_type, provider_name: None
+        )
+        written = {}
+        logged = {}
+        monkeypatch.setattr(
+            dhan_provider.dhan_instrument_repo,
+            "replace_equity_instruments",
+            lambda client, rows: written.setdefault("rows", rows),
+        )
+        monkeypatch.setattr(dhan_provider.fetch_log_repo, "log_fetch", lambda client, entry: logged.setdefault("entry", entry))
+
+        df = dhan_provider._load_instrument_master(client=object())
+
+        assert set(df["trading_symbol"]) == {"RELIANCE", "TCS"}
+        assert {r["trading_symbol"] for r in written["rows"]} == {"RELIANCE", "TCS"}
+        assert logged["entry"].provider_name == "equity"
+        assert logged["entry"].fetch_type == dhan_provider.FetchType.DHAN_INSTRUMENT_MASTER
+
+    def test_stale_db_entry_from_a_prior_day_is_ignored(self, monkeypatch):
+        yesterday = dhan_provider.now_ist().date() - dhan_provider.timedelta(days=1)
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _EQUITY_MASTER_FIXTURE)
+        monkeypatch.setattr(
+            dhan_provider.fetch_log_repo,
+            "get_last_successful_fetch",
+            lambda client, fetch_type, provider_name: _FakeFetchLogEntry(yesterday),
+        )
+        monkeypatch.setattr(dhan_provider.dhan_instrument_repo, "replace_equity_instruments", lambda client, rows: None)
+        monkeypatch.setattr(dhan_provider.fetch_log_repo, "log_fetch", lambda client, entry: None)
+
+        df = dhan_provider._load_instrument_master(client=object())
+
+        assert set(df["trading_symbol"]) == {"RELIANCE", "TCS"}
 
 
 class TestGetPositions:
@@ -318,10 +384,12 @@ _FO_MASTER_FIXTURE = pd.DataFrame(
 
 
 @pytest.fixture(autouse=True)
-def _clear_fo_master_cache():
-    dhan_provider._load_fo_instrument_master.cache_clear()
+def _clear_instrument_master_caches():
+    dhan_provider._equity_master_cache.clear()
+    dhan_provider._fo_master_cache.clear()
     yield
-    dhan_provider._load_fo_instrument_master.cache_clear()
+    dhan_provider._equity_master_cache.clear()
+    dhan_provider._fo_master_cache.clear()
 
 
 class TestLoadFoInstrumentMaster:
@@ -397,6 +465,63 @@ class TestLoadFoInstrumentMaster:
 
         with pytest.raises(ProviderError, match="zero"):
             dhan_provider._load_fo_instrument_master()
+
+
+class TestLoadFoInstrumentMasterDbCache:
+    """Migration 0035: the shared dhan_fo_instruments table -- same
+    fresh/stale-or-missing behavior as TestLoadInstrumentMasterDbCache,
+    for the F&O loader."""
+
+    def test_fresh_db_entry_is_used_without_downloading(self, monkeypatch):
+        today = dhan_provider.now_ist().date()
+
+        def fail_download(*a, **k):
+            raise AssertionError("should not download when the DB cache is fresh")
+
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", fail_download)
+        monkeypatch.setattr(
+            dhan_provider.fetch_log_repo,
+            "get_last_successful_fetch",
+            lambda client, fetch_type, provider_name: _FakeFetchLogEntry(today),
+        )
+        monkeypatch.setattr(
+            dhan_provider.dhan_instrument_repo,
+            "get_fo_instruments",
+            lambda client: [
+                {
+                    "security_id": "50002", "underlying_symbol": "RELIANCE", "expiry_date": "2026-09-24",
+                    "strike_price": 3000.0, "option_type": "CE",
+                }
+            ],
+        )
+
+        df = dhan_provider._load_fo_instrument_master(client=object())
+
+        assert df["underlying_symbol"].tolist() == ["RELIANCE"]
+        assert df["expiry_date"].iloc[0] == date(2026, 9, 24)
+
+    def test_stale_or_missing_db_entry_downloads_and_persists(self, monkeypatch):
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
+        monkeypatch.setattr(
+            dhan_provider.fetch_log_repo, "get_last_successful_fetch", lambda client, fetch_type, provider_name: None
+        )
+        written = {}
+        logged = {}
+        monkeypatch.setattr(
+            dhan_provider.dhan_instrument_repo,
+            "replace_fo_instruments",
+            lambda client, rows: written.setdefault("rows", rows),
+        )
+        monkeypatch.setattr(dhan_provider.fetch_log_repo, "log_fetch", lambda client, entry: logged.setdefault("entry", entry))
+
+        df = dhan_provider._load_fo_instrument_master(client=object())
+
+        assert not df.empty
+        # Persisted rows must be JSON/DB-safe -- expiry_date a plain ISO
+        # string, not a raw date object.
+        assert all(isinstance(r["expiry_date"], str) for r in written["rows"])
+        assert logged["entry"].provider_name == "fo"
+        assert logged["entry"].fetch_type == dhan_provider.FetchType.DHAN_INSTRUMENT_MASTER
 
 
 class TestResolveFoSecurityId:
