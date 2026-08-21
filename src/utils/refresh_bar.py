@@ -168,14 +168,25 @@ def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
     also widens the equity/ETF universe with every tracked ETF and
     refetches live LTP for every F&O contract _dhan_fo_universe returns
     (migration 0032) -- Zerodha has no F&O instrument resolver yet, so
-    its branch is unchanged (a single call, no F&O leg to parallelize
-    against). The Dhan equity and F&O legs run concurrently
-    (_refresh_dhan_equity_leg/_refresh_dhan_fo_leg, a 2-worker
-    ThreadPoolExecutor) -- each resolves symbols/contracts against Dhan's
-    instrument master (dhan_provider.py, now itself cached in Supabase
-    per migration 0035, shared across users/processes) and makes its own
-    batched live-quote call, so running them one after another wasted
-    real wall-clock time for no benefit. Returns a small summary dict for
+    its branch is unchanged (a single call, no separate F&O leg).
+
+    The Dhan equity and F&O legs (_refresh_dhan_equity_leg/
+    _refresh_dhan_fo_leg) run **sequentially**, not concurrently --
+    deliberately reverted from an earlier `ThreadPoolExecutor` version.
+    Confirmed live: both legs make calls through this function's own
+    `client` -- the instrument-master loaders internally
+    (dhan_provider.py, migration 0035's Supabase cache) and this
+    function's own `snapshot_repo.upsert_*`/`_dhan_fo_universe` reads --
+    and Supabase's cached client object is not safe for two threads to
+    call concurrently (`httpx.RemoteProtocolError`, the connection gets
+    corrupted rather than queued). The two genuinely expensive shared
+    resources this was trying to overlap are already serialized by locks
+    regardless of threading -- the Dhan CSV download
+    (`_get_raw_instrument_master`, once per IST day) and every Dhan API
+    call (`_throttle`, a global minimum-interval gate) -- so sequential
+    execution here costs little beyond not overlapping the two legs' own
+    network *wait* time, a small trade for not corrupting Supabase
+    connections. Returns a small summary dict for
     _render_live_prices_summary."""
     connection = portfolio_repo.get_broker_connection(client, user_id, broker)
     if connection is None or not connection.access_token:
@@ -191,11 +202,8 @@ def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
     symbols = tuple(sorted(equity_etf_symbols))
 
     if broker == "Dhan":
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            equity_future = pool.submit(_refresh_dhan_equity_leg, client, user_id, connection, symbols)
-            fo_future = pool.submit(_refresh_dhan_fo_leg, client, user_id, connection)
-            equity_result = equity_future.result()
-            fo_result = fo_future.result()
+        equity_result = _refresh_dhan_equity_leg(client, user_id, connection, symbols)
+        fo_result = _refresh_dhan_fo_leg(client, user_id, connection)
         if equity_result.get("error"):
             # Matches the pre-parallelization behavior: an equity-leg
             # failure (most commonly an expired token, which would also

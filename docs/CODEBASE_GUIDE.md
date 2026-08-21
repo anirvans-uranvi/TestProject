@@ -748,10 +748,11 @@ day-keyed in-memory dict first, then the shared `dhan_equity_instruments`/
 `dhan_fo_instruments` tables (freshness via `provider_fetch_log`,
 `fetch_type="dhan_instrument_master"`, `provider_name="equity"`/`"fo"`), only
 falling back to a real download (now `_download_equity_master`/
-`_download_fo_master`, the original parse/filter logic unchanged) when
-neither has today's IST-calendar-day data -- a fresh download is persisted
-back via the new `src/repositories/dhan_instrument_repo.py` (delete-then-
-insert, same convention as `fo_repo.clear_dashboard_fo_metrics`/
+`_download_fo_master`, the original parse/filter logic unchanged, but now
+taking an already-downloaded `raw_df` -- see below) when neither has
+today's IST-calendar-day data -- a fresh download is persisted back via
+the new `src/repositories/dhan_instrument_repo.py` (delete-then-insert,
+same convention as `fo_repo.clear_dashboard_fo_metrics`/
 `upsert_dashboard_fo_metrics`) before being cached in-memory, so the *next*
 process/user skips the download too. `client=None` keeps the exact old
 in-memory-only behavior (`factory.py::get_price_provider`'s plain-cron path
@@ -764,57 +765,68 @@ follow-up (`0036`) -- confirmed live, same `42501` as `0034`'s.
 threaded through to both loaders from `get_quotes`/`get_fo_quotes`/
 `get_historical_daily`; `refresh_bar.py::_refresh_user_live_prices` and
 `portfolio_page.py::load_live_dhan_prices` both now pass their own Supabase
-`client` through. The equity and F&O legs of `_refresh_user_live_prices`
-also now run **concurrently** (`_refresh_dhan_equity_leg`/
-`_refresh_dhan_fo_leg`, a 2-worker `ThreadPoolExecutor`, same pattern
-`_run_bhavcopy_refresh` already used for NSE/BSE) instead of sequentially --
-they're independent blocking calls, so running them one after another
-wasted real wall-clock time for no benefit.
+`client` through.
 
-**Follow-up: the two loaders still each downloaded the full CSV on a
-cache-cold day** -- confirmed live as "still very slow" *after* the above
-landed. The bug: `_load_instrument_master`/`_load_fo_instrument_master`
-each independently called `pd.read_csv(INSTRUMENT_MASTER_URL)` on a cache
-miss, and since the equity/F&O legs now run *concurrently*, both would go
-cache-cold **at the same instant** and start two full downloads of the
-same large file competing for the same outbound bandwidth -- slower in
-aggregate than one download, not faster, despite the parallelization
-above. Fixed by extracting a third, smaller-scoped cache:
-`_get_raw_instrument_master()` downloads the raw, unfiltered CSV at most
-once per IST day, holding `_master_cache_lock` for the *entire* download
-(not just the cache check) so a concurrent second caller blocks and
-reuses the first one's result instead of starting its own. `_download_equity_master`/
-`_download_fo_master` were correspondingly changed from "download and
-filter" to "filter" -- each now takes the already-downloaded `raw_df` as
-a parameter. This third cache is deliberately **not** persisted to
-Supabase like the two derived tables -- the raw file is mostly rows
-neither loader wants (currency, commodity, other segments), so there's
-nothing worth storing beyond what `dhan_equity_instruments`/
-`dhan_fo_instruments` already keep.
+The two loaders also share **one** raw download instead of each
+downloading the full CSV independently -- confirmed live as still slow
+even after the DB cache above landed, since a cache-cold refresh triggered
+two full downloads of the same large file. `_get_raw_instrument_master()`
+downloads the raw, unfiltered CSV at most once per IST day, holding
+`_master_cache_lock` for the *entire* download (not just the cache check).
+`_download_equity_master`/`_download_fo_master` were correspondingly
+changed from "download and filter" to "filter" -- each takes the
+already-downloaded `raw_df` as a parameter. This raw-CSV cache is
+deliberately **not** persisted to Supabase like the two derived tables --
+it's mostly rows neither loader wants (currency, commodity, other
+segments), so there's nothing worth storing beyond what
+`dhan_equity_instruments`/`dhan_fo_instruments` already keep.
+`_get_raw_instrument_master` always returns a fresh `.copy()`, never the
+cached object itself -- pandas is **not** thread-safe for concurrent reads
+of one shared DataFrame instance (lazy internal caching -- e.g. block
+consolidation on first column access -- mutates C-level state even on
+operations that look read-only, like `.rename()` or `.str.upper()`), and
+an earlier version that skipped the `.copy()` silently corrupted results
+when both loaders happened to run at the same time (see below for why
+that "at the same time" stopped being possible).
 
-**Second follow-up, more serious than the first**: the initial version of
-`_get_raw_instrument_master` handed the *same* cached DataFrame object to
-both legs. Confirmed live: a real account's next refresh went from 61/61
-equities + 333+/351 F&O resolving to **15/61 + 0/348** -- silent
-corruption, not a crash, which is what made it worth writing up here
-rather than just fixing quietly. Root cause: **pandas is not thread-safe
-for concurrent reads of one shared DataFrame instance** -- operations that
-look purely read-only (`.rename()`, boolean-mask filtering, `.str.upper()`)
-can still mutate C-level internal state on first access (lazy block
-consolidation, `_item_cache`, ...), so two threads calling
-`_download_equity_master`/`_download_fo_master` against the *same* object
-at the *same time* (exactly what `_refresh_dhan_equity_leg`/
-`_refresh_dhan_fo_leg`'s `ThreadPoolExecutor` does) could silently
-corrupt one or both filter results, with no exception raised anywhere to
-flag it. Fixed by having `_get_raw_instrument_master` always return a
-fresh `.copy()` -- never the object sitting in `_raw_master_cache` -- so
-each leg's own `.rename()`/filtering chain operates on a fully
-independent object with zero cross-thread interference. The `.copy()`
-only duplicates already-in-memory data (no network I/O), so it costs
-essentially nothing next to the download it's built on top of. If you
-touch this cache again: **never return or share a live pandas object
-across threads** -- copy at the handoff point, every time, even when the
-receiving code "only reads."
+**The equity and F&O legs of `_refresh_user_live_prices` run
+sequentially, not concurrently** -- this was tried as a 2-worker
+`ThreadPoolExecutor` (`_refresh_dhan_equity_leg`/`_refresh_dhan_fo_leg`,
+same pattern `_run_bhavcopy_refresh` uses for NSE/BSE) and reverted after
+two rounds of real, silent production breakage, both worth understanding
+if this is ever revisited:
+
+1. **Shared-DataFrame corruption.** The first concurrent version handed
+   the *same* raw CSV DataFrame to both legs. A live account's next
+   refresh dropped from 61/61 equities + 333+/351 F&O resolving to
+   **15/61 + 0/348** -- no exception anywhere, just quietly wrong results,
+   which is what made it worth documenting rather than just patching.
+   Root cause was the pandas thread-safety issue described above; fixed
+   by the `.copy()`.
+2. **Shared Supabase client corruption.** Even with (1) fixed, both legs
+   also make calls through `_refresh_user_live_prices`'s own `client` --
+   `snapshot_repo.upsert_user_live_prices`/`upsert_user_live_fo_prices`,
+   `_dhan_fo_universe`'s reads, and the instrument-master loaders' own
+   `provider_fetch_log`/`dhan_*_instruments` calls -- while running on two
+   different threads. This crashed with `httpx.RemoteProtocolError`
+   (confirmed live, full traceback landing in `fetch_log_repo.log_fetch`
+   -> `postgrest` -> `httpx`) -- Supabase's cached client's underlying
+   connection isn't safe for two threads to use concurrently; it gets
+   corrupted rather than queued.
+
+`_run_bhavcopy_refresh`'s own `ThreadPoolExecutor` (NSE + BSE) is **not**
+affected by either issue and is unchanged -- it calls
+`edge_refresh.trigger_fo_refresh`, which POSTs to an Edge Function with a
+fresh `httpx.post()` per call, never touching a shared pandas object or
+the cached Supabase `client`. The distinction that matters: threading is
+safe here for independent, self-contained network calls, but not for
+sharing a live pandas object or a cached Supabase client across threads
+-- copy (or don't share) the former, and don't call the latter
+concurrently, full stop. Since the two genuinely expensive shared
+resources in the Dhan refresh path -- the CSV download and every Dhan API
+call (`_throttle`'s global rate gate) -- are already serialized by locks
+regardless of threading, going sequential here gives up only the overlap
+of the two legs' own network *wait* time.
 
 `user_live_prices`, widened by migration `0032` from an equity-only
 `(user_id, symbol)` table to `(user_id, symbol, expiry_date, strike_price,

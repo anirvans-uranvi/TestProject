@@ -415,34 +415,39 @@ regardless of which page triggered the refresh.
   strike/expiry, just what the Screener and the account's own positions
   actually reference. Zerodha has no F&O instrument-lookup mechanism in
   this codebase yet, so a Zerodha-provider account keeps the equity-only
-  behavior above. The equity and F&O legs run **concurrently** (2-worker
-  `ThreadPoolExecutor`, `_refresh_dhan_equity_leg`/`_refresh_dhan_fo_leg`)
-  rather than one after another -- each resolves against Dhan's
-  instrument master independently, so running them sequentially wasted
-  real wall-clock time for no benefit. That instrument master (~211,742
-  rows downloaded from `images.dhan.co`) is itself cached in Supabase,
-  shared across every user and process (`dhan_equity_instruments`/
-  `dhan_fo_instruments`, migration `0035`) -- refreshed at most once per
-  IST calendar day (tracked via `provider_fetch_log`, `fetch_type=
-  "dhan_instrument_master"`), so a cold Streamlit process no longer pays
-  for a fresh multi-MB download from Dhan's CDN on every restart. On a
-  cache-cold day, the two loaders (`dhan_provider.py::_load_instrument_master`/
-  `_load_fo_instrument_master`) also no longer each download the full CSV
-  independently -- confirmed live as still-slow even after the DB cache
-  landed, since running the equity/F&O legs concurrently meant both hit a
-  cold cache **at the same time** and started two full downloads
-  competing for the same outbound bandwidth. `_get_raw_instrument_master`
-  now downloads the raw file at most once per day, in-process, handing
-  out a fresh `.copy()` to each filter (never the cached object itself)
-  -- pandas is **not** thread-safe for concurrent reads of one shared
-  DataFrame instance (lazy internal caching mutates C-level state even on
-  operations that look read-only), so an earlier version of this fix that
-  shared one object between the two concurrently-running legs silently
-  corrupted the result for one or both -- confirmed live, a real account
-  dropped from 61/61 equities + 333+/351 F&O resolving to 15/61 + 0/348
-  after that version shipped. The `.copy()` only duplicates
-  already-in-memory data (no I/O), so it doesn't undo the shared-download
-  win, just isolates each leg's own filtering from the other's.
+  behavior above.
+
+  **Performance**: Dhan's instrument master (~211,742 rows across every
+  exchange/segment, downloaded from `images.dhan.co`) is cached in
+  Supabase, shared across every user and process
+  (`dhan_equity_instruments`/`dhan_fo_instruments`, migration `0035`) --
+  refreshed at most once per IST calendar day (tracked via
+  `provider_fetch_log`, `fetch_type="dhan_instrument_master"`), so a cold
+  Streamlit process no longer pays for a fresh multi-MB download on every
+  restart. On a cache-cold day, both the equity and F&O loaders
+  (`dhan_provider.py::_load_instrument_master`/`_load_fo_instrument_master`)
+  share **one** raw download (`_get_raw_instrument_master`, held under a
+  lock for the duration) rather than each downloading the full file
+  independently.
+
+  The equity and F&O legs (`_refresh_dhan_equity_leg`/`_refresh_dhan_fo_leg`)
+  run **sequentially**, not concurrently -- this was tried as a
+  `ThreadPoolExecutor` and reverted after two rounds of real, silent
+  breakage: sharing one raw DataFrame between two threads corrupted the
+  filtered result for one or both (pandas is not thread-safe for
+  concurrent reads of a single shared instance -- confirmed live, a real
+  account's resolution dropped from 61/61 equities + 333+/351 F&O to
+  15/61 + 0/348), and even after fixing that with a per-leg `.copy()`,
+  both legs also make calls through this function's *own* shared
+  Supabase `client` (`snapshot_repo.upsert_*`, `_dhan_fo_universe`, and
+  the instrument-master loaders' own DB reads/writes) -- confirmed live
+  as `httpx.RemoteProtocolError`, since that client's connection isn't
+  safe for two threads to use at once either. The two genuinely expensive
+  shared resources (the CSV download, and every Dhan API call via
+  `_throttle`'s global rate gate) are already serialized by locks
+  regardless of threading, so sequential execution here gives up only the
+  overlap of the two legs' own network *wait* time -- a small trade for
+  not corrupting Supabase connections.
 - **Portfolio Refresh** -- re-syncs holdings/positions from the
   connected broker (`src/utils/data_provider_settings.py::sync_broker_portfolio`,
   wrapping the same `_sync_dhan`/`_sync_zerodha` Settings' "Save & Sync"/
