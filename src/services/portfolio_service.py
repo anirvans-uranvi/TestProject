@@ -183,17 +183,20 @@ def dhan_positions_from_api(rows: list[dict], ltp_by_security_id: dict[str, floa
     since the positions payload itself carries no live price. Skips closed
     (netQty == 0) rows -- Dhan still lists those for the trading day.
 
-    Dhan allows the same contract to be held under more than one
-    productType at once (e.g. an INTRADAY trade alongside a carried-
-    forward CNC/NRML position on the same securityId) -- both rows share
-    one tradingSymbol, which portfolio_positions' primary key
-    (user_id, portfolio_name, broker, raw_name) relies on being unique,
-    so an unmodified collision fails the whole sync with a duplicate-key
-    error (23505). Only the colliding rows get a productType (falling
-    back to securityId if that's blank) appended to raw_name below -- an
-    account with no such overlap keeps today's exact raw_name, so its
-    saved trade_date/stop_loss/trade-group links (keyed on
-    (broker, raw_name)) survive the next sync unchanged."""
+    Dhan can return more than one /v2/positions row sharing one
+    tradingSymbol -- confirmed live (postgrest APIError 23505,
+    "portfolio_positions_pkey") -- and not only via the most obvious
+    cause (an INTRADAY trade alongside a carried-forward CNC/NRML
+    position on the same securityId): a confirmed-live account hit this
+    with no intraday/overnight overlap at all, so some other Dhan-side
+    duplication (e.g. a repeated/legged entry) can produce it too.
+    portfolio_positions' primary key is (user_id, portfolio_name, broker,
+    raw_name), so ANY such collision fails the whole sync's insert.
+    _dedupe_raw_names below disambiguates exhaustively -- productType,
+    then securityId, then a bare ordinal -- so the insert can never
+    23505 regardless of cause, while an account with no collision at all
+    keeps today's exact raw_name (preserving trade_date/stop_loss/
+    trade-group links, keyed on (broker, raw_name))."""
     positions = []
     for row in rows:
         qty = row.get("netQty") or 0
@@ -216,7 +219,7 @@ def dhan_positions_from_api(rows: list[dict], ltp_by_security_id: dict[str, floa
         positions.append(
             {
                 "raw_name": trading_symbol or security_id,
-                "_dedupe_suffix": product_type or security_id,
+                "_dedupe_tiebreakers": [product_type, security_id],
                 "symbol": _dhan_underlying_symbol(trading_symbol) if trading_symbol else None,
                 "expiry_date": (
                     date.fromisoformat(expiry_str)
@@ -230,12 +233,39 @@ def dhan_positions_from_api(rows: list[dict], ltp_by_security_id: dict[str, floa
                 "ltp": ltp_by_security_id.get(security_id),
             }
         )
-    raw_name_counts = Counter(p["raw_name"] for p in positions)
-    for p in positions:
-        suffix = p.pop("_dedupe_suffix")
-        if raw_name_counts[p["raw_name"]] > 1:
-            p["raw_name"] = f"{p['raw_name']} ({suffix})"
+    _dedupe_raw_names(positions)
     return positions
+
+
+def _dedupe_raw_names(positions: list[dict]) -> None:
+    """Mutates `raw_name` in place so it's unique across `positions`,
+    trying each dict's `_dedupe_tiebreakers` (broker-specific identifiers,
+    most useful first) in order, falling back to a bare ordinal suffix if
+    every tiebreaker is exhausted (blank, or still colliding -- e.g. Dhan
+    returning a literal duplicate row) -- see dhan_positions_from_api's
+    docstring for why this must never fail to produce a unique value. A
+    `raw_name` that was never involved in any collision is left exactly
+    as given. Pops `_dedupe_tiebreakers` from every dict as a side effect."""
+    counts = Counter(p["raw_name"] for p in positions)
+    seen: set[str] = set()
+    for p in positions:
+        tiebreakers = p.pop("_dedupe_tiebreakers")
+        base = p["raw_name"]
+        if counts[base] <= 1:
+            seen.add(base)
+            continue
+        candidate = base
+        for tiebreaker in tiebreakers:
+            if tiebreaker and f"{base} ({tiebreaker})" not in seen:
+                candidate = f"{base} ({tiebreaker})"
+                break
+        if candidate == base or candidate in seen:
+            n = 2
+            while f"{base} #{n}" in seen:
+                n += 1
+            candidate = f"{base} #{n}"
+        p["raw_name"] = candidate
+        seen.add(candidate)
 
 
 def zerodha_holdings_from_api(rows: list[dict]) -> list[dict]:
@@ -298,10 +328,10 @@ def zerodha_positions_from_api(rows: list[dict]) -> list[dict]:
 
     Kite can hold the same tradingsymbol under more than one margin
     `product` (CNC/MIS/NRML) at once, and both rows would otherwise share
-    one raw_name -- see dhan_positions_from_api's docstring for why that
-    breaks portfolio_positions' primary key. Same fix: only the colliding
-    rows get their `product` appended to raw_name, so an account with no
-    such overlap keeps today's exact raw_name."""
+    one raw_name -- see dhan_positions_from_api's docstring (and
+    _dedupe_raw_names, reused here) for why that breaks
+    portfolio_positions' primary key and why the fix must be exhaustive,
+    not just a `product` suffix."""
     positions = []
     for row in rows:
         qty = row.get("quantity") or 0
@@ -315,7 +345,7 @@ def zerodha_positions_from_api(rows: list[dict]) -> list[dict]:
         positions.append(
             {
                 "raw_name": raw_name,
-                "_dedupe_suffix": product,
+                "_dedupe_tiebreakers": [product],
                 "symbol": decoded.get("symbol"),
                 "expiry_date": decoded.get("expiry_date"),
                 "strike_price": decoded.get("strike_price"),
@@ -325,11 +355,7 @@ def zerodha_positions_from_api(rows: list[dict]) -> list[dict]:
                 "ltp": float(ltp) if ltp is not None else None,
             }
         )
-    raw_name_counts = Counter(p["raw_name"] for p in positions)
-    for p in positions:
-        suffix = p.pop("_dedupe_suffix")
-        if raw_name_counts[p["raw_name"]] > 1 and suffix:
-            p["raw_name"] = f"{p['raw_name']} ({suffix})"
+    _dedupe_raw_names(positions)
     return positions
 
 

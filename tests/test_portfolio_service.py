@@ -738,6 +738,39 @@ class TestDhanPositionsFromApi:
         positions = portfolio_service.dhan_positions_from_api(rows, {})
         assert {p["raw_name"] for p in positions} == {"RELIANCE", "TCS"}
 
+    def test_collision_with_identical_product_type_falls_back_to_security_id(self):
+        # Regression, confirmed live: the first fix (suffix with
+        # productType only) still 23505'd on a real account that
+        # confirmed it had no intraday/overnight overlap -- meaning Dhan
+        # returned two same-tradingSymbol rows sharing one productType
+        # too, which a productType-only suffix can't disambiguate.
+        rows = [
+            {
+                "tradingSymbol": "RELIANCE", "securityId": "111", "productType": "CNC",
+                "netQty": 10, "costPrice": 2900.0,
+            },
+            {
+                "tradingSymbol": "RELIANCE", "securityId": "222", "productType": "CNC",
+                "netQty": 5, "costPrice": 2800.0,
+            },
+        ]
+        positions = portfolio_service.dhan_positions_from_api(rows, {})
+        raw_names = {p["raw_name"] for p in positions}
+        assert len(raw_names) == 2
+        assert raw_names == {"RELIANCE (CNC)", "RELIANCE (222)"}
+
+    def test_fully_identical_rows_still_get_unique_raw_names(self):
+        # Absolute last resort: even a literal duplicate row (same
+        # tradingSymbol, productType, and securityId) must not crash the
+        # sync -- falls back to a bare ordinal suffix.
+        row = {
+            "tradingSymbol": "RELIANCE", "securityId": "111", "productType": "CNC",
+            "netQty": 10, "costPrice": 2900.0,
+        }
+        positions = portfolio_service.dhan_positions_from_api([row, dict(row)], {})
+        raw_names = {p["raw_name"] for p in positions}
+        assert len(raw_names) == 2
+
 
 class TestZerodhaHoldingsFromApi:
     def test_translates_holdings_endpoint_rows(self):
