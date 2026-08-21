@@ -425,10 +425,16 @@ regardless of which page triggered the refresh.
   `dhan_fo_instruments`, migration `0035`) -- refreshed at most once per
   IST calendar day (tracked via `provider_fetch_log`, `fetch_type=
   "dhan_instrument_master"`), so a cold Streamlit process no longer pays
-  for a fresh multi-MB download from Dhan's CDN on every restart, and
-  the two loaders (`dhan_provider.py::_load_instrument_master`/
-  `_load_fo_instrument_master`) no longer redundantly download the same
-  file twice for the equity vs. F&O slice.
+  for a fresh multi-MB download from Dhan's CDN on every restart. On a
+  cache-cold day, the two loaders (`dhan_provider.py::_load_instrument_master`/
+  `_load_fo_instrument_master`) also no longer each download the full CSV
+  independently -- confirmed live as still-slow even after the DB cache
+  landed, since running the equity/F&O legs concurrently meant both hit a
+  cold cache **at the same time** and started two full downloads
+  competing for the same outbound bandwidth. `_get_raw_instrument_master`
+  now downloads the raw file at most once per day, in-process, and hands
+  the same DataFrame to both filters -- the second leg to arrive just
+  waits for the first one's download instead of starting its own.
 - **Portfolio Refresh** -- re-syncs holdings/positions from the
   connected broker (`src/utils/data_provider_settings.py::sync_broker_portfolio`,
   wrapping the same `_sync_dhan`/`_sync_zerodha` Settings' "Save & Sync"/

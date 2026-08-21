@@ -245,6 +245,48 @@ class TestLoadInstrumentMasterDbCache:
         assert set(df["trading_symbol"]) == {"RELIANCE", "TCS"}
 
 
+_COMBINED_RAW_FIXTURE = pd.DataFrame(
+    [
+        {
+            "SEM_SMST_SECURITY_ID": "1001", "SEM_TRADING_SYMBOL": "RELIANCE", "SEM_EXM_EXCH_ID": "NSE",
+            "SEM_SEGMENT": "E", "SEM_INSTRUMENT_NAME": "EQUITY", "SEM_EXPIRY_DATE": None,
+            "SEM_STRIKE_PRICE": None, "SEM_OPTION_TYPE": None,
+        },
+        {
+            "SEM_SMST_SECURITY_ID": "50001", "SEM_TRADING_SYMBOL": "RELIANCE-Aug2026-FUT", "SEM_EXM_EXCH_ID": "NSE",
+            "SEM_SEGMENT": "D", "SEM_INSTRUMENT_NAME": "FUTSTK", "SEM_EXPIRY_DATE": "2026-08-27",
+            "SEM_STRIKE_PRICE": -0.01, "SEM_OPTION_TYPE": "XX",
+        },
+    ]
+)
+
+
+class TestSharedRawInstrumentMasterDownload:
+    """The actual fix for a still-slow "Stock & Option Data Refresh":
+    _load_instrument_master and _load_fo_instrument_master used to each
+    independently `pd.read_csv` the full Dhan file -- confirmed live as a
+    cache-cold refresh downloading the same large CSV twice, concurrently,
+    competing for the same outbound bandwidth. Both now route through
+    _get_raw_instrument_master, which downloads at most once per IST day
+    and hands the same in-memory DataFrame to both filters."""
+
+    def test_equity_and_fo_loaders_share_one_download_when_both_cache_cold(self, monkeypatch):
+        call_count = {"n": 0}
+
+        def counting_read_csv(*a, **k):
+            call_count["n"] += 1
+            return _COMBINED_RAW_FIXTURE
+
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", counting_read_csv)
+
+        equity_df = dhan_provider._load_instrument_master()
+        fo_df = dhan_provider._load_fo_instrument_master()
+
+        assert call_count["n"] == 1
+        assert equity_df["trading_symbol"].tolist() == ["RELIANCE"]
+        assert fo_df["underlying_symbol"].tolist() == ["RELIANCE"]
+
+
 class TestGetPositions:
     def test_returns_raw_rows(self, monkeypatch):
         monkeypatch.setattr(httpx, "request", lambda *a, **k: _FakeResponse(200, json_data=[{"netQty": -780}]))
@@ -387,9 +429,11 @@ _FO_MASTER_FIXTURE = pd.DataFrame(
 def _clear_instrument_master_caches():
     dhan_provider._equity_master_cache.clear()
     dhan_provider._fo_master_cache.clear()
+    dhan_provider._raw_master_cache.clear()
     yield
     dhan_provider._equity_master_cache.clear()
     dhan_provider._fo_master_cache.clear()
+    dhan_provider._raw_master_cache.clear()
 
 
 class TestLoadFoInstrumentMaster:

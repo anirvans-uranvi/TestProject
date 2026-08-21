@@ -57,19 +57,54 @@ def _throttle() -> None:
 # isn't a stable/hashable identity across sessions, and keying on it would
 # defeat sharing this cache across users within one process). Below this,
 # dhan_equity_instruments/dhan_fo_instruments (migration 0035) persist the
-# same result across *processes* too -- see _load_instrument_master's
-# docstring.
+# derived (filtered) results across *processes* too -- see
+# _load_instrument_master's docstring. _raw_master_cache is a third,
+# smaller-scoped cache: the *unfiltered* CSV, shared between
+# _download_equity_master and _download_fo_master so a cache-cold refresh
+# (both loaders missing today's data at once, the common case -- Stock &
+# Option Data Refresh runs them concurrently) downloads Dhan's ~211,742-row
+# file ONCE, not twice. Never persisted to Supabase -- unlike the two
+# derived slices, the raw file is mostly rows neither loader wants
+# (currency, commodity, other segments), so there's nothing worth storing
+# beyond what dhan_equity_instruments/dhan_fo_instruments already keep.
 _equity_master_cache: dict[str, pd.DataFrame] = {}
 _fo_master_cache: dict[str, pd.DataFrame] = {}
+_raw_master_cache: dict[str, pd.DataFrame] = {}
 _master_cache_lock = threading.Lock()
 
 
-def _download_equity_master() -> pd.DataFrame:
-    """The real download+parse: fetches Dhan's full instrument master CSV
-    (~211,742 rows across every exchange/segment) and filters it down to
-    the NSE-equity slice. Column names in Dhan's compact CSV have varied
-    across releases, so we resolve them by fuzzy match instead of
-    hardcoding exact headers.
+def _get_raw_instrument_master() -> pd.DataFrame:
+    """Downloads Dhan's full, unfiltered instrument master CSV
+    (~211,742 rows across every exchange/segment/instrument type) at most
+    once per IST calendar day, in-process. Held under _master_cache_lock
+    for the *entire* download -- not just the cache check -- so that when
+    the equity and F&O legs of a refresh run concurrently
+    (src/utils/refresh_bar.py's ThreadPoolExecutor) and both find today's
+    cache cold, the second one to arrive blocks and then reuses the first
+    one's result instead of starting its own duplicate download of the
+    same large file. Confirmed live: before this, a cache-cold refresh
+    downloaded the same CSV twice, concurrently, competing for the same
+    outbound bandwidth -- slower in aggregate than one download, not
+    faster, despite running "in parallel"."""
+    today = now_ist().date().isoformat()
+    with _master_cache_lock:
+        cached = _raw_master_cache.get(today)
+        if cached is not None:
+            return cached
+        try:
+            df = pd.read_csv(INSTRUMENT_MASTER_URL, low_memory=False)
+        except Exception as exc:  # noqa: BLE001
+            raise ProviderError(f"failed to download Dhan instrument master: {exc}") from exc
+        _raw_master_cache.clear()  # only "today" is ever relevant
+        _raw_master_cache[today] = df
+        return df
+
+
+def _download_equity_master(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """Filters the already-downloaded raw instrument master
+    (_get_raw_instrument_master) down to the NSE-equity slice. Column
+    names in Dhan's compact CSV have varied across releases, so we
+    resolve them by fuzzy match instead of hardcoding exact headers.
 
     The equity filter used to test whether the SEGMENT column *contained*
     "EQ" -- confirmed live to be wrong: a real download's segment column
@@ -86,10 +121,7 @@ def _download_equity_master() -> pd.DataFrame:
     'EQUITY'`), the same exact-match-on-instrument-type approach
     `_download_fo_master` already uses for FUTSTK/OPTSTK.
     """
-    try:
-        df = pd.read_csv(INSTRUMENT_MASTER_URL, low_memory=False)
-    except Exception as exc:  # noqa: BLE001
-        raise ProviderError(f"failed to download Dhan instrument master: {exc}") from exc
+    df = raw_df
 
     def find_col(*keywords: str) -> str | None:
         for col in df.columns:
@@ -145,7 +177,7 @@ def _load_instrument_master(client: Client | None = None) -> pd.DataFrame:
                 df = pd.DataFrame(rows)
 
     if df is None:
-        df = _download_equity_master()
+        df = _download_equity_master(_get_raw_instrument_master())
         if client is not None:
             started_at = datetime.now(IST)
             dhan_instrument_repo.replace_equity_instruments(client, df.to_dict("records"))
@@ -198,10 +230,10 @@ def _underlying_from_trading_symbol(trading_symbol: str, option_type: str) -> st
     return "-".join(parts[: len(parts) - trailing]) if len(parts) > trailing else parts[0]
 
 
-def _download_fo_master() -> pd.DataFrame:
-    """The real download+parse: fetches the same full CSV
-    `_download_equity_master` does, filtered instead to derivative rows.
-    Confirmed against a live download of
+def _download_fo_master(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """Filters the same already-downloaded raw instrument master
+    `_download_equity_master` uses (`_get_raw_instrument_master`) down to
+    derivative rows instead. Confirmed against a live download of
     https://images.dhan.co/api-data/api-scrip-master.csv
     -- real header: SEM_EXM_EXCH_ID, SEM_SEGMENT, SEM_SMST_SECURITY_ID,
     SEM_INSTRUMENT_NAME, SEM_EXPIRY_CODE, SEM_TRADING_SYMBOL,
@@ -229,10 +261,7 @@ def _download_fo_master() -> pd.DataFrame:
     FINNIFTY, SENSEX) from live pricing -- confirmed live via the
     "Not live-priced" diagnostic (see refresh_bar.py's _fmt_fo_contract)
     naming exactly those symbols."""
-    try:
-        df = pd.read_csv(INSTRUMENT_MASTER_URL, low_memory=False)
-    except Exception as exc:  # noqa: BLE001
-        raise ProviderError(f"failed to download Dhan instrument master: {exc}") from exc
+    df = raw_df
 
     def find_col(*keywords: str) -> str | None:
         for col in df.columns:
@@ -307,7 +336,7 @@ def _load_fo_instrument_master(client: Client | None = None) -> pd.DataFrame:
                 df["strike_price"] = df["strike_price"].astype(float)
 
     if df is None:
-        df = _download_fo_master()
+        df = _download_fo_master(_get_raw_instrument_master())
         if client is not None:
             started_at = datetime.now(IST)
             db_rows = df.assign(expiry_date=df["expiry_date"].astype(str), strike_price=df["strike_price"].astype(float)).to_dict(

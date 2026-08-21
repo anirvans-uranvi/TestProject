@@ -771,6 +771,27 @@ also now run **concurrently** (`_refresh_dhan_equity_leg`/
 they're independent blocking calls, so running them one after another
 wasted real wall-clock time for no benefit.
 
+**Follow-up: the two loaders still each downloaded the full CSV on a
+cache-cold day** -- confirmed live as "still very slow" *after* the above
+landed. The bug: `_load_instrument_master`/`_load_fo_instrument_master`
+each independently called `pd.read_csv(INSTRUMENT_MASTER_URL)` on a cache
+miss, and since the equity/F&O legs now run *concurrently*, both would go
+cache-cold **at the same instant** and start two full downloads of the
+same large file competing for the same outbound bandwidth -- slower in
+aggregate than one download, not faster, despite the parallelization
+above. Fixed by extracting a third, smaller-scoped cache:
+`_get_raw_instrument_master()` downloads the raw, unfiltered CSV at most
+once per IST day, holding `_master_cache_lock` for the *entire* download
+(not just the cache check) so a concurrent second caller blocks and
+reuses the first one's result instead of starting its own. `_download_equity_master`/
+`_download_fo_master` were correspondingly changed from "download and
+filter" to "filter" -- each now takes the already-downloaded `raw_df` as
+a parameter. This third cache is deliberately **not** persisted to
+Supabase like the two derived tables -- the raw file is mostly rows
+neither loader wants (currency, commodity, other segments), so there's
+nothing worth storing beyond what `dhan_equity_instruments`/
+`dhan_fo_instruments` already keep.
+
 `user_live_prices`, widened by migration `0032` from an equity-only
 `(user_id, symbol)` table to `(user_id, symbol, expiry_date, strike_price,
 option_type)` -- `option_type='EQ'` (default) for the pre-existing equity/
