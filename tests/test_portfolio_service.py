@@ -431,9 +431,144 @@ class TestClassifyPositionBucket:
         assert portfolio_service.classify_position_bucket(OptionType.PE, "SOMENEWCO", {}) == "stock"
 
 
+class TestClassifyTradeType:
+    def _leg(self, *, leg_type, option_type=None, qty=0.0):
+        return {"leg_type": leg_type, "option_type": option_type, "qty": qty}
+
+    def _holding(self, qty=100.0):
+        return self._leg(leg_type="Holding", qty=qty)
+
+    def _position(self, option_type, qty):
+        return self._leg(leg_type="Position", option_type=option_type, qty=qty)
+
+    def test_csp_is_one_short_put_and_no_holding(self):
+        legs = [self._position(OptionType.PE, -75)]
+        assert portfolio_service.classify_trade_type(legs) == "CSP"
+
+    def test_short_put_with_a_holding_present_is_not_csp(self):
+        # A CSP is specifically *uncovered* -- a holding present makes this
+        # something else (not classified by any of these rules).
+        legs = [self._holding(), self._position(OptionType.PE, -75)]
+        assert portfolio_service.classify_trade_type(legs) is None
+
+    def test_long_put_alone_is_not_csp(self):
+        legs = [self._position(OptionType.PE, 75)]
+        assert portfolio_service.classify_trade_type(legs) is None
+
+    def test_covered_call_is_holding_plus_one_short_call(self):
+        legs = [self._holding(), self._position(OptionType.CE, -50)]
+        assert portfolio_service.classify_trade_type(legs) == "Covered Call"
+
+    def test_short_call_without_a_holding_is_not_covered_call(self):
+        legs = [self._position(OptionType.CE, -50)]
+        assert portfolio_service.classify_trade_type(legs) is None
+
+    def test_strangle_both_legs_short(self):
+        legs = [self._position(OptionType.PE, -75), self._position(OptionType.CE, -50)]
+        assert portfolio_service.classify_trade_type(legs) == "Strangle"
+
+    def test_strangle_both_legs_long(self):
+        legs = [self._position(OptionType.PE, 75), self._position(OptionType.CE, 50)]
+        assert portfolio_service.classify_trade_type(legs) == "Strangle"
+
+    def test_strangle_with_a_holding_present_is_still_a_strangle(self):
+        legs = [self._holding(), self._position(OptionType.PE, -75), self._position(OptionType.CE, -50)]
+        assert portfolio_service.classify_trade_type(legs) == "Strangle"
+
+    def test_mismatched_direction_is_not_a_strangle(self):
+        legs = [self._position(OptionType.PE, -75), self._position(OptionType.CE, 50)]
+        assert portfolio_service.classify_trade_type(legs) is None
+
+    def test_jade_lizard_is_long_call_plus_two_short_legs(self):
+        legs = [
+            self._position(OptionType.CE, 25),
+            self._position(OptionType.CE, -50),
+            self._position(OptionType.PE, -75),
+        ]
+        assert portfolio_service.classify_trade_type(legs) == "Jade Lizard"
+
+    def test_twisted_sister_is_long_put_plus_two_short_legs(self):
+        legs = [
+            self._position(OptionType.PE, 25),
+            self._position(OptionType.CE, -50),
+            self._position(OptionType.PE, -75),
+        ]
+        assert portfolio_service.classify_trade_type(legs) == "Twisted Sister"
+
+    def test_jade_lizard_with_more_than_three_legs(self):
+        legs = [
+            self._position(OptionType.CE, 25),
+            self._position(OptionType.CE, -50),
+            self._position(OptionType.PE, -75),
+            self._position(OptionType.PE, -80),
+        ]
+        assert portfolio_service.classify_trade_type(legs) == "Jade Lizard"
+
+    def test_two_long_legs_among_three_is_not_jade_lizard(self):
+        legs = [
+            self._position(OptionType.CE, 25),
+            self._position(OptionType.CE, 30),
+            self._position(OptionType.PE, -75),
+        ]
+        assert portfolio_service.classify_trade_type(legs) is None
+
+    def test_undecoded_leg_bails_to_none_instead_of_guessing(self):
+        legs = [self._position(OptionType.PE, -75), self._leg(leg_type="Position", option_type=None, qty=-1)]
+        assert portfolio_service.classify_trade_type(legs) is None
+
+    def test_plain_holding_only_is_none(self):
+        assert portfolio_service.classify_trade_type([self._holding()]) is None
+
+    def test_empty_legs_is_none(self):
+        assert portfolio_service.classify_trade_type([]) is None
+
+
 class TestGroupIntoTrades:
-    def _leg(self, *, raw_name, broker, symbol, leg_type, pnl):
-        return {"raw_name": raw_name, "broker": broker, "symbol": symbol, "leg_type": leg_type, "pnl": pnl}
+    def _leg(self, *, raw_name, broker, symbol, leg_type, pnl, option_type=None, qty=0.0):
+        return {
+            "raw_name": raw_name,
+            "broker": broker,
+            "symbol": symbol,
+            "leg_type": leg_type,
+            "pnl": pnl,
+            "option_type": option_type,
+            "qty": qty,
+        }
+
+    def test_trade_type_mismatch_false_when_no_meta_row_exists(self):
+        # A brand-new/never-touched trade is never flagged, regardless of
+        # what its legs look like.
+        legs = [self._leg(raw_name="X", broker="Zerodha", symbol="X", leg_type="Position", pnl=None, option_type=OptionType.PE, qty=-75)]
+        trades = portfolio_service.group_into_trades(legs, overrides={}, trade_meta={}, company_type_by_symbol={})
+        assert trades[0]["trade_type_mismatch"] is False
+
+    def test_trade_type_mismatch_true_when_saved_type_disagrees_with_current_legs(self):
+        # Saved as CSP, but the legs now look like a Covered Call (a
+        # holding plus a short call) -- a genuine disagreement, flagged.
+        legs = [
+            self._leg(raw_name="X", broker="Zerodha", symbol="X", leg_type="Holding", pnl=None, qty=100),
+            self._leg(raw_name="X CE", broker="Zerodha", symbol="X", leg_type="Position", pnl=None, option_type=OptionType.CE, qty=-50),
+        ]
+        trade_meta = {"X": {"trade_type": "CSP"}}
+        trades = portfolio_service.group_into_trades(legs, overrides={}, trade_meta=trade_meta, company_type_by_symbol={})
+        assert trades[0]["trade_type_mismatch"] is True
+
+    def test_trade_type_mismatch_false_when_detection_agrees(self):
+        legs = [self._leg(raw_name="X", broker="Zerodha", symbol="X", leg_type="Position", pnl=None, option_type=OptionType.PE, qty=-75)]
+        trade_meta = {"X": {"trade_type": "csp"}}  # saved lowercase -- still matches case-insensitively
+        trades = portfolio_service.group_into_trades(legs, overrides={}, trade_meta=trade_meta, company_type_by_symbol={})
+        assert trades[0]["trade_type_mismatch"] is False
+
+    def test_trade_type_mismatch_false_when_shape_matches_no_known_strategy(self):
+        # A trade meta row exists (user manually typed a custom label) but
+        # the legs don't match any known options shape at all --
+        # classify_trade_type returns None, which must NOT count as a
+        # mismatch (a custom label like "Earnings Play" shouldn't be
+        # flagged just because it isn't a recognized strategy).
+        legs = [self._leg(raw_name="X", broker="Zerodha", symbol="X", leg_type="Holding", pnl=None, qty=100)]
+        trade_meta = {"X": {"trade_type": "Earnings Play"}}
+        trades = portfolio_service.group_into_trades(legs, overrides={}, trade_meta=trade_meta, company_type_by_symbol={})
+        assert trades[0]["trade_type_mismatch"] is False
 
     def test_groups_by_default_underlying_and_sums_pnl(self):
         legs = [

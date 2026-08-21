@@ -82,7 +82,7 @@ def _render_trades_table(*, title: str, trades: list[dict], portfolio_name: str,
     table_rows = [
         {
             "Underlying Instrument": t["underlying_label"],
-            "Trade Type": t["trade_type"],
+            "Trade Type": f"{t['trade_type']} ⚠️" if t["trade_type_mismatch"] else t["trade_type"],
             "Legs": t["leg_count"],
             "Total P&L": t["total_pnl"],
         }
@@ -100,6 +100,8 @@ def _render_trades_table(*, title: str, trades: list[dict], portfolio_name: str,
             "Total P&L": st.column_config.NumberColumn(format="₹%,.2f"),
         },
     )
+    if any(t["trade_type_mismatch"] for t in trades_sorted):
+        st.caption("⚠️ = this trade's current legs no longer match its saved Trade Type -- open Analyse Trade to review.")
     selected_rows = event.selection.rows if event and event.selection else []
     if selected_rows:
         selected_trade = trades_sorted[selected_rows[0]]

@@ -138,6 +138,14 @@ legs_event = st.dataframe(
 
 st.divider()
 
+if trade["trade_type_mismatch"]:
+    detected_type = portfolio_service.classify_trade_type(trade_legs)
+    st.warning(
+        f"This trade is saved as \"{trade['trade_type']}\", but its current legs now look like a "
+        f"**{detected_type}** -- update Trade Type below if that's no longer right. Your saved label is never "
+        "changed automatically."
+    )
+
 # --- Edit underlying / trade date / trade type / table ---------------------
 st.markdown("**Correct the underlying, rename the trade type, or pin the table**")
 _BUCKET_LABELS = {None: "Auto (based on underlying)", "stock": "Stock Trades", "index": "Index Trades", "other": "Other Trades"}

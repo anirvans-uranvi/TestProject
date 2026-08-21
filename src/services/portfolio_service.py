@@ -463,6 +463,62 @@ def is_csp_trade_type(trade_type: str) -> bool:
     return trade_type.strip().lower() == "csp"
 
 
+def classify_trade_type(legs: list[dict]) -> str | None:
+    """Auto-detects a Trade's options strategy from the shape of its
+    current legs -- called both to classify a brand-new trade during
+    Portfolio Refresh (data_provider_settings.py::_auto_classify_new_trades)
+    and, at read time, to flag an already-user-classified trade whose legs
+    no longer match (group_into_trades' `trade_type_mismatch`). Each leg
+    dict needs `leg_type` ("Holding"/"Position"), `option_type` (a CE/PE
+    OptionType, or None for an undecoded/futures Position leg), and `qty`
+    (signed: negative = short/sell, positive = long/buy) -- the same shape
+    build_trade_legs/group_into_trades already produce.
+
+    Returns None (-> caller defaults to "Trade") when the shape matches
+    none of the rules below, including whenever a Position leg's
+    option_type can't be read (an undecoded contract or a futures leg) --
+    better to not guess than to misclassify on incomplete information.
+
+    - **CSP**: exactly one Position leg, a short (`qty < 0`) PE, and no
+      Holding legs at all (a CSP is specifically *uncovered* by a stock
+      position -- that's what "cash-secured" instead of "covered" means).
+    - **Covered Call**: at least one Holding leg plus exactly one Position
+      leg, a short CE.
+    - **Strangle**: exactly one PE and one CE Position leg (two total),
+      both short or both long -- a Holding leg may or may not also be
+      present, doesn't affect the call.
+    - **Jade Lizard / Twisted Sister**: three or more Position legs, with
+      exactly one long (`qty > 0`) and the rest all short. The lone long
+      leg's side decides which: a bought CE -> Jade Lizard (short put +
+      short call + a further-OTM long call caps upside risk); a bought PE
+      -> Twisted Sister (the put-side mirror)."""
+    holdings = [leg for leg in legs if leg.get("leg_type") == "Holding"]
+    positions = [leg for leg in legs if leg.get("leg_type") == "Position"]
+    if any(leg.get("option_type") is None for leg in positions):
+        return None
+
+    pe_legs = [leg for leg in positions if leg["option_type"] == OptionType.PE]
+    ce_legs = [leg for leg in positions if leg["option_type"] == OptionType.CE]
+
+    if len(positions) == 1 and not holdings and len(pe_legs) == 1 and pe_legs[0]["qty"] < 0:
+        return "CSP"
+
+    if holdings and len(positions) == 1 and len(ce_legs) == 1 and ce_legs[0]["qty"] < 0:
+        return "Covered Call"
+
+    if len(positions) == 2 and len(pe_legs) == 1 and len(ce_legs) == 1:
+        if (pe_legs[0]["qty"] < 0) == (ce_legs[0]["qty"] < 0):
+            return "Strangle"
+
+    if len(positions) >= 3:
+        long_legs = [leg for leg in positions if leg["qty"] > 0]
+        short_legs = [leg for leg in positions if leg["qty"] < 0]
+        if len(long_legs) == 1 and len(short_legs) == len(positions) - 1:
+            return "Jade Lizard" if long_legs[0]["option_type"] == OptionType.CE else "Twisted Sister"
+
+    return None
+
+
 def csp_breakeven_price(strike_price: float | None, avg_price: float | None) -> float | None:
     """The textbook CSP breakeven price: `strike_price - avg_price` --
     the premium collected (`avg_price`, the price the put was written
@@ -613,8 +669,14 @@ def group_into_trades(
     (trade_meta's override if set, else the default -- see
     PortfolioTradeMeta for why this is free text, not constrained to a
     known symbol), `trade_type` (trade_meta's override if set, else
-    "Trade"), `leg_count`, and `total_pnl` (sum over legs with a known
-    pnl; None if none are priced)."""
+    "Trade"), `trade_type_mismatch` (True only when a trade_meta row
+    exists -- the user has classified this trade before, even if that
+    classification happens to be the literal string "Trade" -- *and*
+    classify_trade_type's read of the trade's current legs disagrees with
+    the saved `trade_type`; a brand-new/never-touched trade, or one whose
+    legs don't match any known strategy shape at all, is never flagged),
+    `leg_count`, and `total_pnl` (sum over legs with a known pnl; None if
+    none are priced)."""
     assigned = assign_trade_ids(legs, overrides)
     trades: dict[str, list[dict]] = {}
     order: list[str] = []
@@ -638,6 +700,12 @@ def group_into_trades(
         default_label = " + ".join(sorted({leg["symbol"] or leg["raw_name"] for leg in trade_legs}))
         underlying_label = (meta.get("underlying_label") if meta else None) or default_label
         trade_type = (meta.get("trade_type") if meta else None) or "Trade"
+        detected_type = classify_trade_type(trade_legs)
+        trade_type_mismatch = bool(
+            meta is not None
+            and detected_type is not None
+            and detected_type.strip().lower() != trade_type.strip().lower()
+        )
         priced = [leg for leg in trade_legs if leg.get("pnl") is not None]
         total_pnl = sum(leg["pnl"] for leg in priced) if priced else None
         result.append(
@@ -648,6 +716,7 @@ def group_into_trades(
                 "default_underlying_label": default_label,
                 "underlying_label": underlying_label,
                 "trade_type": trade_type,
+                "trade_type_mismatch": trade_type_mismatch,
                 "leg_count": len(trade_legs),
                 "total_pnl": total_pnl,
             }

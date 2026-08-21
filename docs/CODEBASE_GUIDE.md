@@ -2190,6 +2190,69 @@ Stock/Index Options (see the Positions subsection), but has no
 `bucket_override` equivalent -- there's no per-leg meta table for
 positions the way `portfolio_trade_meta` exists for trades.
 
+**Auto-classified `trade_type` (CSP/Covered Call/Strangle/Jade Lizard/
+Twisted Sister)** -- until now `trade_type` was purely free text the user
+typed on Analyse Trade (default `"Trade"`, no strategy semantics at all).
+`portfolio_service.classify_trade_type(legs)` reads a trade's current legs
+(`leg_type`, `option_type`, signed `qty`) and returns one of those five
+strings, or `None` if the shape doesn't match any of them:
+- **CSP**: exactly one Position leg, a short PE, **and zero Holding
+  legs** (a CSP is specifically *uncovered* -- a holding present rules it
+  out, deliberately, even if everything else matches).
+- **Covered Call**: at least one Holding leg plus exactly one Position
+  leg, a short CE.
+- **Strangle**: exactly one PE and one CE Position leg, both short or
+  both long (mismatched direction doesn't count); a Holding leg may or
+  may not also be present, doesn't affect the call either way.
+- **Jade Lizard / Twisted Sister**: three or more Position legs with
+  exactly one long and the rest all short -- the long leg's side decides
+  which name: a bought CE -> Jade Lizard, a bought PE -> Twisted Sister
+  (confirmed with the user: this is the only way to tell the two apart
+  from leg shape alone, since both are otherwise identical "1 long + 2
+  short" structures).
+- Any Position leg with `option_type is None` (undecoded contract, or a
+  futures leg) present anywhere in the trade -> bails to `None` rather
+  than guessing on incomplete information.
+
+Two call sites, deliberately asymmetric (confirmed with the user -- a
+trade the user has already typed a label for is never silently
+overwritten):
+1. **New trades get auto-classified and saved.**
+   `data_provider_settings.py::_auto_classify_new_trades` runs at the end
+   of both `_sync_dhan`/`_sync_zerodha` (same spot
+   `_default_new_position_trade_dates` already runs). Re-reads the *full*
+   current holdings+positions for the portfolio across **every** broker
+   (not just the one just synced -- `portfolio_repo.list_holdings`/
+   `list_positions`, filtered to `portfolio_name`), not the pricing-heavy
+   `build_trade_legs` My Trades/Analyse Trade use, since classification
+   only needs `leg_type`/`option_type`/`qty`. Groups via the existing
+   `assign_trade_ids`, then for every `trade_id` with **no**
+   `portfolio_trade_meta` row yet (checked via `list_trade_meta`) --
+   meaning this account has never visited Analyse Trade for it, whether
+   the trade is brand new this sync or has existed untouched for a
+   while -- calls `classify_trade_type` and, if it returns a type,
+   `portfolio_repo.set_trade_meta(...)`. A `None` result writes nothing,
+   identical to today's untouched "Trade" default. Re-reading all brokers
+   (not just the synced one) matters for real: a stock held via Zerodha
+   with a call written via Dhan still correctly classifies as one Covered
+   Call, not two unrelated single-broker fragments.
+2. **Already-classified trades are validated, not touched, at read time.**
+   `group_into_trades` gained one more computed field per trade:
+   `trade_type_mismatch` -- `True` only when a `trade_meta` row exists
+   for this `trade_id` (however it got there) **and**
+   `classify_trade_type(trade_legs)` returns a value that
+   case-insensitively *disagrees* with the saved `trade_type`. A `None`
+   detection (shape matches no known strategy) is never treated as a
+   mismatch -- a custom label like "Earnings Play" isn't flagged just for
+   not looking like an options strategy. Surfaced in two places, both
+   already consuming `group_into_trades`' output: `pages/7_My_Trades.py`
+   appends `" ⚠️"` to the "Trade Type" cell (plus one `st.caption`
+   per table explaining the mark, shown only if at least one row in that
+   table is flagged); `pages/10_Analyse_Trade.py` shows an `st.warning`
+   above the edit form naming both the saved type and what
+   `classify_trade_type` currently detects, right where the user can
+   actually act on it by editing "Trade Type" below.
+
 **Manual override (`10_Analyse_Trade.py`'s "Table (on My Trades)"
 selectbox, migration `0024_portfolio_trade_meta_bucket_override.sql`)**
 -- `_BUCKET_LABELS`/`_BUCKET_VALUES` map between the dropdown's four

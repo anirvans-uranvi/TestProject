@@ -104,6 +104,62 @@ def _default_new_position_trade_dates(*, client, user_id: str, portfolio_name: s
             portfolio_repo.set_position_trade_date(client, user_id, portfolio_name, broker, p["raw_name"], today)
 
 
+def _auto_classify_new_trades(*, client, user_id: str, portfolio_name: str) -> None:
+    """Auto-detects and saves a strategy label (CSP/Covered Call/Strangle/
+    Jade Lizard/Twisted Sister -- portfolio_service.classify_trade_type)
+    for any Trade that doesn't have a portfolio_trade_meta row yet --
+    i.e. one this account has never visited Analyse Trade for, whether it
+    already existed before this sync or a leg just synced into existence
+    for the first time. A trade WITH a row is treated as already
+    user-classified and is never touched here -- group_into_trades'
+    trade_type_mismatch instead *flags* (at render time, on My Trades/
+    Analyse Trade) when such a trade's current legs no longer match its
+    saved type, rather than silently overwriting the user's own label.
+
+    Re-reads the full current holdings+positions for this portfolio
+    (every broker, not just the one just synced) so a strategy spanning
+    two brokers on the same underlying -- e.g. a stock held via Zerodha
+    with a call written via Dhan -- still groups and classifies as one
+    Covered Call. Deliberately builds its own lightweight leg dicts
+    rather than reusing build_trade_legs (My Trades/Analyse Trade's own
+    loader) -- that also fetches live prices, which classify_trade_type
+    (leg_type/option_type/qty only) has no use for."""
+    holding_legs = [
+        {"leg_type": "Holding", "symbol": h.symbol, "raw_name": h.raw_name, "broker": h.broker, "qty": h.qty, "option_type": None}
+        for h in portfolio_repo.list_holdings(client, user_id)
+        if h.portfolio_name == portfolio_name
+    ]
+    position_legs = [
+        {"leg_type": "Position", "symbol": p.symbol, "raw_name": p.raw_name, "broker": p.broker, "qty": p.qty, "option_type": p.option_type}
+        for p in portfolio_repo.list_positions(client, user_id)
+        if p.portfolio_name == portfolio_name
+    ]
+    if not holding_legs and not position_legs:
+        return
+
+    overrides = {
+        (g.broker, g.raw_name): g.trade_id
+        for g in portfolio_repo.list_trade_groups(client, user_id)
+        if g.portfolio_name == portfolio_name
+    }
+    assigned = portfolio_service.assign_trade_ids(holding_legs + position_legs, overrides)
+    legs_by_trade_id: dict[str, list[dict]] = {}
+    for leg in assigned:
+        legs_by_trade_id.setdefault(leg["trade_id"], []).append(leg)
+
+    already_classified = {
+        m.trade_id for m in portfolio_repo.list_trade_meta(client, user_id) if m.portfolio_name == portfolio_name
+    }
+    for trade_id, legs in legs_by_trade_id.items():
+        if trade_id in already_classified:
+            continue
+        detected_type = portfolio_service.classify_trade_type(legs)
+        if detected_type is not None:
+            portfolio_repo.set_trade_meta(
+                client, user_id, portfolio_name, trade_id, underlying_label=None, trade_type=detected_type
+            )
+
+
 def _sync_dhan(*, client, user_id: str, connection: BrokerConnection) -> None:
     """Pulls holdings + positions straight from Dhan's API into this
     account's one resolved portfolio (get_or_default_portfolio_name) --
@@ -149,6 +205,7 @@ def _sync_dhan(*, client, user_id: str, connection: BrokerConnection) -> None:
     portfolio_repo.replace_broker_holdings(client, user_id, portfolio_name, "Dhan", holding_records)
     portfolio_repo.replace_broker_positions(client, user_id, portfolio_name, "Dhan", position_records)
     _default_new_position_trade_dates(client=client, user_id=user_id, portfolio_name=portfolio_name, broker="Dhan", positions=positions)
+    _auto_classify_new_trades(client=client, user_id=user_id, portfolio_name=portfolio_name)
     _log_portfolio_sync(client, "Dhan", started_at)
     _bump_cache_bust()
     st.success(
@@ -193,6 +250,7 @@ def _sync_zerodha(*, client, user_id: str, connection: BrokerConnection) -> None
     portfolio_repo.replace_broker_holdings(client, user_id, portfolio_name, "Zerodha", holding_records)
     portfolio_repo.replace_broker_positions(client, user_id, portfolio_name, "Zerodha", position_records)
     _default_new_position_trade_dates(client=client, user_id=user_id, portfolio_name=portfolio_name, broker="Zerodha", positions=positions)
+    _auto_classify_new_trades(client=client, user_id=user_id, portfolio_name=portfolio_name)
     _log_portfolio_sync(client, "Zerodha", started_at)
     _bump_cache_bust()
     st.success(

@@ -1049,8 +1049,8 @@ underlying-label/trade-type overrides -- `None` means "no override, use
 Auto".
 
 Each table shows **Underlying Instrument**, **Trade Type** (defaults to
-"Trade"), **Legs**, and **Total P&L** (summed over the trade's own priced
-legs). A Holding leg's own LTP feeding that P&L (and the legs table's LTP
+"Trade", auto-classified for a new trade -- see below), **Legs**, and
+**Total P&L** (summed over the trade's own priced legs). A Holding leg's own LTP feeding that P&L (and the legs table's LTP
 column below) prefers a live quote from whichever broker(s) this
 portfolio has connected, same as My CSP's LTP Underlying -- falling back
 to `daily_screener_snapshots` only for a symbol no connected broker
@@ -1075,7 +1075,23 @@ appears as its own sidebar link). There you can:
   to `portfolio_trade_meta` (migration `0021`), keyed by
   `(portfolio_name, trade_id)` -- a different grain from
   `portfolio_trade_groups`' per-*leg* key, since a label/type applies to
-  the whole Trade, not one leg. Leaving the underlying field unchanged
+  the whole Trade, not one leg.
+
+  **Trade Type is auto-classified for a new trade, on Portfolio
+  Refresh.** `portfolio_service.classify_trade_type` reads a trade's legs
+  (option type, buy/sell direction, whether a stock holding is present)
+  and detects **CSP**, **Covered Call**, **Strangle**, **Jade Lizard**, or
+  **Twisted Sister** -- e.g. one short put with no holding -> CSP; a
+  holding plus one short call -> Covered Call; a short put + short call
+  (same direction, both short or both long) -> Strangle; 3+ legs with
+  exactly one bought leg (a bought call -> Jade Lizard, a bought put ->
+  Twisted Sister) -> that. Only ever runs for a trade with **no** saved
+  Trade Type yet -- an already-classified trade's own label is never
+  overwritten automatically. If that trade's current legs later stop
+  matching its saved type (a leg closed, a new one appeared), My Trades
+  marks it with a "⚠️" next to the Trade Type and Analyse Trade shows a
+  warning naming what it currently looks like instead -- a flag to review,
+  not an auto-correction. Leaving the underlying field unchanged
   from its computed default doesn't write an override -- only an actual
   correction is stored. **Trade Date** (shown only when the Trade has at
   least one Position leg -- a pure-Holding Trade has nothing to date)
