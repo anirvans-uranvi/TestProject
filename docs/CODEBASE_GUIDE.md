@@ -1053,18 +1053,20 @@ the Dashboard's own `except APIError` → "N/A" handling.
 
 ```python
 pages = {
-    "Screener": [
+    "Market": [
         st.Page("pages/1_Dashboard.py", title="Screener", default=True),
         st.Page("pages/2_Stock_Detail.py", title="Equity"),
         st.Page("pages/5_Options.py", title="Options"),
     ],
-    "My Holdings": [st.Page("pages/8_My_Holdings.py", title="My Holdings")],
-    "My Positions": [st.Page("pages/9_My_Positions.py", title="My Positions")],
+    "My Portfolio": [
+        st.Page("pages/8_My_Holdings.py", title="Holdings"),
+        st.Page("pages/9_My_Positions.py", title="Positions"),
+    ],
     "My Trades": [
-        st.Page("pages/7_My_Trades.py", title="My Trades"),
-        st.Page("pages/11_My_CSP.py", title="My CSP"),
-        st.Page("pages/12_My_CC.py", title="My CC"),
-        st.Page("pages/13_My_Other_Trades.py", title="My Other Trades"),
+        st.Page("pages/7_My_Trades.py", title="All Trades"),
+        st.Page("pages/11_My_CSP.py", title="CSP"),
+        st.Page("pages/12_My_CC.py", title="CC"),
+        st.Page("pages/13_My_Other_Trades.py", title="Other Trades"),
         st.Page("pages/10_Analyse_Trade.py", title="Analyse Trade", visibility="hidden"),
     ],
     "Settings": [
@@ -1083,14 +1085,23 @@ st.navigation(pages).run()
 **The dict form (rather than a flat list)** groups pages under a labeled
 sidebar section header -- confirmed via `st.navigation`'s own docstring:
 in `position="sidebar"` mode (the default, unchanged here) every key
-renders as a header above its pages, so My Holdings/My Positions/Settings
-each get a section of their own single page purely because the dict form
-requires every page to belong to one (the `""`-key trick the docstring
-mentions for hiding a header only applies to `position="top"`). This is
-what gives "Screener" (Screener/Equity/Options) and "My Trades" (My
-Trades/My CSP/My CC/My Other Trades, plus the hidden Analyse Trade) their
-nested sub-page groupings -- Streamlit has no other native notion of a
-page belonging "under" another page. Verified with an `AppTest.from_file`
+renders as a header above its pages, so Settings gets a section of its
+own single page purely because the dict form requires every page to
+belong to one (the `""`-key trick the docstring mentions for hiding a
+header only applies to `position="top"`). This is what gives "Market"
+(Screener/Equity/Options), "My Portfolio" (Holdings/Positions), and "My
+Trades" (All Trades/CSP/CC/Other Trades, plus the hidden Analyse Trade)
+their nested sub-page groupings -- Streamlit has no other native notion
+of a page belonging "under" another page. **The section/page labels here
+are a second, independent naming layer on top of this doc's own prose**
+(which keeps calling each page by its file-derived feature name -- "My
+Trades", "My CSP", "My Holdings", etc. -- matching the filename and each
+page's own on-page `st.title()`/`st.set_page_config()`) -- e.g. the
+sidebar shows "All Trades" for what this doc, the filename
+(`7_My_Trades.py`), and the page's own header all still call "My
+Trades"; only the `title=` argument passed to `st.Page` here changed,
+requested and renamed once already since these pages first shipped.
+Verified with an `AppTest.from_file`
 smoke pass over every page plus `app.py` itself (no exceptions); a real
 logged-in sidebar screenshot wasn't captured -- `require_login()` gates
 every page before any sidebar-adjacent content renders, and this

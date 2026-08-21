@@ -9,29 +9,30 @@ import streamlit as st
 # separately controls its browser-tab title/icon.
 #
 # The dict form groups pages under a labeled section header in the
-# sidebar (Streamlit's only native notion of a "sub-page") -- "Screener"
-# nests Equity/Options underneath the screener itself, and "My Trades"
-# nests My CSP/My CC/My Other Trades underneath the trades list they're
-# each a filtered view of. My Holdings/My Positions/Settings get their
-# own single-page section since the dict form requires every page to
-# belong to one.
+# sidebar (Streamlit's only native notion of a "sub-page") -- "Market"
+# nests Equity/Options underneath the screener itself, "My Portfolio"
+# nests Holdings/Positions together, and "My Trades" nests CSP/CC/Other
+# Trades underneath All Trades, the unfiltered list they're each a
+# filtered view of. Settings gets its own single-page section since the
+# dict form requires every page to belong to one. Section headers and
+# st.Page(title=...) (the sidebar's own page labels) are independent of
+# each page's underlying filename/st.set_page_config() browser-tab
+# title -- see each page's own docstring/set_page_config call for those.
 pages = {
-    "Screener": [
+    "Market": [
         st.Page("pages/1_Dashboard.py", title="Screener", default=True),
         st.Page("pages/2_Stock_Detail.py", title="Equity"),
         st.Page("pages/5_Options.py", title="Options"),
     ],
-    "My Holdings": [
-        st.Page("pages/8_My_Holdings.py", title="My Holdings"),
-    ],
-    "My Positions": [
-        st.Page("pages/9_My_Positions.py", title="My Positions"),
+    "My Portfolio": [
+        st.Page("pages/8_My_Holdings.py", title="Holdings"),
+        st.Page("pages/9_My_Positions.py", title="Positions"),
     ],
     "My Trades": [
-        st.Page("pages/7_My_Trades.py", title="My Trades"),
-        st.Page("pages/11_My_CSP.py", title="My CSP"),
-        st.Page("pages/12_My_CC.py", title="My CC"),
-        st.Page("pages/13_My_Other_Trades.py", title="My Other Trades"),
+        st.Page("pages/7_My_Trades.py", title="All Trades"),
+        st.Page("pages/11_My_CSP.py", title="CSP"),
+        st.Page("pages/12_My_CC.py", title="CC"),
+        st.Page("pages/13_My_Other_Trades.py", title="Other Trades"),
         st.Page("pages/10_Analyse_Trade.py", title="Analyse Trade", visibility="hidden"),
     ],
     "Settings": [

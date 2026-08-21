@@ -35,24 +35,28 @@ app.py                  Pure st.navigation() router -- no visible content of its
                         own; see "Navigation" below for the sidebar it builds
 pages/                  Streamlit multipage app (each still its own script,
                         registered by app.py rather than auto-discovered)
-  1_Dashboard.py         Screener table, metric cards, filters, CSV export -- sidebar label "Screener"
+  1_Dashboard.py         Screener table, metric cards, filters, CSV export -- sidebar label "Screener",
+                              nested under the "Market" sidebar section
   2_Stock_Detail.py       Price/volume/dividend charts, scorecard, per-stock alerts -- sidebar label "Equity",
-                              nested under the "Screener" sidebar section
+                              nested under "Market"
   4_Settings.py            Per-user thresholds, alert CRUD + notification history, notification channels,
                               Data Provider (Dhan/Zerodha/YFinance+Bhavcopy) + broker sync, sign out
-  5_Options.py              F&O: futures term structure, 5% CSP / 5% CC breakdown -- nested under "Screener"
+  5_Options.py              F&O: futures term structure, 5% CSP / 5% CC breakdown -- nested under "Market"
   7_My_Trades.py              Holdings + positions grouped by underlying into Stock/Index/Other Trades --
-                              nested under the "My Trades" sidebar section
-  8_My_Holdings.py            Equity holdings, split ETFs & Mutual Funds / Stocks, both with 1D/5D/20D Change
-  9_My_Positions.py           Per-leg F&O positions, split into Stock Options / Index Options / Others (no grouping -- see My Trades for that)
+                              sidebar label "All Trades", nested under the "My Trades" sidebar section
+  8_My_Holdings.py            Equity holdings, split ETFs & Mutual Funds / Stocks, both with 1D/5D/20D Change --
+                              sidebar label "Holdings", nested under the "My Portfolio" sidebar section
+  9_My_Positions.py           Per-leg F&O positions, split into Stock Options / Index Options / Others (no
+                              grouping -- see My Trades for that) -- sidebar label "Positions", nested under
+                              "My Portfolio"
   11_My_CSP.py                Every Trade with Trade Type "CSP" -- one position leg per row, with underlying
-                              LTP + 1D/5D/20D change -- nested under "My Trades"
+                              LTP + 1D/5D/20D change -- sidebar label "CSP", nested under "My Trades"
   12_My_CC.py                 Every Trade with Trade Type "Covered Call" from My Trades, same Stock/Index/Other
-                              split -- nested under "My Trades"
+                              split -- sidebar label "CC", nested under "My Trades"
   13_My_Other_Trades.py       Every Trade from My Trades whose Trade Type is neither "CSP" nor "Covered Call" --
-                              nested under "My Trades"
+                              sidebar label "Other Trades", nested under "My Trades"
   10_Analyse_Trade.py          One Trade's legs -- correct underlying, rename trade type, merge/split
-                              (hidden from the sidebar -- reached only via My Trades'/My CC's/My Other Trades'
+                              (hidden from the sidebar -- reached only via All Trades'/CC's/Other Trades'
                               row selection)
 src/
   config.py               Pydantic Settings (env-driven)
@@ -98,11 +102,11 @@ can differ from the filename (`1_Dashboard.py` shows as "Screener",
 of the numeric prefixes (Settings deliberately listed last). The dict
 form (rather than a flat list) groups pages under a labeled sidebar
 section header -- Streamlit's only native notion of a "sub-page" -- giving
-five sections: **Screener** (Screener/Equity/Options), **My Holdings**,
-**My Positions**, **My Trades** (My Trades/My CSP/My CC/My Other Trades,
-plus the hidden Analyse Trade), and **Settings**. My Holdings/My
-Positions/Settings each get a section of their own single page since the
-dict form requires every page to belong to one. Each page still keeps its
+four sections: **Market** (Screener/Equity/Options), **My Portfolio**
+(Holdings/Positions), **My Trades** (All Trades/CSP/CC/Other Trades,
+plus the hidden Analyse Trade), and **Settings**. Settings gets a
+section of its own single page since the dict form requires every page
+to belong to one. Each page still keeps its
 own `st.set_page_config()` call for its browser-tab title/icon --
 unaffected by which script registers it. The former sign-out control
 (previously only reachable from `app.py`'s own sidebar, now that there's
@@ -756,11 +760,19 @@ published yet.
 Your own holdings and F&O positions -- synced live from a connected
 broker (see [Connecting a broker](#connecting-a-broker-settings--data-provider)
 above), not the Nifty50 screener universe -- span seven pages, six of
-which appear in the sidebar, nested under the "My Trades" section except
-My Holdings and My Positions (**My Trades**, **My CSP**, **My CC**, **My
-Other Trades**, **My Holdings**, **My Positions**; **Analyse Trade** is
-reached only by selecting a row on My Trades/My CC/My Other Trades). All
-seven share one loader/formatting module, `src/utils/portfolio_page.py`
+which appear in the sidebar: **My Trades** (`pages/7_My_Trades.py`,
+sidebar label "All Trades"), **My CSP** (sidebar label "CSP"), **My CC**
+(sidebar label "CC"), **My Other Trades** (sidebar label "Other
+Trades") -- all four nested under the "My Trades" sidebar section --
+plus **My Holdings** (sidebar label "Holdings") and **My Positions**
+(sidebar label "Positions"), nested under "My Portfolio". This doc keeps
+referring to each page by its file-derived feature name (matching its
+filename and its own on-page title), not its current sidebar label,
+which is independent and can be renamed without touching the page
+itself -- see the "Navigation" note above and the `st.navigation` dict
+in `app.py`. **Analyse Trade** is reached only by selecting a row on
+All Trades/CC/Other Trades. All seven share one loader/formatting
+module, `src/utils/portfolio_page.py`
 (cached data loaders, the cache-bust counter, `build_trade_legs`), so a
 cache hit on one page is a cache hit on another -- e.g. switching from My
 Holdings to My Trades doesn't re-fetch holdings that are still fresh.
