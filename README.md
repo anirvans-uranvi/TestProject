@@ -36,16 +36,24 @@ app.py                  Pure st.navigation() router -- no visible content of its
 pages/                  Streamlit multipage app (each still its own script,
                         registered by app.py rather than auto-discovered)
   1_Dashboard.py         Screener table, metric cards, filters, CSV export -- sidebar label "Screener"
-  2_Stock_Detail.py       Price/volume/dividend charts, scorecard, per-stock alerts -- sidebar label "Equity"
+  2_Stock_Detail.py       Price/volume/dividend charts, scorecard, per-stock alerts -- sidebar label "Equity",
+                              nested under the "Screener" sidebar section
   4_Settings.py            Per-user thresholds, alert CRUD + notification history, notification channels,
                               Data Provider (Dhan/Zerodha/YFinance+Bhavcopy) + broker sync, sign out
-  5_Options.py              F&O: futures term structure, 5% CSP / 5% CC breakdown
-  7_My_Trades.py              Holdings + positions grouped by underlying into Stock/Index/Other Trades
+  5_Options.py              F&O: futures term structure, 5% CSP / 5% CC breakdown -- nested under "Screener"
+  7_My_Trades.py              Holdings + positions grouped by underlying into Stock/Index/Other Trades --
+                              nested under the "My Trades" sidebar section
   8_My_Holdings.py            Equity holdings, split ETFs & Mutual Funds / Stocks, both with 1D/5D/20D Change
   9_My_Positions.py           Per-leg F&O positions, split into Stock Options / Index Options / Others (no grouping -- see My Trades for that)
-  11_My_CSP.py                Every position leg from a Trade Type "CSP", with underlying LTP + 1D/5D/20D change
+  11_My_CSP.py                Every Trade with Trade Type "CSP" -- one position leg per row, with underlying
+                              LTP + 1D/5D/20D change -- nested under "My Trades"
+  12_My_CC.py                 Every Trade with Trade Type "Covered Call" from My Trades, same Stock/Index/Other
+                              split -- nested under "My Trades"
+  13_My_Other_Trades.py       Every Trade from My Trades whose Trade Type is neither "CSP" nor "Covered Call" --
+                              nested under "My Trades"
   10_Analyse_Trade.py          One Trade's legs -- correct underlying, rename trade type, merge/split
-                              (hidden from the sidebar -- reached only via My Trades' row selection)
+                              (hidden from the sidebar -- reached only via My Trades'/My CC's/My Other Trades'
+                              row selection)
 src/
   config.py               Pydantic Settings (env-driven)
   data_providers/         PriceDataProvider / FundamentalsDataProvider + Dhan/mock/manual impls
@@ -79,20 +87,26 @@ pure calculation engine, and persists one row per symbol per day to
 client-side (see `src/services/threshold_override.py`) so per-user
 threshold changes don't require a server-side recompute.
 
-**Navigation**: `app.py` builds an explicit `st.navigation([st.Page(...), ...])`
-list and calls `.run()` -- there is no separate "app" home screen; the base
+**Navigation**: `app.py` builds an explicit `st.navigation({section: [st.Page(...), ...], ...})`
+dict and calls `.run()` -- there is no separate "app" home screen; the base
 URL runs whichever page is marked `default=True` (currently
 `1_Dashboard.py`). This replaced the legacy `pages/`-directory
 auto-discovery convention (which derived both the sidebar label and the
 display order from each file's name/numeric prefix) so the sidebar label
 can differ from the filename (`1_Dashboard.py` shows as "Screener",
 `2_Stock_Detail.py` as "Equity") and the order can be set independently
-of the numeric prefixes (Settings deliberately listed last). Each
-page still keeps its own `st.set_page_config()` call for its browser-tab
-title/icon -- unaffected by which script registers it. The former
-sign-out control (previously only reachable from `app.py`'s own sidebar,
-now that there's no such screen) moved to `4_Settings.py`'s Account
-section.
+of the numeric prefixes (Settings deliberately listed last). The dict
+form (rather than a flat list) groups pages under a labeled sidebar
+section header -- Streamlit's only native notion of a "sub-page" -- giving
+five sections: **Screener** (Screener/Equity/Options), **My Holdings**,
+**My Positions**, **My Trades** (My Trades/My CSP/My CC/My Other Trades,
+plus the hidden Analyse Trade), and **Settings**. My Holdings/My
+Positions/Settings each get a section of their own single page since the
+dict form requires every page to belong to one. Each page still keeps its
+own `st.set_page_config()` call for its browser-tab title/icon --
+unaffected by which script registers it. The former sign-out control
+(previously only reachable from `app.py`'s own sidebar, now that there's
+no such screen) moved to `4_Settings.py`'s Account section.
 
 ## Setup
 
@@ -387,7 +401,7 @@ regardless of which page triggered the refresh.
 | **Bhavcopy Refresh** (NSE + BSE) | Settings, same section | always | `render_fundamental_and_bhavcopy_refresh` |
 | **Stock Data Refresh** | every page except Settings | Data Provider = YFinance/Bhavcopy | `render_stock_refresh_button` |
 | **Stock & Option Data Refresh** | every page except Settings | Data Provider = Dhan/Zerodha | `render_stock_refresh_button` |
-| **Portfolio Refresh** | My Trades, My Holdings, My Positions, My CSP | Data Provider = Dhan/Zerodha | `render_portfolio_refresh_button` |
+| **Portfolio Refresh** | My Trades, My Holdings, My Positions, My CSP, My CC, My Other Trades | Data Provider = Dhan/Zerodha | `render_portfolio_refresh_button` |
 
 - **Fundamental Data Refresh** -- a fresh Yahoo Finance fundamentals
   fetch only (PE, PEG, dividend yield, 52-week high/low), via
@@ -741,19 +755,35 @@ published yet.
 
 Your own holdings and F&O positions -- synced live from a connected
 broker (see [Connecting a broker](#connecting-a-broker-settings--data-provider)
-above), not the Nifty50 screener universe -- span five pages, four of
-which appear in the sidebar (**My Trades**, **My Holdings**, **My
-Positions**, **My CSP**; **Analyse Trade** is reached only by selecting a
-row on My Trades). All five share one loader/formatting module,
-`src/utils/portfolio_page.py` (cached data loaders, the cache-bust
-counter, `build_trade_legs`), so a cache hit on one page is a cache hit on
-another -- e.g. switching from My Holdings to My Trades doesn't re-fetch
-holdings that are still fresh. Every page keeps the same "one tab per
-portfolio" structure it always has, but since a live broker sync now
-targets exactly one resolved portfolio per account (see above), in
-practice there's just the one tab -- a pre-existing account with multiple
-portfolio_names from before this change still shows all of them, just
-with no way to add another live-synced one.
+above), not the Nifty50 screener universe -- span seven pages, six of
+which appear in the sidebar, nested under the "My Trades" section except
+My Holdings and My Positions (**My Trades**, **My CSP**, **My CC**, **My
+Other Trades**, **My Holdings**, **My Positions**; **Analyse Trade** is
+reached only by selecting a row on My Trades/My CC/My Other Trades). All
+seven share one loader/formatting module, `src/utils/portfolio_page.py`
+(cached data loaders, the cache-bust counter, `build_trade_legs`), so a
+cache hit on one page is a cache hit on another -- e.g. switching from My
+Holdings to My Trades doesn't re-fetch holdings that are still fresh.
+Every page keeps the same "one tab per portfolio" structure it always
+has, but since a live broker sync now targets exactly one resolved
+portfolio per account (see above), in practice there's just the one tab
+-- a pre-existing account with multiple portfolio_names from before this
+change still shows all of them, just with no way to add another
+live-synced one.
+
+**My CC** and **My Other Trades** are filtered views of the exact same
+Trade list My Trades computes (`portfolio_service.group_into_trades`) --
+`is_covered_call_trade_type`/`is_other_trade_type` split it by `trade_type`
+the same way My CSP's `is_csp_trade_type` already did, and each still
+splits the result into the same Stock/Index/Other bucket tables My Trades
+uses. Neither adds new columns or analytics beyond what My Trades already
+shows (that richer per-leg breakdown -- breakeven, target P&L, stop-loss
+ratchet -- is CSP-specific, see My CSP below); a Trade lands on My CC only
+once its Trade Type is renamed to "Covered Call" on Analyse Trade (or it
+was auto-classified as one, see "Auto-classifying a new Trade" below),
+and on My Other Trades by default (including the untouched "Trade" label,
+and any auto-classified type other than CSP/Covered Call -- see "Trade
+Type is auto-classified for a new trade" under My Trades below).
 
 ### Connecting a broker (Settings > Data Provider)
 
@@ -1235,6 +1265,28 @@ Trade Date/Target P&L/Stop Loss are saved to a new table,
 identity `(portfolio_name, broker, raw_name)`. Like the other Portfolio
 pages, one tab per portfolio; a portfolio with no "CSP"-tagged Trades
 shows a plain caption rather than an empty table.
+
+### My CC (`pages/12_My_CC.py`) and My Other Trades (`pages/13_My_Other_Trades.py`)
+
+Unlike My CSP, these two don't add any per-leg options analytics (no
+Breakeven/Target P&L/Stop Loss ratchet -- that machinery is CSP-specific).
+Each is just My Trades' own Stock/Index/Other Trades tables
+(`portfolio_service.group_into_trades`, same **Underlying Instrument**/
+**Trade Type**/**Legs**/**Total P&L** columns, same "⚠️" mismatch marker,
+same row-select → "Analyse Trade" flow), pre-filtered by `trade_type`
+before the bucket split:
+
+- **My CC** keeps only Trades where `is_covered_call_trade_type(trade_type)`
+  is true (Trade Type exactly "Covered Call", case-insensitive/trimmed).
+- **My Other Trades** keeps everything else -- `is_other_trade_type(trade_type)`,
+  i.e. neither "CSP" nor "Covered Call" -- so the untouched default
+  "Trade" label, a Strangle, a Jade Lizard/Twisted Sister, or any other
+  free-text Trade Type all land here.
+
+Together with My CSP, every Trade shown on My Trades appears on exactly
+one of these three filtered pages (a Trade's `trade_type` can only match
+one of `is_csp_trade_type`/`is_covered_call_trade_type`/`is_other_trade_type`
+at a time) -- My Trades itself is unfiltered and keeps showing all of them.
 
 ## Docker
 

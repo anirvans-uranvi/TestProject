@@ -260,6 +260,34 @@ class TestIsCspTradeType:
         assert portfolio_service.is_csp_trade_type("Covered Call") is False
 
 
+class TestIsCoveredCallTradeType:
+    def test_exact_match(self):
+        assert portfolio_service.is_covered_call_trade_type("Covered Call") is True
+
+    def test_case_insensitive_and_trimmed(self):
+        assert portfolio_service.is_covered_call_trade_type(" covered call ") is True
+
+    def test_default_trade_type_is_not_covered_call(self):
+        assert portfolio_service.is_covered_call_trade_type("Trade") is False
+
+    def test_csp_is_not_covered_call(self):
+        assert portfolio_service.is_covered_call_trade_type("CSP") is False
+
+
+class TestIsOtherTradeType:
+    def test_default_trade_type_is_other(self):
+        assert portfolio_service.is_other_trade_type("Trade") is True
+
+    def test_custom_trade_type_is_other(self):
+        assert portfolio_service.is_other_trade_type("Strangle") is True
+
+    def test_csp_is_not_other(self):
+        assert portfolio_service.is_other_trade_type("CSP") is False
+
+    def test_covered_call_is_not_other(self):
+        assert portfolio_service.is_other_trade_type(" Covered Call ") is False
+
+
 class TestCspBreakevenPrice:
     def test_subtracts_avg_price_from_strike(self):
         assert portfolio_service.csp_breakeven_price(23500.0, 45.0) == 23455.0

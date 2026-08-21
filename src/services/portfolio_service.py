@@ -1,6 +1,7 @@
 """Broker API response translation and valuation for the Portfolio
 feature's pages (7_My_Trades.py, 8_My_Holdings.py, 9_My_Positions.py,
-10_Analyse_Trade.py, 11_My_CSP.py) -- holdings/positions come from a live
+10_Analyse_Trade.py, 11_My_CSP.py, 12_My_CC.py, 13_My_Other_Trades.py) --
+holdings/positions come from a live
 Dhan/Zerodha sync (Settings' "Data Provider" section,
 src/utils/data_provider_settings.py) only; CSV upload was dropped
 entirely once that became the account's one live data source. Holdings
@@ -461,6 +462,24 @@ def is_csp_trade_type(trade_type: str) -> bool:
     "CSP" is just a convention this page expects the user to type on
     Analyse Trade."""
     return trade_type.strip().lower() == "csp"
+
+
+def is_covered_call_trade_type(trade_type: str) -> bool:
+    """Whether a Trade's `trade_type` marks it as a Covered Call -- the
+    signal `pages/12_My_CC.py` filters on. Same case-insensitive,
+    whitespace-trimmed convention as `is_csp_trade_type` (this is what
+    `classify_trade_type` writes as-is, but the user can also type it by
+    hand on Analyse Trade)."""
+    return trade_type.strip().lower() == "covered call"
+
+
+def is_other_trade_type(trade_type: str) -> bool:
+    """Whether a Trade's `trade_type` is neither CSP nor Covered Call --
+    the signal `pages/13_My_Other_Trades.py` filters on: every Trade from
+    My Trades that isn't already broken out onto My CSP or My CC,
+    regardless of whether it's a real options strategy (Strangle, Jade
+    Lizard, Twisted Sister, ...) or just the default "Trade"."""
+    return not is_csp_trade_type(trade_type) and not is_covered_call_trade_type(trade_type)
 
 
 def classify_trade_type(legs: list[dict]) -> str | None:
