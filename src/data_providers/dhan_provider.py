@@ -85,19 +85,34 @@ def _get_raw_instrument_master() -> pd.DataFrame:
     same large file. Confirmed live: before this, a cache-cold refresh
     downloaded the same CSV twice, concurrently, competing for the same
     outbound bandwidth -- slower in aggregate than one download, not
-    faster, despite running "in parallel"."""
+    faster, despite running "in parallel".
+
+    Always returns a fresh `.copy()`, never the cached object itself --
+    confirmed live as a second, more serious bug the first version of
+    this cache introduced: pandas is not thread-safe for concurrent
+    *reads* of one shared DataFrame instance (lazy internal caching --
+    e.g. block consolidation on first column access -- mutates C-level
+    state even on what looks like a read-only `.rename()`/boolean-filter/
+    `.str` operation), so handing the *same* object to both legs' filter
+    functions while they ran concurrently silently corrupted the result
+    for one or both (a live account saw "15 of 61" equities and "0 of
+    348" F&O resolve, down from 61/61 and 333+/351 before this cache
+    existed at all). The `.copy()` is cheap relative to the network
+    download it avoids repeating -- it only duplicates already-in-memory
+    data, no I/O -- and gives each leg's subsequent `.rename()`/filtering
+    a fully independent object with no cross-thread interference."""
     today = now_ist().date().isoformat()
     with _master_cache_lock:
         cached = _raw_master_cache.get(today)
         if cached is not None:
-            return cached
+            return cached.copy()
         try:
             df = pd.read_csv(INSTRUMENT_MASTER_URL, low_memory=False)
         except Exception as exc:  # noqa: BLE001
             raise ProviderError(f"failed to download Dhan instrument master: {exc}") from exc
         _raw_master_cache.clear()  # only "today" is ever relevant
         _raw_master_cache[today] = df
-        return df
+        return df.copy()
 
 
 def _download_equity_master(raw_df: pd.DataFrame) -> pd.DataFrame:

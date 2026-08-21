@@ -792,6 +792,30 @@ neither loader wants (currency, commodity, other segments), so there's
 nothing worth storing beyond what `dhan_equity_instruments`/
 `dhan_fo_instruments` already keep.
 
+**Second follow-up, more serious than the first**: the initial version of
+`_get_raw_instrument_master` handed the *same* cached DataFrame object to
+both legs. Confirmed live: a real account's next refresh went from 61/61
+equities + 333+/351 F&O resolving to **15/61 + 0/348** -- silent
+corruption, not a crash, which is what made it worth writing up here
+rather than just fixing quietly. Root cause: **pandas is not thread-safe
+for concurrent reads of one shared DataFrame instance** -- operations that
+look purely read-only (`.rename()`, boolean-mask filtering, `.str.upper()`)
+can still mutate C-level internal state on first access (lazy block
+consolidation, `_item_cache`, ...), so two threads calling
+`_download_equity_master`/`_download_fo_master` against the *same* object
+at the *same time* (exactly what `_refresh_dhan_equity_leg`/
+`_refresh_dhan_fo_leg`'s `ThreadPoolExecutor` does) could silently
+corrupt one or both filter results, with no exception raised anywhere to
+flag it. Fixed by having `_get_raw_instrument_master` always return a
+fresh `.copy()` -- never the object sitting in `_raw_master_cache` -- so
+each leg's own `.rename()`/filtering chain operates on a fully
+independent object with zero cross-thread interference. The `.copy()`
+only duplicates already-in-memory data (no network I/O), so it costs
+essentially nothing next to the download it's built on top of. If you
+touch this cache again: **never return or share a live pandas object
+across threads** -- copy at the handoff point, every time, even when the
+receiving code "only reads."
+
 `user_live_prices`, widened by migration `0032` from an equity-only
 `(user_id, symbol)` table to `(user_id, symbol, expiry_date, strike_price,
 option_type)` -- `option_type='EQ'` (default) for the pre-existing equity/

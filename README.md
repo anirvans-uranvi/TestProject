@@ -432,9 +432,17 @@ regardless of which page triggered the refresh.
   landed, since running the equity/F&O legs concurrently meant both hit a
   cold cache **at the same time** and started two full downloads
   competing for the same outbound bandwidth. `_get_raw_instrument_master`
-  now downloads the raw file at most once per day, in-process, and hands
-  the same DataFrame to both filters -- the second leg to arrive just
-  waits for the first one's download instead of starting its own.
+  now downloads the raw file at most once per day, in-process, handing
+  out a fresh `.copy()` to each filter (never the cached object itself)
+  -- pandas is **not** thread-safe for concurrent reads of one shared
+  DataFrame instance (lazy internal caching mutates C-level state even on
+  operations that look read-only), so an earlier version of this fix that
+  shared one object between the two concurrently-running legs silently
+  corrupted the result for one or both -- confirmed live, a real account
+  dropped from 61/61 equities + 333+/351 F&O resolving to 15/61 + 0/348
+  after that version shipped. The `.copy()` only duplicates
+  already-in-memory data (no I/O), so it doesn't undo the shared-download
+  win, just isolates each leg's own filtering from the other's.
 - **Portfolio Refresh** -- re-syncs holdings/positions from the
   connected broker (`src/utils/data_provider_settings.py::sync_broker_portfolio`,
   wrapping the same `_sync_dhan`/`_sync_zerodha` Settings' "Save & Sync"/

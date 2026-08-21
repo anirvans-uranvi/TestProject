@@ -268,7 +268,7 @@ class TestSharedRawInstrumentMasterDownload:
     cache-cold refresh downloading the same large CSV twice, concurrently,
     competing for the same outbound bandwidth. Both now route through
     _get_raw_instrument_master, which downloads at most once per IST day
-    and hands the same in-memory DataFrame to both filters."""
+    and hands out a fresh `.copy()` to each filter."""
 
     def test_equity_and_fo_loaders_share_one_download_when_both_cache_cold(self, monkeypatch):
         call_count = {"n": 0}
@@ -285,6 +285,29 @@ class TestSharedRawInstrumentMasterDownload:
         assert call_count["n"] == 1
         assert equity_df["trading_symbol"].tolist() == ["RELIANCE"]
         assert fo_df["underlying_symbol"].tolist() == ["RELIANCE"]
+
+    def test_each_caller_gets_an_independent_copy_not_the_cached_object(self, monkeypatch):
+        # Regression, confirmed live: pandas is not thread-safe for
+        # concurrent reads of one shared DataFrame instance (lazy
+        # internal caching mutates C-level state even on operations that
+        # look read-only) -- handing the *same* cached object to both
+        # legs' filter functions while they ran concurrently silently
+        # corrupted the result for one or both (a live account saw "15 of
+        # 61" equities and "0 of 348" F&O resolve, down from 61/61 and
+        # 333+/351 before this cache existed). Each call must get its own
+        # object, never a reference to what's sitting in the cache.
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _COMBINED_RAW_FIXTURE)
+
+        first = dhan_provider._get_raw_instrument_master()
+        second = dhan_provider._get_raw_instrument_master()
+
+        assert first is not second
+        today = dhan_provider.now_ist().date().isoformat()
+        assert first is not dhan_provider._raw_master_cache[today]
+        assert second is not dhan_provider._raw_master_cache[today]
+        # Mutating one caller's copy must never leak into another's.
+        first.loc[first.index[0], "SEM_TRADING_SYMBOL"] = "MUTATED"
+        assert "MUTATED" not in second["SEM_TRADING_SYMBOL"].values
 
 
 class TestGetPositions:
