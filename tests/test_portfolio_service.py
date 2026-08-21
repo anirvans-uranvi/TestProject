@@ -703,6 +703,41 @@ class TestDhanPositionsFromApi:
         rows = [{"tradingSymbol": "CLOSED", "securityId": "1", "netQty": 0, "costPrice": 1.0}]
         assert portfolio_service.dhan_positions_from_api(rows, {}) == []
 
+    def test_same_trading_symbol_under_two_product_types_gets_disambiguated(self):
+        # Regression, confirmed live via postgrest.exceptions.APIError
+        # 23505 ("duplicate key value violates unique constraint
+        # portfolio_positions_pkey"): Dhan allows the same contract to be
+        # held as both an INTRADAY trade and a carried-forward CNC
+        # position at once, returning two /v2/positions rows with the
+        # identical tradingSymbol -- portfolio_positions' primary key is
+        # (user_id, portfolio_name, broker, raw_name), so both rows
+        # landing on the same raw_name failed the whole sync's insert.
+        rows = [
+            {
+                "tradingSymbol": "RELIANCE", "securityId": "2885", "productType": "INTRADAY",
+                "netQty": 10, "costPrice": 2900.0,
+            },
+            {
+                "tradingSymbol": "RELIANCE", "securityId": "2885", "productType": "CNC",
+                "netQty": 5, "costPrice": 2800.0,
+            },
+        ]
+        positions = portfolio_service.dhan_positions_from_api(rows, {})
+        raw_names = {p["raw_name"] for p in positions}
+        assert len(raw_names) == 2
+        assert raw_names == {"RELIANCE (INTRADAY)", "RELIANCE (CNC)"}
+
+    def test_unique_trading_symbols_keep_their_plain_raw_name(self):
+        # No collision -- raw_name must stay exactly the tradingSymbol so
+        # existing trade_date/stop_loss/trade-group links (keyed on
+        # (broker, raw_name)) survive the next sync unchanged.
+        rows = [
+            {"tradingSymbol": "RELIANCE", "securityId": "1", "productType": "CNC", "netQty": 10, "costPrice": 2900.0},
+            {"tradingSymbol": "TCS", "securityId": "2", "productType": "CNC", "netQty": 5, "costPrice": 3500.0},
+        ]
+        positions = portfolio_service.dhan_positions_from_api(rows, {})
+        assert {p["raw_name"] for p in positions} == {"RELIANCE", "TCS"}
+
 
 class TestZerodhaHoldingsFromApi:
     def test_translates_holdings_endpoint_rows(self):
@@ -803,6 +838,18 @@ class TestZerodhaPositionsFromApi:
     def test_skips_closed_positions_with_zero_quantity(self):
         rows = [{"tradingsymbol": "CLOSED", "quantity": 0, "average_price": 1.0}]
         assert portfolio_service.zerodha_positions_from_api(rows) == []
+
+    def test_same_trading_symbol_under_two_products_gets_disambiguated(self):
+        # Same fix/reasoning as dhan_positions_from_api's identical
+        # regression test -- Kite can hold one tradingsymbol under more
+        # than one margin product (CNC/MIS/NRML) at once, which would
+        # otherwise collide on portfolio_positions' primary key.
+        rows = [
+            {"tradingsymbol": "RELIANCE", "product": "MIS", "quantity": 10, "average_price": 2900.0},
+            {"tradingsymbol": "RELIANCE", "product": "CNC", "quantity": 5, "average_price": 2800.0},
+        ]
+        positions = portfolio_service.zerodha_positions_from_api(rows)
+        assert {p["raw_name"] for p in positions} == {"RELIANCE (MIS)", "RELIANCE (CNC)"}
 
 
 class TestApplyFallbackOptionLtp:

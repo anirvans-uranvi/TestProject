@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import calendar
 import re
+from collections import Counter
 from datetime import date, timedelta
 
 from src.models.company import Company
@@ -180,7 +181,19 @@ def dhan_positions_from_api(rows: list[dict], ltp_by_security_id: dict[str, floa
     (positive long, negative short), matching this app's convention. `ltp`
     comes from a separate Market Quote call (dhan_provider.get_ltp_by_security_id)
     since the positions payload itself carries no live price. Skips closed
-    (netQty == 0) rows -- Dhan still lists those for the trading day."""
+    (netQty == 0) rows -- Dhan still lists those for the trading day.
+
+    Dhan allows the same contract to be held under more than one
+    productType at once (e.g. an INTRADAY trade alongside a carried-
+    forward CNC/NRML position on the same securityId) -- both rows share
+    one tradingSymbol, which portfolio_positions' primary key
+    (user_id, portfolio_name, broker, raw_name) relies on being unique,
+    so an unmodified collision fails the whole sync with a duplicate-key
+    error (23505). Only the colliding rows get a productType (falling
+    back to securityId if that's blank) appended to raw_name below -- an
+    account with no such overlap keeps today's exact raw_name, so its
+    saved trade_date/stop_loss/trade-group links (keyed on
+    (broker, raw_name)) survive the next sync unchanged."""
     positions = []
     for row in rows:
         qty = row.get("netQty") or 0
@@ -188,6 +201,7 @@ def dhan_positions_from_api(rows: list[dict], ltp_by_security_id: dict[str, floa
             continue
         trading_symbol = str(row.get("tradingSymbol") or "").strip()
         security_id = str(row.get("securityId") or "")
+        product_type = str(row.get("productType") or "").strip()
         cost_price = row.get("costPrice")
         if cost_price:
             avg_price = float(cost_price)
@@ -202,6 +216,7 @@ def dhan_positions_from_api(rows: list[dict], ltp_by_security_id: dict[str, floa
         positions.append(
             {
                 "raw_name": trading_symbol or security_id,
+                "_dedupe_suffix": product_type or security_id,
                 "symbol": _dhan_underlying_symbol(trading_symbol) if trading_symbol else None,
                 "expiry_date": (
                     date.fromisoformat(expiry_str)
@@ -215,6 +230,11 @@ def dhan_positions_from_api(rows: list[dict], ltp_by_security_id: dict[str, floa
                 "ltp": ltp_by_security_id.get(security_id),
             }
         )
+    raw_name_counts = Counter(p["raw_name"] for p in positions)
+    for p in positions:
+        suffix = p.pop("_dedupe_suffix")
+        if raw_name_counts[p["raw_name"]] > 1:
+            p["raw_name"] = f"{p['raw_name']} ({suffix})"
     return positions
 
 
@@ -274,19 +294,28 @@ def zerodha_positions_from_api(rows: list[dict]) -> list[dict]:
     LTP without a separate "Data APIs" subscription, Kite's response
     already includes it, so no fallback-LTP step is needed for this
     broker. Skips closed (quantity == 0) rows -- Kite still lists those
-    for the trading day."""
+    for the trading day.
+
+    Kite can hold the same tradingsymbol under more than one margin
+    `product` (CNC/MIS/NRML) at once, and both rows would otherwise share
+    one raw_name -- see dhan_positions_from_api's docstring for why that
+    breaks portfolio_positions' primary key. Same fix: only the colliding
+    rows get their `product` appended to raw_name, so an account with no
+    such overlap keeps today's exact raw_name."""
     positions = []
     for row in rows:
         qty = row.get("quantity") or 0
         if not qty:
             continue
         raw_name = str(row.get("tradingsymbol") or "").strip()
+        product = str(row.get("product") or "").strip()
         avg_price = float(row.get("average_price") or 0)
         ltp = row.get("last_price")
         decoded = parse_zerodha_option_instrument(raw_name) or {}
         positions.append(
             {
                 "raw_name": raw_name,
+                "_dedupe_suffix": product,
                 "symbol": decoded.get("symbol"),
                 "expiry_date": decoded.get("expiry_date"),
                 "strike_price": decoded.get("strike_price"),
@@ -296,6 +325,11 @@ def zerodha_positions_from_api(rows: list[dict]) -> list[dict]:
                 "ltp": float(ltp) if ltp is not None else None,
             }
         )
+    raw_name_counts = Counter(p["raw_name"] for p in positions)
+    for p in positions:
+        suffix = p.pop("_dedupe_suffix")
+        if raw_name_counts[p["raw_name"]] > 1 and suffix:
+            p["raw_name"] = f"{p['raw_name']} ({suffix})"
     return positions
 
 
