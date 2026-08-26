@@ -46,7 +46,9 @@ st.caption(
     "automatically as Option P&L% improves and is saved on every visit. Target Option P&L changes every day "
     "to reflect whether there has been higher-than-average decay in the option premium, but it never crosses "
     "95% of Credit. Option P&L shows a ✅ once it clears Target Option P&L, or a ❌ once it falls through Stop "
-    "Loss. Combined P&L adds the covered stock's own P&L to Option P&L."
+    "Loss. Stock P&L is the covered stock's own P&L, with a Target Stock P&L of 5% of its own investment "
+    "(Avg Stock Price × Holding) -- Stock P&L shows a ✅ once it clears that target. Combined P&L adds Stock "
+    "P&L to Option P&L."
 )
 
 ensure_cache_bust()
@@ -115,6 +117,17 @@ def _fmt_target_pnl(target_pnl: float | None, credit: float | None) -> str:
     if not credit:
         return format_inr(target_pnl)
     return f"{format_inr(target_pnl)} ({target_pnl / credit * 100:+.2f}%)"
+
+
+def _fmt_target_stock_pnl(target_stock_pnl: float | None) -> str:
+    """"₹4,275.00" -- Target Stock P&L, 5% of the stock's own investment
+    (Avg Stock Price × Holding). No percentage in parentheses, unlike the
+    other Target columns -- it's always exactly 5% of that same
+    investment by definition, so restating it would be redundant. An em
+    dash if the trade has no Holding leg to compute a cost basis from."""
+    if target_stock_pnl is None:
+        return "—"
+    return format_inr(target_stock_pnl)
 
 
 def _fmt_pnl(pnl: float | None, pnl_pct: float | None, target_pnl: float | None, stop_loss: float | None) -> str:
@@ -209,14 +222,22 @@ def _render_cc_table(
         if new_stop_loss is not None and (existing_stop_loss is None or abs(new_stop_loss - existing_stop_loss) > 1e-9):
             portfolio_repo.set_position_stop_loss(client, user_id, portfolio_name, leg["broker"], leg["raw_name"], new_stop_loss)
 
-        combined_pnl = stock_pnl + leg["pnl"] if stock_pnl is not None and leg["pnl"] is not None else None
-        combined_investment = (
+        # Stock's own investment (Avg Stock Price × Holding) -- the
+        # denominator for both Stock P&L% and Combined P&L% (Combined
+        # P&L is measured against the stock's own capital outlay, not
+        # stock+option combined, since the option collateral is the
+        # stock itself, not extra capital).
+        stock_investment = (
             leg["holding_qty"] * leg["stock_avg_price"]
             if leg["holding_qty"] is not None and leg["stock_avg_price"] is not None
             else None
         )
+        stock_pnl_pct = stock_pnl / stock_investment * 100 if stock_pnl is not None and stock_investment else None
+        target_stock_pnl = 0.05 * stock_investment if stock_investment is not None else None
+
+        combined_pnl = stock_pnl + leg["pnl"] if stock_pnl is not None and leg["pnl"] is not None else None
         combined_pnl_pct = (
-            combined_pnl / combined_investment * 100 if combined_pnl is not None and combined_investment else None
+            combined_pnl / stock_investment * 100 if combined_pnl is not None and stock_investment else None
         )
 
         table_rows.append(
@@ -226,7 +247,9 @@ def _render_cc_table(
                 "Holding": leg["holding_qty"],
                 "Avg Stock Price": leg["stock_avg_price"],
                 "Stock LTP": stock_ltp,
-                "Expiry": leg["expiry_date"].strftime("%d %b %Y") if leg["expiry_date"] else None,
+                "Stock P&L": _fmt_pnl(stock_pnl, stock_pnl_pct, target_stock_pnl, None),
+                "Target Stock P&L": _fmt_target_stock_pnl(target_stock_pnl),
+                "CC Expiry": leg["expiry_date"].strftime("%d %b %Y") if leg["expiry_date"] else None,
                 "Strike": leg["strike_price"],
                 "Qty": leg["qty"],
                 "Avg Price": leg["avg_price"],

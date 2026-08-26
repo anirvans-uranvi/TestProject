@@ -1352,7 +1352,7 @@ page's own `st.set_page_config(page_title=..., page_icon=...)` call
 
   **A real bug found here, right after this section first shipped**: the CSP/CC breakdown's spot value (CC was still "ITM PMCC" at the time, but the bug and fix applied identically) was initially taken from `option_chain_summary(near_chain_rows)["spot"]` — the F&O bhavcopy's own `underlying_price` column — while the Dashboard's two columns (now the `dashboard_fo_metrics` cache, see above) use the cash-market `latest_price` from `latest_screener_view`. These two prices aren't the same value, so this page's numbers didn't match the Dashboard's for the same stock (confirmed live: ADANIENT showed 5% CSP = 0.54% on the Dashboard but 0.45% here, since a different spot picked a different nearest-5%-below strike, 3040 vs 3020). Fixed by fetching `snapshot_repo.get_latest_screener_row(client, symbol).latest_price` and using that as the spot for both calculations here too, instead of the chain's `underlying_price` — the top-of-page "Spot"/"ATM strike" summary tiles are unaffected and deliberately still use the chain's own `underlying_price` (correct for highlighting the ATM row in the actual option-chain data being displayed there). If you add another F&O-derived calculation to either screen, source spot the same way this one now does — from the screener, not the chain — to keep the two screens' numbers in agreement.
 
-- **`7_My_Trades.py` / `8_My_Holdings.py` / `9_My_Positions.py` / `11_My_CSP.py` / `12_My_CC.py` / `13_My_Other_Trades.py` / `10_Analyse_Trade.py`** — seven pages (`10_Analyse_Trade.py` hidden from the sidebar, see the "Streamlit app" section above) replacing what used to be one combined `6_Portfolio.py` (sidebar label "My Portfolio", retired). `pages/6_My_Broker.py`, an earlier page in this family, was later deleted entirely -- CSV upload dropped along with it, and its connect/sync UI moved into Settings' "Data Provider" section (see the Streamlit app section above and the dedicated Portfolio pages section below for the full story). `12_My_CC.py`/`13_My_Other_Trades.py` are the newest two, though they've since diverged: `13_My_Other_Trades.py` is still exactly `7_My_Trades.py`'s own trades-table code with one extra `trade_type` filter applied before the bucket split (`portfolio_service.is_other_trade_type`, next to `is_csp_trade_type`), not a new grouping/analytics engine, but `12_My_CC.py` was later rebuilt into a per-leg table matching `11_My_CSP.py`'s own depth (plus the covered stock's own Holding/Avg Stock Price/Stock LTP/Combined P&L columns) rather than staying a filtered copy of My Trades' summary table -- see the dedicated Portfolio pages section below for the sync → save → refresh-registration pipeline and the My Trades/Analyse Trade/My CSP/My CC/My Other Trades grouping. Each page reads every one of the signed-in user's saved rows across every portfolio and broker via `src/utils/portfolio_page.py`'s shared cached loaders; My Holdings/My Positions/My Trades/My CSP/My CC/My Other Trades each render one `st.tabs` entry per distinct `portfolio_name` (union of holdings' and positions' names — a portfolio can exist on positions alone; in practice this is a single tab for almost every account now, since the live sync flow only ever targets one resolved name — see the Portfolio pages section's "One portfolio per account" note below) scoping `portfolio_service.merge_holdings`/`compute_portfolio_view` (LTP via `snapshot_repo.get_latest_prices`, a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why — overridden by a live broker quote wherever `portfolio_page.load_live_broker_prices` finds one, on request; see the LTP Underlying and Holdings sections below) and `compute_positions_view` to just that portfolio's own rows. Every table on these pages is a plain `st.dataframe` — see below for why, and for how row selection replaced the per-row 🔍 button.
+- **`7_My_Trades.py` / `8_My_Holdings.py` / `9_My_Positions.py` / `11_My_CSP.py` / `12_My_CC.py` / `13_My_Other_Trades.py` / `10_Analyse_Trade.py`** — seven pages (`10_Analyse_Trade.py` hidden from the sidebar, see the "Streamlit app" section above) replacing what used to be one combined `6_Portfolio.py` (sidebar label "My Portfolio", retired). `pages/6_My_Broker.py`, an earlier page in this family, was later deleted entirely -- CSV upload dropped along with it, and its connect/sync UI moved into Settings' "Data Provider" section (see the Streamlit app section above and the dedicated Portfolio pages section below for the full story). `12_My_CC.py`/`13_My_Other_Trades.py` are the newest two, though they've since diverged: `13_My_Other_Trades.py` is still exactly `7_My_Trades.py`'s own trades-table code with one extra `trade_type` filter applied before the bucket split (`portfolio_service.is_other_trade_type`, next to `is_csp_trade_type`), not a new grouping/analytics engine, but `12_My_CC.py` was later rebuilt into a per-leg table matching `11_My_CSP.py`'s own depth (plus the covered stock's own Holding/Avg Stock Price/Stock LTP/Stock P&L/Target Stock P&L/Combined P&L columns) rather than staying a filtered copy of My Trades' summary table -- see the dedicated Portfolio pages section below for the sync → save → refresh-registration pipeline and the My Trades/Analyse Trade/My CSP/My CC/My Other Trades grouping. Each page reads every one of the signed-in user's saved rows across every portfolio and broker via `src/utils/portfolio_page.py`'s shared cached loaders; My Holdings/My Positions/My Trades/My CSP/My CC/My Other Trades each render one `st.tabs` entry per distinct `portfolio_name` (union of holdings' and positions' names — a portfolio can exist on positions alone; in practice this is a single tab for almost every account now, since the live sync flow only ever targets one resolved name — see the Portfolio pages section's "One portfolio per account" note below) scoping `portfolio_service.merge_holdings`/`compute_portfolio_view` (LTP via `snapshot_repo.get_latest_prices`, a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why — overridden by a live broker quote wherever `portfolio_page.load_live_broker_prices` finds one, on request; see the LTP Underlying and Holdings sections below) and `compute_positions_view` to just that portfolio's own rows. Every table on these pages is a plain `st.dataframe` — see below for why, and for how row selection replaced the per-row 🔍 button.
 
 ## Portfolio pages
 
@@ -2864,17 +2864,30 @@ can't be judged from the option alone: `Holding`/`Avg Stock Price`/
 `Stock LTP` are read from that trade's own Holding leg(s) (summed
 qty, investment-weighted avg price, in case the same underlying is
 split across more than one lot/broker within one trade — `None`/"—"
-across all three if the trade has no Holding leg, e.g. a naked short
-call someone mislabeled "Covered Call"), and `Combined P&L` adds that
-stock's own `(Stock LTP - Avg Stock Price) * Holding` to the option
-leg's own P&L, as a % of the stock's own investment (`Holding * Avg
-Stock Price`) — `None` unless both halves are priced. `Credit`/`Target
-Option P&L`/`Stop Loss` reuse My CSP's own `csp_max_credit`/
-`csp_target_pnl`/`csp_stop_loss` unchanged — despite the `csp_` name,
-none of the three actually assume a *put*: they're premium-collected/
-time-decay-target/ratcheting-stop math that applies identically to any
-short option leg being held for credit, here on the call's own
-`avg_price`/`qty`/`pnl_pct`, unaffected by the stock side.
+across the board if the trade has no Holding leg, e.g. a naked short
+call someone mislabeled "Covered Call"). `stock_investment` (`Holding *
+Avg Stock Price`) is computed once per row and reused as the denominator
+for three separate percentages: `Stock P&L` (`(Stock LTP - Avg Stock
+Price) * Holding`, shown as a % of `stock_investment` — a ✅ once it
+clears `Target Stock P&L`, reusing the same `_fmt_pnl` marker convention
+`Option P&L`/`Target Option P&L` already use, just with no stop-loss
+threshold to also check), `Target Stock P&L` (a flat `0.05 *
+stock_investment` — no percentage shown alongside it, unlike every other
+Target column here, since it's always exactly 5% of that same investment
+by definition), and `Combined P&L` (`Stock P&L`'s own rupee amount plus
+the option leg's own P&L, as a % of `stock_investment`, since the option
+collateral is the stock itself, not additional capital) — `None`
+wherever `stock_investment`/either underlying P&L piece is itself
+`None`. `CC Expiry`/`Credit`/`Target Option P&L`/`Stop Loss` reuse My
+CSP's own `csp_max_credit`/`csp_target_pnl`/`csp_stop_loss` unchanged —
+despite the `csp_` name, none of the three actually assume a *put*:
+they're premium-collected/time-decay-target/ratcheting-stop math that
+applies identically to any short option leg being held for credit, here
+on the call's own `avg_price`/`qty`/`pnl_pct`, unaffected by the stock
+side. (`Expiry` is labeled `CC Expiry` here specifically, unlike My
+CSP's own plain `Expiry` — disambiguates the *call's* own expiry now
+that the row also carries stock-side columns with no expiry of their
+own.)
 
 `app.py` groups all five of `7_My_Trades.py`/`11_My_CSP.py`/
 `12_My_CC.py`/`13_My_Other_Trades.py`/`10_Analyse_Trade.py` (hidden)

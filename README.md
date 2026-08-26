@@ -1363,9 +1363,11 @@ shows a plain caption rather than an empty table.
 Every Trade whose Trade Type is exactly "Covered Call"
 (`is_covered_call_trade_type`, case-insensitive/trimmed) -- one row per
 short-**call** position leg, same Stock/Index/Other bucket split as My
-Trades. The option leg's own columns mirror My CSP: **Expiry**/
-**Strike**/**Qty**/**Avg Price**/**LTP**/**Momentum**/**1D/5D/20D**, and
-the same **Trade Date**/**Stop Loss** mechanics
+Trades. The option leg's own columns mirror My CSP: **CC Expiry**
+(labeled to disambiguate from any expiry the covered stock itself might
+imply -- a stock has none, but the label makes clear this column is the
+*call's* expiry)/**Strike**/**Qty**/**Avg Price**/**LTP**/**Momentum**/
+**1D/5D/20D**, and the same **Trade Date**/**Stop Loss** mechanics
 (`csp_max_credit`/`csp_target_pnl`/`csp_stop_loss`) -- relabeled
 **Credit** (was "Max Credit" on My CSP), **Option P&L** (was "P&L"), and
 **Target Option P&L** (was "Target P&L") to disambiguate from the new
@@ -1384,13 +1386,19 @@ underlying is split more than one way within a trade):
   **Avg Price**).
 - **Stock LTP** -- the stock's own current price (same broker-live-first,
   screener-snapshot-fallback resolution as My Holdings' Current Value).
-- **Combined P&L** -- `(Stock LTP - Avg Stock Price) × Holding` (the
-  stock's own P&L) plus the option leg's own P&L, shown as a % of the
-  stock's own investment (`Holding × Avg Stock Price`). "—" unless both
-  the stock and the option leg are priced.
+- **Stock P&L** -- `(Stock LTP - Avg Stock Price) × Holding`, the stock's
+  own P&L on its own, as a % of its own investment (`Holding × Avg Stock
+  Price`) -- a ✅ once it clears **Target Stock P&L**.
+- **Target Stock P&L** -- a flat 5% of the stock's own investment
+  (`Holding × Avg Stock Price`). No percentage shown alongside it (unlike
+  every other Target column here) since it's always exactly 5% of that
+  same investment by definition -- restating it would be redundant.
+- **Combined P&L** -- Stock P&L plus the option leg's own P&L, shown as a
+  % of the same stock investment. "—" unless both the stock and the
+  option leg are priced.
 
-All three stock-side columns show "—"/blank if the trade has no Holding
-leg to read (e.g. a naked short call mislabeled "Covered Call").
+All stock-side columns show "—"/blank if the trade has no Holding leg to
+read (e.g. a naked short call mislabeled "Covered Call").
 
 ### My Other Trades (`pages/13_My_Other_Trades.py`)
 
