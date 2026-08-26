@@ -2585,17 +2585,43 @@ since this page first shipped)**: `Trade Date`, then what My Positions
 already shows (`Underlying`/`Expiry`/`Strike`/`Qty`/`Avg Price` --
 **`Instrument` dropped on request**, redundant with
 `Underlying`/`Expiry`/`Strike` for a single-leg CSP and just ate table
-width; Analyse Trade's own legs table still shows it, since that's the
-one spot it's still useful for telling legs apart), then `Max Credit`,
-`LTP`, `P&L`, `Target P&L`, `Stop Loss`, `Breakeven`, `LTP Underlying`,
-`Momentum`, `1D`, `5D`, `20D`. `Trade Date` leads (everything else on
-the row can depend on it); `Max Credit` sits right after `Avg Price` on
-request (it's `Avg Price * |Qty|`, so reads naturally as "what Avg
-Price actually adds up to"); `Target P&L`/`Stop Loss` sit right after
-`P&L` since they're the other P&L-shaped numbers; `Momentum` sits just
-before `1D`/`5D`/`20D` (the returns it's computed from) — see the dict
-literal in `_render_csp_tab` for the exact order, which `pd.DataFrame`
-preserves as column order.
+width), then `Max Credit`, `LTP`, `P&L`, `Target P&L`, `Stop Loss`,
+`Breakeven`, `LTP Underlying`, `Momentum`, `1D`, `5D`, `20D`. `Trade
+Date` leads (everything else on the row can depend on it); `Max Credit`
+sits right after `Avg Price` on request (it's `Avg Price * |Qty|`, so
+reads naturally as "what Avg Price actually adds up to"); `Target
+P&L`/`Stop Loss` sit right after `P&L` since they're the other
+P&L-shaped numbers; `Momentum` sits just before `1D`/`5D`/`20D` (the
+returns it's computed from) — see the dict literal in `_render_csp_tab`
+for the exact order, which `pd.DataFrame` preserves as column order.
+
+**Analyse Trade's own legs table was later rebuilt to match these exact
+same columns** (`Trade Date`/`Underlying`/`Expiry`/`Strike`/`Qty`/`Avg
+Price`/`Credit`/`LTP`/`P&L`/`Target P&L`/`Stop Loss`/`Breakeven`/`LTP
+Underlying`/`Momentum`/`1D`/`5D`/`20D`, renamed `Max Credit` → `Credit`
+along the way), replacing its original, much plainer `Type`/`Broker`/
+`Instrument`/`Expiry`/`Strike`/`Option Type`/`Qty`/`Avg Price`/`LTP`/
+`P&L` shape. Unlike My CSP (Position-only, pre-filtered to CSP-tagged
+trades), Analyse Trade has to work for *any* Trade shape and must still
+show every leg — Holding legs included — since the merge/split controls
+below the table select rows by position in `trade_legs`, unfiltered.
+`Credit`/`Target P&L`/`Stop Loss` (`csp_max_credit`/`csp_target_pnl`/
+`csp_stop_loss`, computed and persisted exactly like My CSP/My CC) only
+populate for a leg that's a genuine **short** option (`leg_type ==
+"Position"`, `option_type` and `strike_price` both set, `qty < 0`) — a
+short call qualifies too (see My CC's own reuse of these same three
+functions), but a Holding, a future (`option_type` is `None`), or a long
+option all show `None`/"—". `Breakeven` is narrower still — it's
+specifically `csp_breakeven_price` (`Strike - Avg Price`), the textbook
+*put* breakeven, so it only populates when the leg is additionally
+`option_type == OptionType.PE`; a short call passes the "short option"
+gate above for `Credit`/`Target P&L`/`Stop Loss` but still shows "—" for
+`Breakeven`. `LTP Underlying`/`Momentum`/`1D`/`5D`/`20D` apply to *every*
+leg with a resolved `symbol`, Holdings included, since they describe the
+underlying itself rather than the specific leg's own instrument — the
+same `load_latest_prices`/`load_live_broker_prices`/`load_returns_and_pe`
+calls My CSP/My CC already make, just over the distinct symbol set
+across this one Trade's legs instead of a whole CSP/CC bucket.
 
 **`P&L%` was folded into `P&L` itself, on request** — there's no
 separate `P&L%` column anymore. `_fmt_pnl(pnl, pnl_pct, target_pnl,

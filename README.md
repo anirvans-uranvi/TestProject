@@ -1186,8 +1186,23 @@ page (`st.session_state["analyse_trade_id"]`/`["analyse_trade_portfolio"]`
 `st.Page(..., visibility="hidden")`, so it's reachable this way but never
 appears as its own sidebar link). There you can:
 
-- See every leg in the Trade (type, broker, instrument, expiry/strike/
-  option type where applicable, qty, avg price, LTP, P&L).
+- See every leg in the Trade, one row per leg (Holding legs included),
+  in the same columns as My CSP: Trade Date/Underlying/Expiry/Strike/
+  Qty/Avg Price/Credit/LTP/P&L/Target P&L/Stop Loss/Breakeven/LTP
+  Underlying/Momentum/1D/5D/20D. Unlike My CSP (which only ever shows
+  CSP-tagged Position legs), this page has to work for *any* Trade
+  shape, so the CSP-specific columns only populate where they're
+  actually meaningful: `Credit`/`Target P&L`/`Stop Loss` compute for any
+  **short** option leg (a short call included -- these three formulas
+  were never really put-specific, see My CC), but `Breakeven` is
+  specifically the textbook CSP breakeven (`Strike - Avg Price`) and only
+  shows for a genuine short **put** leg -- a Holding, a future, a long
+  option, or a short call all show "—" for it. `LTP Underlying`/
+  `Momentum`/`1D`/`5D`/`20D` apply to every leg with a resolved symbol
+  regardless of leg type, since they're facts about the underlying, not
+  the leg's own instrument. Row order still matches `trade_legs` exactly
+  (no filtering), so the merge/split row-selection below keeps working
+  unchanged.
 - **Correct the underlying, set the Trade Date, or rename the Trade
   Type** -- one form. Underlying Instrument and Trade Type are free
   text, not constrained to a known symbol or a fixed list -- e.g.
