@@ -139,18 +139,35 @@ def dhan_holdings_from_api(rows: list[dict]) -> list[dict]:
     return holdings
 
 
-_DHAN_DERIVATIVE_SYMBOL_RE = re.compile(r"^([A-Z]+)")
+def _dhan_underlying_symbol(trading_symbol: str, is_derivative: bool, option_type_raw: str) -> str:
+    """Underlying extraction from Dhan's `tradingSymbol`. A plain
+    equity/ETF position's tradingSymbol IS the underlying already, no
+    expiry/strike/type suffix at all (e.g. "SILVERBEES") -- returned
+    verbatim, whatever characters it contains. A real derivative's
+    tradingSymbol instead appends "-<expiry>-<strike>-<CE/PE>" (option) or
+    "-<expiry>-<FUT-ish token>" (future) -- confirmed live against a real
+    account as e.g. "NIFTY-Aug2026-23000-PE"/"HDFCBANK-Aug2026-700-PE" --
+    split from the RIGHT by a known trailing-token count (same approach as
+    dhan_provider.py's _underlying_from_trading_symbol), not on the first
+    hyphen or a leading-alphabetic-run match, since the underlying itself
+    can contain a non-letter character (confirmed live: an earlier
+    leading-alphabetic-run regex truncated "M&M" -- Mahindra & Mahindra's
+    real NSE symbol -- down to just "M", the underlying's live LTP/
+    Momentum/1D/5D/20D silently showing blank for that leg since "M" isn't
+    a real symbol) or its own hyphen (e.g. "NAM-INDIA", "BAJAJ-AUTO").
 
-
-def _dhan_underlying_symbol(trading_symbol: str) -> str | None:
-    """Best-effort underlying extraction from Dhan's derivative
-    `tradingSymbol` -- takes the leading alphabetic run (e.g. "NIFTY" out
-    of whatever expiry/strike/type suffix Dhan appends). Dhan's docs don't
-    show a sample derivative tradingSymbol value, so this is confirmed and
-    adjusted against a real authenticated response during testing rather
-    than a fixed, verified format."""
-    m = _DHAN_DERIVATIVE_SYMBOL_RE.match(trading_symbol.strip().upper())
-    return m.group(1) if m else None
+    `is_derivative` -- this row's own drvExpiryDate being a real date, not
+    absent/the no-expiry sentinel (_DHAN_NO_EXPIRY_SENTINEL) -- is what
+    decides which branch applies, NOT whether tradingSymbol happens to
+    contain a hyphen: a plain hyphenated equity/ETF symbol (e.g. an
+    intraday "NAM-INDIA" trade) would otherwise be indistinguishable from
+    a genuine 2-token futures suffix, and get wrongly split too."""
+    symbol = trading_symbol.strip().upper()
+    if not is_derivative:
+        return symbol
+    parts = symbol.split("-")
+    trailing = 3 if option_type_raw.strip().upper() in ("PUT", "PE", "CALL", "CE") else 2
+    return "-".join(parts[: len(parts) - trailing]) if len(parts) > trailing else parts[0]
 
 
 # Confirmed against a real GET /v2/positions response: drvOptionType comes
@@ -215,18 +232,19 @@ def dhan_positions_from_api(rows: list[dict], ltp_by_security_id: dict[str, floa
             avg_price = float(row.get("sellAvg") or 0)
         expiry_raw = row.get("drvExpiryDate")
         expiry_str = str(expiry_raw)[:10] if expiry_raw else None
+        is_derivative = bool(expiry_str and expiry_str != _DHAN_NO_EXPIRY_SENTINEL)
         option_type_raw = str(row.get("drvOptionType") or "").strip().upper()
         strike_raw = row.get("drvStrikePrice")
         positions.append(
             {
                 "raw_name": trading_symbol or security_id,
                 "_dedupe_tiebreakers": [product_type, security_id],
-                "symbol": _dhan_underlying_symbol(trading_symbol) if trading_symbol else None,
-                "expiry_date": (
-                    date.fromisoformat(expiry_str)
-                    if expiry_str and expiry_str != _DHAN_NO_EXPIRY_SENTINEL
+                "symbol": (
+                    _dhan_underlying_symbol(trading_symbol, is_derivative, option_type_raw)
+                    if trading_symbol
                     else None
                 ),
+                "expiry_date": date.fromisoformat(expiry_str) if is_derivative else None,
                 "strike_price": float(strike_raw) if strike_raw else None,
                 "option_type": _DHAN_OPTION_TYPES.get(option_type_raw),
                 "qty": float(qty),

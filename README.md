@@ -1352,11 +1352,12 @@ short-**call** position leg, same Stock/Index/Other bucket split as My
 Trades. The option leg's own columns mirror My CSP: **Expiry**/
 **Strike**/**Qty**/**Avg Price**/**LTP**/**Momentum**/**1D/5D/20D**, and
 the same **Trade Date**/**Stop Loss** mechanics
-(`csp_target_pnl`/`csp_stop_loss`) -- renamed **Target Option P&L** and
-relabeled **Credit** (was "Max Credit" on My CSP) -- none of these three
-are actually put-specific despite the `csp_` name; they're just
-premium-collected/time-decay-target/ratcheting-stop math, equally valid
-for a short call.
+(`csp_max_credit`/`csp_target_pnl`/`csp_stop_loss`) -- relabeled
+**Credit** (was "Max Credit" on My CSP), **Option P&L** (was "P&L"), and
+**Target Option P&L** (was "Target P&L") to disambiguate from the new
+stock-side numbers below -- none of these three are actually put-specific
+despite the `csp_` name; they're just premium-collected/time-decay-target/
+ratcheting-stop math, equally valid for a short call.
 
 A Covered Call's economics can't be judged from the option alone, so
 each row also carries the covered stock's own numbers, read from that

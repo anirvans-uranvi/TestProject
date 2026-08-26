@@ -802,6 +802,62 @@ class TestDhanPositionsFromApi:
         assert p["avg_price"] == 10.15
         assert p["ltp"] == 1.1
 
+    def test_underlying_containing_an_ampersand_is_not_truncated(self):
+        # Regression, confirmed live: an earlier leading-alphabetic-run
+        # regex (`^([A-Z]+)`) stopped matching at the first non-letter
+        # character, truncating "M&M" (Mahindra & Mahindra's real NSE
+        # symbol) down to just "M" -- a symbol that doesn't exist, so
+        # the leg's underlying LTP/Momentum/1D/5D/20D all silently came
+        # back blank on My CSP/My CC.
+        rows = [
+            {
+                "tradingSymbol": "M&M-Sep2026-3200-PE", "securityId": "1", "netQty": -200, "costPrice": 10.95,
+                "drvExpiryDate": "2026-09-29", "drvStrikePrice": 3200, "drvOptionType": "PUT",
+            }
+        ]
+        positions = portfolio_service.dhan_positions_from_api(rows, {})
+        assert positions[0]["symbol"] == "M&M"
+
+    def test_underlying_with_its_own_hyphen_in_a_derivative_symbol_keeps_both_parts(self):
+        # "NAM-INDIA" is a real NSE symbol with a hyphen of its own --
+        # splitting on the *first* hyphen (rather than a known trailing-
+        # token count) would wrongly cut this down to "NAM".
+        rows = [
+            {
+                "tradingSymbol": "NAM-INDIA-Sep2026-720-CE", "securityId": "1", "netQty": -50, "costPrice": 5.0,
+                "drvExpiryDate": "2026-09-29", "drvStrikePrice": 720, "drvOptionType": "CALL",
+            }
+        ]
+        positions = portfolio_service.dhan_positions_from_api(rows, {})
+        assert positions[0]["symbol"] == "NAM-INDIA"
+
+    def test_futures_position_underlying_strips_the_two_trailing_tokens(self):
+        rows = [
+            {
+                "tradingSymbol": "RELIANCE-Aug2026-FUT", "securityId": "1", "netQty": 100, "costPrice": 2950.0,
+                "drvExpiryDate": "2026-08-27", "drvStrikePrice": 0, "drvOptionType": "",
+            }
+        ]
+        positions = portfolio_service.dhan_positions_from_api(rows, {})
+        assert positions[0]["symbol"] == "RELIANCE"
+
+    def test_plain_hyphenated_equity_symbol_is_not_mistaken_for_a_futures_suffix(self):
+        # A plain equity/ETF position's tradingSymbol has no expiry suffix
+        # at all -- but "NAM-INDIA" held as a stock position looks exactly
+        # like a 2-token "<underlying>-<FUT-ish token>" shape. Only a real
+        # drvExpiryDate (not absent/the no-expiry sentinel) should trigger
+        # the trailing-token split; here it must return the tradingSymbol
+        # verbatim instead of wrongly stripping "-INDIA" off as if it were
+        # a futures suffix.
+        rows = [
+            {
+                "tradingSymbol": "NAM-INDIA", "securityId": "1", "netQty": 100, "costPrice": 500.0,
+                "drvExpiryDate": "0001-01-01", "drvStrikePrice": 0, "drvOptionType": "",
+            }
+        ]
+        positions = portfolio_service.dhan_positions_from_api(rows, {})
+        assert positions[0]["symbol"] == "NAM-INDIA"
+
     def test_equity_etf_position_with_dhan_no_expiry_sentinel_gets_no_expiry_date(self):
         # Regression, confirmed live: an ETF (SILVERBEES) intraday
         # position via /v2/positions still carries a drvExpiryDate key,
