@@ -299,17 +299,6 @@ class TestCspBreakevenPrice:
         assert portfolio_service.csp_breakeven_price(23500.0, None) is None
 
 
-class TestCoveredCallBreakevenPrice:
-    def test_subtracts_premium_from_stock_cost_basis(self):
-        assert portfolio_service.covered_call_breakeven_price(2500.0, 45.0) == 2455.0
-
-    def test_none_stock_avg_price_is_none(self):
-        assert portfolio_service.covered_call_breakeven_price(None, 45.0) is None
-
-    def test_none_premium_avg_price_is_none(self):
-        assert portfolio_service.covered_call_breakeven_price(2500.0, None) is None
-
-
 class TestCspBreakevenPct:
     def test_breakeven_below_current_price_is_negative_cushion(self):
         # Breakeven 23455, underlying at 24000 -- breakeven sits below

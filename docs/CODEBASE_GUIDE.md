@@ -111,7 +111,7 @@ pages/
   8_My_Holdings.py                   Equity holdings, ETFs & Mutual Funds / Stocks split, identical columns
   9_My_Positions.py                  Per-leg F&O positions, split into Stock Options / Index Options / Others
   11_My_CSP.py                       Every position leg from a "CSP"-tagged Trade, + underlying LTP/1D/5D/20D
-  12_My_CC.py                        Every short-call leg from a "Covered Call"-tagged Trade, + Breakeven/1D/5D/20D
+  12_My_CC.py                        Every short-call leg from a "Covered Call"-tagged Trade, + covered stock's own P&L
   13_My_Other_Trades.py               My Trades' own tables, filtered to neither "CSP" nor "Covered Call"
   10_Analyse_Trade.py                 One Trade's legs -- correct underlying/trade type, merge/split (hidden page)
 src/
@@ -1284,9 +1284,10 @@ file's own LTP -- see the Positions subsection near the end of this
 section for why), `pages/11_My_CSP.py` (every position leg from a
 "CSP"-tagged Trade, with the underlying's own LTP/1D/5D/20D change -- see
 its own subsection below), `pages/12_My_CC.py` (every short-call position
-leg from a "Covered Call"-tagged Trade, with its own Breakeven relative
-to the covered stock's cost basis -- see its own subsection below, right
-after My CSP's), `pages/13_My_Other_Trades.py` (My Trades' own
+leg from a "Covered Call"-tagged Trade, alongside the covered stock's own
+Holding/Avg Price/LTP and a Combined P&L across both legs -- see its own
+subsection below, right after My CSP's), `pages/13_My_Other_Trades.py`
+(My Trades' own
 Stock/Index/Other tables, filtered to neither "CSP" nor "Covered Call" --
 see its own subsection further below), and `pages/10_Analyse_Trade.py`
 (one Trade's
@@ -2754,26 +2755,24 @@ Total P&L, not per-leg breakeven/target/stop-loss) until a real formula
 is asked for.
 
 **My CC (`pages/12_My_CC.py`)** — like My CSP, this renders one row per
-short-**call** Position leg (Holding legs are looked at only to find the
-covered stock's cost basis, then dropped from the table itself, same as
-My CSP silently skips a stray Holding leg) across the same Stock
-Trades/Index Trades/Other Trades bucket split. `Max Credit`/`Target
-P&L`/`Stop Loss` reuse My CSP's own `csp_max_credit`/`csp_target_pnl`/
-`csp_stop_loss` unchanged — despite the `csp_` name, none of the three
-actually assume a *put*: they're premium-collected/time-decay-target/
-ratcheting-stop math that applies identically to any short option leg
-being held for credit. `Breakeven` is the one column that's genuinely
-put-specific in My CSP (`csp_breakeven_price` = `strike - avg_price`,
-meaningful only relative to a short put's own strike) and doesn't
-generalize to a Covered Call, whose textbook breakeven is relative to
-the *stock's* cost basis, not the call's strike — so My CC uses its own
-`portfolio_service.covered_call_breakeven_price(stock_avg_price,
-premium_avg_price)` (`stock_avg_price - premium_avg_price`), looked up
-per-trade from that trade's own Holding leg's `avg_price` (`None` — "—"
-in the table — if a trade has no Holding leg, e.g. a naked short call
-someone mislabeled "Covered Call"). `csp_breakeven_pct`'s `(breakeven /
-underlying_ltp - 1) * 100` is generic enough to reuse as-is for either
-page's Breakeven %.
+short-**call** Position leg, across the same Stock Trades/Index
+Trades/Other Trades bucket split, but adds the covered *stock's* own
+numbers alongside the option leg's, since a Covered Call's economics
+can't be judged from the option alone: `Holding`/`Avg Stock Price`/
+`Stock LTP` are read from that trade's own Holding leg(s) (summed
+qty, investment-weighted avg price, in case the same underlying is
+split across more than one lot/broker within one trade — `None`/"—"
+across all three if the trade has no Holding leg, e.g. a naked short
+call someone mislabeled "Covered Call"), and `Combined P&L` adds that
+stock's own `(Stock LTP - Avg Stock Price) * Holding` to the option
+leg's own P&L, as a % of the stock's own investment (`Holding * Avg
+Stock Price`) — `None` unless both halves are priced. `Credit`/`Target
+Option P&L`/`Stop Loss` reuse My CSP's own `csp_max_credit`/
+`csp_target_pnl`/`csp_stop_loss` unchanged — despite the `csp_` name,
+none of the three actually assume a *put*: they're premium-collected/
+time-decay-target/ratcheting-stop math that applies identically to any
+short option leg being held for credit, here on the call's own
+`avg_price`/`qty`/`pnl_pct`, unaffected by the stock side.
 
 `app.py` groups all five of `7_My_Trades.py`/`11_My_CSP.py`/
 `12_My_CC.py`/`13_My_Other_Trades.py`/`10_Analyse_Trade.py` (hidden)

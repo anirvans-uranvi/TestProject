@@ -51,8 +51,8 @@ pages/                  Streamlit multipage app (each still its own script,
                               "My Portfolio"
   11_My_CSP.py                Every Trade with Trade Type "CSP" -- one position leg per row, with underlying
                               LTP + 1D/5D/20D change -- sidebar label "CSP", nested under "My Trades"
-  12_My_CC.py                 Every short-call leg from a "Covered Call"-tagged Trade, + underlying LTP/1D/5D/20D
-                              and stock-cost-basis Breakeven -- sidebar label "CC", nested under "My Trades"
+  12_My_CC.py                 Every short-call leg from a "Covered Call"-tagged Trade, + covered stock's own
+                              Holding/Avg Price/LTP and Combined P&L -- sidebar label "CC", nested under "My Trades"
   13_My_Other_Trades.py       Every Trade from My Trades whose Trade Type is neither "CSP" nor "Covered Call" --
                               sidebar label "Other Trades", nested under "My Trades"
   10_Analyse_Trade.py          One Trade's legs -- correct underlying, rename trade type, merge/split
@@ -818,9 +818,9 @@ live-synced one.
 Trade list My Trades computes (`portfolio_service.group_into_trades`) --
 `is_covered_call_trade_type`/`is_other_trade_type` split it by `trade_type`
 the same way My CSP's `is_csp_trade_type` already did. My CC then renders
-the same per-leg breakdown as My CSP (breakeven, target P&L, stop-loss
-ratchet -- see My CC below for how Breakeven differs from My CSP's); My
-Other Trades stays at My Trades' own per-trade summary depth (that
+a per-leg breakdown like My CSP's, plus the covered stock's own Holding/
+Avg Price/LTP/Combined P&L alongside the option leg (see My CC below);
+My Other Trades stays at My Trades' own per-trade summary depth (that
 richer per-leg breakdown doesn't generalize to an arbitrary multi-leg
 strategy, see My Other Trades below) and keeps the same Stock/Index/Other
 bucket tables My Trades uses. A Trade lands on My CC only once its Trade
@@ -1316,24 +1316,33 @@ shows a plain caption rather than an empty table.
 Every Trade whose Trade Type is exactly "Covered Call"
 (`is_covered_call_trade_type`, case-insensitive/trimmed) -- one row per
 short-**call** position leg, same Stock/Index/Other bucket split as My
-Trades, same **Underlying**/**Expiry**/**Strike**/**Qty**/**Avg
-Price**/**LTP**/**LTP Underlying**/**Momentum**/**1D/5D/20D** columns as
-My CSP, and the same **Trade Date**/**Max Credit**/**P&L**/**Target
-P&L**/**Stop Loss** mechanics (`csp_max_credit`/`csp_target_pnl`/
-`csp_stop_loss`) -- none of the three are actually put-specific despite
-the name; they're just premium-collected/time-decay-target/ratcheting-
-stop math, equally valid for a short call. A trade's Holding leg (the
-covered stock itself) isn't shown as its own row -- same as My CSP
-silently skipping a stray Holding leg -- but its `Avg Price` (the
-stock's own cost basis) feeds:
+Trades. The option leg's own columns mirror My CSP: **Expiry**/
+**Strike**/**Qty**/**Avg Price**/**LTP**/**Momentum**/**1D/5D/20D**, and
+the same **Trade Date**/**Stop Loss** mechanics
+(`csp_target_pnl`/`csp_stop_loss`) -- renamed **Target Option P&L** and
+relabeled **Credit** (was "Max Credit" on My CSP) -- none of these three
+are actually put-specific despite the `csp_` name; they're just
+premium-collected/time-decay-target/ratcheting-stop math, equally valid
+for a short call.
 
-- **Breakeven** -- unlike My CSP's `Strike - Avg Price` (meaningful only
-  relative to a short put's own strike), a Covered Call's breakeven is
-  relative to the *stock's* cost basis: `Stock Avg Price - Call Avg
-  Price`, followed by how far that sits from the underlying's current
-  price in parentheses, same `(Breakeven / LTP Underlying - 1)` % as My
-  CSP. Shows "—" if the trade has no Holding leg to read a cost basis
-  from (e.g. a naked short call mislabeled "Covered Call").
+A Covered Call's economics can't be judged from the option alone, so
+each row also carries the covered stock's own numbers, read from that
+trade's own Holding leg(s) (summed across lots/brokers if the same
+underlying is split more than one way within a trade):
+
+- **Holding** -- number of shares of the underlying held in this trade.
+- **Avg Stock Price** -- the stock's own investment-weighted average buy
+  price (placed right after **Underlying**, before the option's own
+  **Avg Price**).
+- **Stock LTP** -- the stock's own current price (same broker-live-first,
+  screener-snapshot-fallback resolution as My Holdings' Current Value).
+- **Combined P&L** -- `(Stock LTP - Avg Stock Price) × Holding` (the
+  stock's own P&L) plus the option leg's own P&L, shown as a % of the
+  stock's own investment (`Holding × Avg Stock Price`). "—" unless both
+  the stock and the option leg are priced.
+
+All three stock-side columns show "—"/blank if the trade has no Holding
+leg to read (e.g. a naked short call mislabeled "Covered Call").
 
 ### My Other Trades (`pages/13_My_Other_Trades.py`)
 

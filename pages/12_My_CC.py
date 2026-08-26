@@ -42,11 +42,11 @@ render_portfolio_refresh_button(client, user_id, user_settings.data_provider)
 st.caption(
     'Every short call leg from a Trade whose Trade Type is "Covered Call". Go to My Trades, select a trade, '
     'click "Analyse Trade", and rename its Trade Type to "Covered Call" to have it show up here. Set each '
-    'leg\'s Trade Date on that same "Analyse Trade" page to unlock Target P&L; Stop Loss ratchets up '
-    "automatically as P&L% improves and is saved on every visit. Target P&L changes every day to reflect "
-    "whether there has been higher-than-average decay in the option premium, but it never crosses 95% of Max "
-    "Credit. P&L shows a ✅ once it clears Target P&L, or a ❌ once it falls through Stop Loss. Breakeven is "
-    "the covered stock's own cost basis minus the call premium collected."
+    'leg\'s Trade Date on that same "Analyse Trade" page to unlock Target Option P&L; Stop Loss ratchets up '
+    "automatically as Option P&L% improves and is saved on every visit. Target Option P&L changes every day "
+    "to reflect whether there has been higher-than-average decay in the option premium, but it never crosses "
+    "95% of Credit. Option P&L shows a ✅ once it clears Target Option P&L, or a ❌ once it falls through Stop "
+    "Loss. Combined P&L adds the covered stock's own P&L to Option P&L."
 )
 
 ensure_cache_bust()
@@ -91,17 +91,6 @@ except APIError:
     saved_position_meta = []
 
 
-def _fmt_breakeven(breakeven_price: float | None, breakeven_pct: float | None) -> str:
-    """"₹22,455.00 (-2.27%)" -- the Covered Call breakeven price (stock
-    cost basis - call premium) with how far it sits from the underlying's
-    current price in parentheses, or an em dash when either half is
-    missing (no Holding leg found for this trade, unresolved underlying,
-    or no LTP for it yet)."""
-    if breakeven_price is None or breakeven_pct is None:
-        return "—"
-    return f"{format_inr(breakeven_price)} ({breakeven_pct:+.2f}%)"
-
-
 def _fmt_ltp(ltp: float | None, ltp_as_of) -> str:
     """"₹4.40" for a live LTP, or "₹3.30 (as of 17 Aug 2026)" when it
     came from this app's own end-of-day F&O data instead of a live
@@ -117,15 +106,15 @@ def _fmt_ltp(ltp: float | None, ltp_as_of) -> str:
     return f"{format_inr(ltp)} (as of {ltp_as_of.strftime('%d %b %Y')})"
 
 
-def _fmt_target_pnl(target_pnl: float | None, max_credit: float | None) -> str:
-    """"₹4,275.00 (85.00%)" -- Target P&L with what % of Max Credit it
+def _fmt_target_pnl(target_pnl: float | None, credit: float | None) -> str:
+    """"₹4,275.00 (85.00%)" -- Target Option P&L with what % of Credit it
     represents in parentheses, or an em dash before a Trade Date is set
-    (Target P&L itself is None then)."""
+    (Target Option P&L itself is None then)."""
     if target_pnl is None:
         return "—"
-    if not max_credit:
+    if not credit:
         return format_inr(target_pnl)
-    return f"{format_inr(target_pnl)} ({target_pnl / max_credit * 100:+.2f}%)"
+    return f"{format_inr(target_pnl)} ({target_pnl / credit * 100:+.2f}%)"
 
 
 def _fmt_pnl(pnl: float | None, pnl_pct: float | None, target_pnl: float | None, stop_loss: float | None) -> str:
@@ -159,17 +148,25 @@ def _render_cc_table(
         st.caption("None.")
         return
 
-    # One row per short-call Position leg. The Breakeven column needs the
-    # covered stock's own cost basis, not the option's strike (unlike
-    # CSP) -- looked up per-trade from that trade's own Holding leg,
-    # since a Covered Call trade should carry exactly one.
+    # One row per short-call Position leg. The covered stock itself isn't
+    # its own row -- its qty/avg_price/ltp (Holding, Avg Stock Price,
+    # Stock LTP) are looked up per-trade from that trade's own Holding
+    # leg(s) instead, same as My CSP silently skips a stray Holding leg.
+    # Aggregated (summed qty, investment-weighted avg price) in case a
+    # trade holds the same underlying across more than one lot/broker.
     call_legs = []
     for t in trades:
         holding_legs = [leg for leg in t["legs"] if leg["leg_type"] == "Holding"]
-        stock_avg_price = holding_legs[0]["avg_price"] if holding_legs else None
+        if holding_legs:
+            holding_qty = sum(leg["qty"] for leg in holding_legs)
+            total_investment = sum(leg["investment"] for leg in holding_legs)
+            stock_avg_price = total_investment / holding_qty if holding_qty else None
+        else:
+            holding_qty = None
+            stock_avg_price = None
         for leg in t["legs"]:
             if leg["leg_type"] == "Position":
-                call_legs.append({**leg, "stock_avg_price": stock_avg_price})
+                call_legs.append({**leg, "holding_qty": holding_qty, "stock_avg_price": stock_avg_price})
 
     if not call_legs:
         st.caption("No call legs found for these trades.")
@@ -182,7 +179,8 @@ def _render_cc_table(
     # snapshot above -- only overrides symbols a connected broker actually
     # returned a price for; every other symbol (no broker connected, or
     # connected but that symbol/session didn't come back) keeps its
-    # snapshot value.
+    # snapshot value. Same resolution used for both Stock LTP and the
+    # Momentum/1D/5D/20D columns below, so they always agree.
     live_ltp_by_symbol = load_live_broker_prices(client, user_id, symbols, st.session_state["portfolio_cache_bust"])
     ltp_by_symbol = {**ltp_by_symbol, **live_ltp_by_symbol}
     returns_by_symbol = load_returns_and_pe(client, symbols, st.session_state["portfolio_cache_bust"])
@@ -194,35 +192,50 @@ def _render_cc_table(
         return_1d = rp["return_1d"] if rp else None
         return_5d = rp["return_5d"] if rp else None
         return_20d = rp["return_20d"] if rp else None
-        underlying_ltp = ltp_by_symbol.get(leg["symbol"]) if leg["symbol"] else None
-        breakeven_price = portfolio_service.covered_call_breakeven_price(leg["stock_avg_price"], leg["avg_price"])
-        breakeven_pct = portfolio_service.csp_breakeven_pct(breakeven_price, underlying_ltp)
+        stock_ltp = ltp_by_symbol.get(leg["symbol"]) if leg["symbol"] else None
+        stock_pnl = (
+            (stock_ltp - leg["stock_avg_price"]) * leg["holding_qty"]
+            if stock_ltp is not None and leg["stock_avg_price"] is not None and leg["holding_qty"] is not None
+            else None
+        )
 
         leg_meta = position_meta_by_leg.get((leg["broker"], leg["raw_name"]))
         trade_date = leg_meta.trade_date if leg_meta else None
         existing_stop_loss = leg_meta.stop_loss if leg_meta else None
 
-        max_credit = portfolio_service.csp_max_credit(leg["avg_price"], leg["qty"])
-        target_pnl = portfolio_service.csp_target_pnl(max_credit, trade_date, leg["expiry_date"])
-        new_stop_loss = portfolio_service.csp_stop_loss(existing_stop_loss, max_credit, leg["pnl_pct"])
+        credit = portfolio_service.csp_max_credit(leg["avg_price"], leg["qty"])
+        target_pnl = portfolio_service.csp_target_pnl(credit, trade_date, leg["expiry_date"])
+        new_stop_loss = portfolio_service.csp_stop_loss(existing_stop_loss, credit, leg["pnl_pct"])
         if new_stop_loss is not None and (existing_stop_loss is None or abs(new_stop_loss - existing_stop_loss) > 1e-9):
             portfolio_repo.set_position_stop_loss(client, user_id, portfolio_name, leg["broker"], leg["raw_name"], new_stop_loss)
+
+        combined_pnl = stock_pnl + leg["pnl"] if stock_pnl is not None and leg["pnl"] is not None else None
+        combined_investment = (
+            leg["holding_qty"] * leg["stock_avg_price"]
+            if leg["holding_qty"] is not None and leg["stock_avg_price"] is not None
+            else None
+        )
+        combined_pnl_pct = (
+            combined_pnl / combined_investment * 100 if combined_pnl is not None and combined_investment else None
+        )
 
         table_rows.append(
             {
                 "Trade Date": trade_date.strftime("%d %b %Y") if trade_date else None,
                 "Underlying": leg["symbol"],
+                "Holding": leg["holding_qty"],
+                "Avg Stock Price": leg["stock_avg_price"],
+                "Stock LTP": stock_ltp,
                 "Expiry": leg["expiry_date"].strftime("%d %b %Y") if leg["expiry_date"] else None,
                 "Strike": leg["strike_price"],
                 "Qty": leg["qty"],
                 "Avg Price": leg["avg_price"],
-                "Max Credit": max_credit,
+                "Credit": credit,
                 "LTP": _fmt_ltp(leg["ltp"], leg.get("ltp_as_of")),
-                "P&L": _fmt_pnl(leg["pnl"], leg["pnl_pct"], target_pnl, new_stop_loss),
-                "Target P&L": _fmt_target_pnl(target_pnl, max_credit),
+                "Option P&L": _fmt_pnl(leg["pnl"], leg["pnl_pct"], target_pnl, new_stop_loss),
+                "Target Option P&L": _fmt_target_pnl(target_pnl, credit),
                 "Stop Loss": new_stop_loss,
-                "Breakeven": _fmt_breakeven(breakeven_price, breakeven_pct),
-                "LTP Underlying": underlying_ltp,
+                "Combined P&L": _fmt_pnl(combined_pnl, combined_pnl_pct, None, None),
                 # Same "Momentum" criterion (B) the Dashboard's screener
                 # classifies every stock on -- 1D, 5D, AND 20D returns all
                 # positive -- reused as-is (src.calculations.classification.
@@ -241,10 +254,12 @@ def _render_cc_table(
         hide_index=True,
         key=f"cc_table_{key_suffix}_{slug(portfolio_name)}",
         column_config={
+            "Holding": st.column_config.NumberColumn(format="%,.0f"),
+            "Avg Stock Price": st.column_config.NumberColumn(format="₹%,.2f"),
+            "Stock LTP": st.column_config.NumberColumn(format="₹%,.2f"),
             "Qty": st.column_config.NumberColumn(format="%+,.0f"),
             "Avg Price": st.column_config.NumberColumn(format="₹%,.2f"),
-            "Max Credit": st.column_config.NumberColumn(format="₹%,.2f"),
-            "LTP Underlying": st.column_config.NumberColumn(format="₹%,.2f"),
+            "Credit": st.column_config.NumberColumn(format="₹%,.2f"),
             "1D": st.column_config.NumberColumn(format="%+.2f%%"),
             "5D": st.column_config.NumberColumn(format="%+.2f%%"),
             "20D": st.column_config.NumberColumn(format="%+.2f%%"),
