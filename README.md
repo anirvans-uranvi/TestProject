@@ -1204,11 +1204,16 @@ appears as its own sidebar link). There you can:
   **short** option leg (a short call included -- these three formulas
   were never really put-specific, see My CC), but `Breakeven` is
   specifically the textbook CSP breakeven (`Strike - Avg Price`) and only
-  shows for a genuine short **put** leg -- a Holding, a future, a long
-  option, or a short call all show "—" for it. `LTP Underlying` applies
-  to every leg with a resolved symbol regardless of leg type, since it's
-  a fact about the underlying, not the leg's own instrument. Row order
-  still matches `trade_legs` exactly (no filtering), so the merge/split
+  shows for a genuine short **put** leg -- a future, a long option, or a
+  short call all show "—" for it. A **Holding** (stock) leg instead gets
+  its own `Target P&L` -- a flat 5% of its own investment (`Avg Price ×
+  Qty`), same as My CC's own "Target Stock P&L" -- so `P&L` shows a ✅
+  once that stock's own P&L clears it (`Credit`/`Stop Loss`/`Breakeven`
+  stay "—" for a Holding either way, since there's no premium collected
+  or strike to compute those against). `LTP Underlying` applies to every
+  leg with a resolved symbol regardless of leg type, since it's a fact
+  about the underlying, not the leg's own instrument. Row order still
+  matches `trade_legs` exactly (no filtering), so the merge/split
   row-selection below keeps working unchanged.
 - **Correct the underlying, set the Trade Date, or rename the Trade
   Type** -- one form. Underlying Instrument and Trade Type are free

@@ -2609,18 +2609,40 @@ position in `trade_legs`, unfiltered. `Credit`/`Target P&L`/`Stop Loss`
 persisted exactly like My CSP/My CC) only populate for a leg that's a
 genuine **short** option (`leg_type == "Position"`, `option_type` and
 `strike_price` both set, `qty < 0`) — a short call qualifies too (see My
-CC's own reuse of these same three functions), but a Holding, a future
-(`option_type` is `None`), or a long option all show `None`/"—".
-`Breakeven` is narrower still — it's specifically `csp_breakeven_price`
-(`Strike - Avg Price`), the textbook *put* breakeven, so it only
-populates when the leg is additionally `option_type == OptionType.PE`; a
-short call passes the "short option" gate above for `Credit`/`Target
-P&L`/`Stop Loss` but still shows "—" for `Breakeven`. `LTP Underlying`
-applies to *every* leg with a resolved `symbol`, Holdings included, since
-it describes the underlying itself rather than the specific leg's own
-instrument — the same `load_latest_prices`/`load_live_broker_prices`
-calls My CSP/My CC already make, just over the distinct symbol set across
-this one Trade's legs instead of a whole CSP/CC bucket.
+CC's own reuse of these same three functions), but a future
+(`option_type` is `None`) or a long option shows `None`/"—" for all
+three. `Breakeven` is narrower still — it's specifically
+`csp_breakeven_price` (`Strike - Avg Price`), the textbook *put*
+breakeven, so it only populates when the leg is additionally
+`option_type == OptionType.PE`; a short call passes the "short option"
+gate above for `Credit`/`Target P&L`/`Stop Loss` but still shows "—" for
+`Breakeven`.
+
+**A Holding leg gets its own `Target P&L` instead, on request** — since
+there's no option premium to decay toward a target on a plain stock
+holding, `leg["leg_type"] == "Holding"` takes a separate `elif` branch:
+`target_pnl = 0.05 * leg["avg_price"] * leg["qty"]`, a flat 5% of the
+holding's own investment (`qty` is always positive for a Holding, unlike
+a short leg's negative `qty`, so no `abs()` is needed the way
+`csp_max_credit` needs one) — the same formula My CC's own "Target Stock
+P&L" column uses, just computed inline here rather than via a shared
+`portfolio_service` function (matching how My CC computes its own
+`target_stock_pnl` inline too, not as a reusable function). Feeding this
+into the same `_fmt_pnl(pnl, pnl_pct, target_pnl, stop_loss)` call every
+other leg type already uses means a Holding's `P&L` cell picks up the
+same "✅ once it clears Target P&L" marker for free, with no separate
+formatting path needed — `stop_loss` stays `None` for a Holding either
+way, so there's no equivalent "❌ once it falls through" case for a
+stock, only the ✅ one. `Credit`/`Stop Loss`/`Breakeven` all still stay
+`None`/"—" for a Holding — there's no premium collected or strike to
+compute those against, target P&L aside.
+
+`LTP Underlying` applies to *every* leg with a resolved `symbol`,
+Holdings included, since it describes the underlying itself rather than
+the specific leg's own instrument — the same
+`load_latest_prices`/`load_live_broker_prices` calls My CSP/My CC already
+make, just over the distinct symbol set across this one Trade's legs
+instead of a whole CSP/CC bucket.
 
 **`Momentum`/`1D`/`5D`/`20D` were pulled back out of the table again, on
 request, into their own section right above it** — one tile per distinct

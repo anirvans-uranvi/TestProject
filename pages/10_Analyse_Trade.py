@@ -161,9 +161,10 @@ st.caption(f"Trade Type: {trade['trade_type']} | {trade['leg_count']} leg(s)")
 st.caption(
     "Same columns as My CSP. Credit/Target P&L/Stop Loss only compute for a short option leg (any short "
     "CE/PE, not just a put); Breakeven is specifically the CSP breakeven (Strike - Avg Price), shown only "
-    "for a short put leg -- blank for every other leg shape (a Holding, a future, a long option, a short "
-    "call), same as this app's other CSP-formula reuses. LTP Underlying applies to every leg with a "
-    "resolved symbol, holdings included."
+    "for a short put leg -- blank for every other option leg shape (a future, a long option, a short "
+    "call), same as this app's other CSP-formula reuses. A Holding (stock) leg instead gets a Target P&L "
+    "of 5% of its own investment (Avg Price × Qty), with a ✅ once its P&L clears that. LTP Underlying "
+    "applies to every leg with a resolved symbol, holdings included."
 )
 
 trade_legs = trade["legs"]
@@ -232,6 +233,14 @@ for leg in trade_legs:
         new_stop_loss = portfolio_service.csp_stop_loss(existing_stop_loss, credit, leg.get("pnl_pct"))
         if new_stop_loss is not None and (existing_stop_loss is None or abs(new_stop_loss - existing_stop_loss) > 1e-9):
             portfolio_repo.set_position_stop_loss(client, user_id, portfolio_name, leg["broker"], leg["raw_name"], new_stop_loss)
+    elif leg["leg_type"] == "Holding":
+        # No option premium to decay toward a target on a plain stock
+        # holding -- same flat-5%-of-investment Target P&L My CC's own
+        # "Target Stock P&L" uses instead (avg_price * qty is the
+        # holding's own investment; qty is always positive for a
+        # Holding, so no abs() needed here unlike csp_max_credit's short
+        # leg case).
+        target_pnl = 0.05 * leg["avg_price"] * leg["qty"]
 
     # Breakeven is specifically the *CSP* breakeven (Strike - Avg Price) --
     # only a valid concept for a short put, unlike Credit/Target/Stop Loss
