@@ -898,6 +898,29 @@ functions through it. `tests/test_dhan_instrument_repo.py`'s
 with a fake client that mimics PostgREST's own `.range()` paging, so a
 future regression back to a plain `.select()` fails the same way.
 
+**A fifth bug, specific to BSE-listed index legs**: `DhanProvider.get_fo_quotes`
+resolved every contract's Dhan `security_id` correctly (`resolve_fo_security_id`
+was never the problem) but then queried **all** of them under a single
+hardcoded `"NSE_FNO"` segment in the `get_ltp_by_security_id` call. SENSEX/
+BANKEX are the only F&O legs allowed to resolve cross-exchange (migration
+`0031`'s stock-legs-are-NSE-only rule doesn't apply to index legs -- see
+`_download_fo_master`'s docstring), so their `security_id` genuinely lists
+on `BSE_FNO`, not `NSE_FNO` -- Dhan's LTP endpoint silently returns nothing
+for a security_id queried under the wrong segment, indistinguishable in
+the "Stock & Option Data Refresh" summary's `fo_missing` list from "Dhan
+has no matching contract, or it's simply not trading" for those exact
+contracts (confirmed live: 2 of 254 F&O contracts stuck, both SENSEX
+strikes, every NSE-listed contract unaffected). Fixed by having
+`_download_fo_master` keep (not just filter on and discard) each row's
+own exchange in a new `exchange` column -- persisted through
+`dhan_fo_instruments` via migration `0037` (`text not null default 'NSE'
+check (exchange in ('NSE', 'BSE'))`, the default only a bridge for
+existing rows until the next wholesale replace) and through
+`dhan_instrument_repo.get_fo_instruments`'s `SELECT` -- and having
+`get_fo_quotes` split resolved `security_id`s into `NSE_FNO`/`BSE_FNO`
+lists by that column before calling `get_ltp_by_security_id`, instead of
+one hardcoded list.
+
 `user_live_prices`, widened by migration `0032` from an equity-only
 `(user_id, symbol)` table to `(user_id, symbol, expiry_date, strike_price,
 option_type)` -- `option_type='EQ'` (default) for the pre-existing equity/

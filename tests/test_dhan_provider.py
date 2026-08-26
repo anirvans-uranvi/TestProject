@@ -488,6 +488,17 @@ class TestLoadFoInstrumentMaster:
 
         assert master[master["security_id"] == "70001"].iloc[0]["underlying_symbol"] == "SENSEX"
 
+    def test_exchange_column_reflects_each_rows_own_listing(self, monkeypatch):
+        # Kept (not discarded after filtering) so get_fo_quotes can query
+        # each resolved security_id under its real exchange segment --
+        # see TestGetFoQuotes' BSE_FNO test for the live bug this fixes.
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
+
+        master = dhan_provider._load_fo_instrument_master()
+
+        assert master[master["security_id"] == "50002"].iloc[0]["exchange"] == "NSE"
+        assert master[master["security_id"] == "70001"].iloc[0]["exchange"] == "BSE"
+
     def test_bse_stock_leg_still_excluded_despite_index_legs_now_allowed_cross_exchange(self, monkeypatch):
         monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
 
@@ -557,7 +568,7 @@ class TestLoadFoInstrumentMasterDbCache:
             lambda client: [
                 {
                     "security_id": "50002", "underlying_symbol": "RELIANCE", "expiry_date": "2026-09-24",
-                    "strike_price": 3000.0, "option_type": "CE",
+                    "strike_price": 3000.0, "option_type": "CE", "exchange": "NSE",
                 }
             ],
         )
@@ -566,6 +577,7 @@ class TestLoadFoInstrumentMasterDbCache:
 
         assert df["underlying_symbol"].tolist() == ["RELIANCE"]
         assert df["expiry_date"].iloc[0] == date(2026, 9, 24)
+        assert df["exchange"].tolist() == ["NSE"]
 
     def test_stale_or_missing_db_entry_downloads_and_persists(self, monkeypatch):
         monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
@@ -663,6 +675,44 @@ class TestGetFoQuotes:
             ("RELIANCE", date(2026, 8, 27), 0.0, "FUT"): 2950.0,
             ("RELIANCE", date(2026, 8, 27), 3000.0, "CE"): 45.5,
             ("RELIANCE", date(2026, 8, 27), 2900.0, "PE"): 32.0,
+        }
+
+    def test_bse_listed_contract_is_queried_under_bse_fno_not_nse_fno(self, monkeypatch):
+        # The real live bug: every resolved contract used to be queried
+        # under one hardcoded "NSE_FNO" segment, regardless of which
+        # exchange it actually resolved on. SENSEX (BSE_FNO) resolves a
+        # real security_id fine (see TestResolveFoSecurityId) but Dhan's
+        # LTP endpoint silently returns nothing for a BSE-listed id
+        # queried under NSE_FNO -- confirmed live as the exact "Not
+        # live-priced" symptom for SENSEX/BANKEX contracts only.
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
+        captured = {}
+
+        def fake_request(method, url, json=None, headers=None, timeout=None):
+            captured["json"] = json
+            return _FakeResponse(
+                200,
+                json_data={
+                    "data": {
+                        "NSE_FNO": {"50002": {"last_price": 45.5}},
+                        "BSE_FNO": {"70001": {"last_price": 350.0}},
+                    }
+                },
+            )
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
+        contracts = [
+            ("RELIANCE", date(2026, 8, 27), 3000.0, "CE"),
+            ("SENSEX", date(2026, 8, 27), 81000.0, "CE"),
+        ]
+
+        result = provider.get_fo_quotes(contracts)
+
+        assert captured["json"] == {"NSE_FNO": [50002], "BSE_FNO": [70001]}
+        assert result == {
+            ("RELIANCE", date(2026, 8, 27), 3000.0, "CE"): 45.5,
+            ("SENSEX", date(2026, 8, 27), 81000.0, "CE"): 350.0,
         }
 
     def test_unresolvable_contract_is_skipped_not_fatal(self, monkeypatch):

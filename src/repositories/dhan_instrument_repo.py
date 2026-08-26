@@ -85,7 +85,7 @@ def get_fo_instruments(client: Client) -> list[dict]:
     # resolving well under 2% of F&O contracts before this fix.
     return _paginate(
         lambda: client.table("dhan_fo_instruments").select(
-            "security_id, underlying_symbol, expiry_date, strike_price, option_type"
+            "security_id, underlying_symbol, expiry_date, strike_price, option_type, exchange"
         )
     )
 

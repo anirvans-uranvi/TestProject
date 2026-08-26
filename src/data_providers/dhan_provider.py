@@ -309,6 +309,15 @@ def _download_fo_master(raw_df: pd.DataFrame) -> pd.DataFrame:
     instrument = df[instrument_col].astype(str).str.upper()
     is_index = instrument.isin(["FUTIDX", "OPTIDX"])
     is_stock = instrument.isin(["FUTSTK", "OPTSTK"])
+    # Kept (not just used to filter and discarded) -- get_fo_quotes needs
+    # to know which exchange segment (NSE_FNO/BSE_FNO) a resolved
+    # security_id actually lives on. Confirmed live: SENSEX/BANKEX
+    # (BSE-only index legs, allowed cross-exchange above) resolve to a
+    # real security_id fine, but Dhan's LTP endpoint silently returns
+    # nothing for a BSE-listed security_id queried under "NSE_FNO" --
+    # indistinguishable from "contract not found" in the Stock & Option
+    # Data Refresh summary until this column existed to fix it.
+    df["exchange"] = exch
     df = df[(is_index & exch.isin(["NSE", "BSE"])) | (is_stock & (exch == "NSE"))]
     df["expiry_date"] = pd.to_datetime(df["expiry_date"], errors="coerce").dt.date
     df["strike_price"] = pd.to_numeric(df["strike_price"], errors="coerce").fillna(0.0)
@@ -326,7 +335,7 @@ def _download_fo_master(raw_df: pd.DataFrame) -> pd.DataFrame:
             "instrument-type column resolution is likely wrong for this download; update column resolution"
         )
     df["security_id"] = df["security_id"].astype(str)
-    return df[["security_id", "underlying_symbol", "expiry_date", "strike_price", "option_type"]]
+    return df[["security_id", "underlying_symbol", "expiry_date", "strike_price", "option_type", "exchange"]]
 
 
 def _load_fo_instrument_master(client: Client | None = None) -> pd.DataFrame:
@@ -606,13 +615,20 @@ class DhanProvider(PriceDataProvider):
         option (`strike_price` is ignored for a future, still present in
         the key for a uniform shape). Resolves each contract to a Dhan
         security_id via resolve_fo_security_id and batches them all into
-        one get_ltp_by_security_id call (single NSE_FNO POST, same
-        multi-instrument batching get_quotes already relies on for
-        equities). A contract Dhan's F&O master doesn't resolve (an
-        expired/delisted strike, an index leg, a schema-drift miss) is
-        silently skipped rather than aborting the whole batch -- this
-        feeds a best-effort live-price overlay (Dashboard CSP/CC,
-        portfolio positions), not an all-or-nothing fetch."""
+        one get_ltp_by_security_id call, split into NSE_FNO/BSE_FNO
+        segments by each resolved id's own exchange (see
+        _download_fo_master's "exchange" column) -- same multi-instrument
+        batching get_quotes already relies on for equities, but a real
+        Dhan segment can't be hardcoded here the way NSE_EQ is there:
+        confirmed live, querying a BSE-listed security_id (SENSEX/BANKEX,
+        the only F&O legs that resolve cross-exchange) under a hardcoded
+        "NSE_FNO" silently returned nothing for it, indistinguishable
+        from "Dhan has no matching contract" in the Stock & Option Data
+        Refresh summary. A contract Dhan's F&O master doesn't resolve (an
+        expired/delisted strike, a schema-drift miss) is silently skipped
+        rather than aborting the whole batch -- this feeds a best-effort
+        live-price overlay (Dashboard CSP/CC, portfolio positions), not
+        an all-or-nothing fetch."""
         if not contracts:
             return {}
         # Loads (and lets a systemic failure propagate from) the F&O
@@ -623,7 +639,8 @@ class DhanProvider(PriceDataProvider):
         # contract in the loop and get silently caught by the
         # per-contract `except ProviderError: continue`, indistinguishable
         # from "just didn't resolve".
-        _load_fo_instrument_master(self._supabase_client)
+        master = _load_fo_instrument_master(self._supabase_client)
+        exchange_by_security_id = dict(zip(master["security_id"], master["exchange"]))
         security_id_to_contract: dict[str, tuple[str, date, float, str]] = {}
         for contract in contracts:
             symbol, expiry_date, strike_price, option_type = contract
@@ -634,7 +651,11 @@ class DhanProvider(PriceDataProvider):
             except ProviderError:
                 continue
             security_id_to_contract[security_id] = contract
-        prices_by_security_id = self.get_ltp_by_security_id({"NSE_FNO": list(security_id_to_contract)})
+        ids_by_segment: dict[str, list[str]] = {"NSE_FNO": [], "BSE_FNO": []}
+        for security_id in security_id_to_contract:
+            segment = "BSE_FNO" if exchange_by_security_id.get(security_id) == "BSE" else "NSE_FNO"
+            ids_by_segment[segment].append(security_id)
+        prices_by_security_id = self.get_ltp_by_security_id(ids_by_segment)
         return {
             contract: prices_by_security_id[security_id]
             for security_id, contract in security_id_to_contract.items()

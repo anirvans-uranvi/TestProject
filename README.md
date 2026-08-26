@@ -497,6 +497,20 @@ regardless of which page triggered the refresh.
   (58/61 symbols resolving one click, 3/61 minutes later) rather than a
   deterministic truncation bug during live debugging. Fixed by paginating
   both reads (`_paginate`, the same helper/fix `fo_repo` already uses).
+
+  **A third, narrower bug only hit SENSEX/BANKEX** -- the only F&O legs
+  allowed to resolve on BSE instead of NSE (stock legs are NSE-only,
+  migration `0031`). `DhanProvider.get_fo_quotes` resolved their
+  `security_id` correctly but then queried *every* resolved contract
+  under one hardcoded `"NSE_FNO"` segment; Dhan's LTP endpoint silently
+  returns nothing for a security_id queried under the wrong exchange
+  segment, indistinguishable from "Dhan has no matching contract" in the
+  refresh summary's missing-contracts caption (confirmed live: 2 of 254
+  F&O contracts stuck, both SENSEX strikes). Fixed by having
+  `_download_fo_master` keep each row's own exchange (a new column,
+  persisted via migration `0037`) and having `get_fo_quotes` split
+  resolved security_ids into `NSE_FNO`/`BSE_FNO` lists by it, instead of
+  one hardcoded list.
 - **Portfolio Refresh** -- re-syncs holdings/positions from the
   connected broker (`src/utils/data_provider_settings.py::sync_broker_portfolio`,
   wrapping the same `_sync_dhan`/`_sync_zerodha` Settings' "Save & Sync"/
