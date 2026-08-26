@@ -466,6 +466,20 @@ regardless of which page triggered the refresh.
   regardless of threading, so sequential execution here gives up only the
   overlap of the two legs' own network *wait* time -- a small trade for
   not corrupting Supabase connections.
+
+  Going sequential above only serializes one *call*'s own two legs --
+  it doesn't stop two different users (or two tabs) independently hitting
+  a cache-cold `dhan_equity_instruments`/`dhan_fo_instruments` at once,
+  since that shared table is exactly what migration `0035` is for.
+  `dhan_instrument_repo`'s replace functions used to `delete()` then
+  `insert()` the fresh rows -- two overlapping callers' inserts could
+  land the same `security_id` (the primary key) twice, confirmed live as
+  `duplicate key value violates unique constraint
+  "dhan_equity_instruments_pkey"` surfacing through the Stock & Option
+  Data Refresh button. Fixed by upserting (`on_conflict="security_id"`)
+  instead of inserting -- a colliding row from a racing writer now just
+  overwrites instead of erroring, since both writers downloaded the same
+  Dhan CSV and would write identical data for that ID anyway.
 - **Portfolio Refresh** -- re-syncs holdings/positions from the
   connected broker (`src/utils/data_provider_settings.py::sync_broker_portfolio`,
   wrapping the same `_sync_dhan`/`_sync_zerodha` Settings' "Save & Sync"/

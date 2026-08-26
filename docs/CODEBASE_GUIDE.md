@@ -830,6 +830,36 @@ call (`_throttle`'s global rate gate) -- are already serialized by locks
 regardless of threading, going sequential here gives up only the overlap
 of the two legs' own network *wait* time.
 
+**A third concurrency bug, this one across separate sessions rather than
+two threads in one call**: going sequential above only serializes the
+equity/F&O legs *within* one `_refresh_user_live_prices` call -- it does
+nothing about two *different* users (or two tabs of the same user) each
+independently finding today's `dhan_equity_instruments`/
+`dhan_fo_instruments` cache cold and racing to repopulate the same shared
+table at once, which is exactly what these tables are for (migration
+`0035`'s whole point). `dhan_instrument_repo.replace_equity_instruments`/
+`replace_fo_instruments` used to `delete()` the whole table then
+`insert()` the fresh rows chunk-by-chunk -- two overlapping callers'
+inserts can interleave against the same primary key (`security_id`),
+confirmed live as `duplicate key value violates unique constraint
+"dhan_equity_instruments_pkey"` (`postgrest.exceptions.APIError`,
+`23505`) surfacing all the way up through `get_quotes`/`get_fo_quotes` to
+the "Stock & Option Data Refresh" button. Fixed by switching the write
+half from `insert()` to `upsert(chunk, on_conflict="security_id")` --
+same convention already used by every other replace-semantics repo in
+this codebase (`companies_repo`, `fo_repo`, `portfolio_repo`, ...); a
+colliding chunk from a racing writer now just overwrites instead of
+erroring, since both writers downloaded the same Dhan CSV and would
+write identical data for that `security_id` anyway. The `delete()` half
+is untouched and doesn't need the same fix -- two concurrent deletes of
+an already-empty table are naturally idempotent, unlike two concurrent
+inserts targeting the same primary key. `tests/test_dhan_instrument_repo.py`
+regression-locks this with a fake client that enforces the same
+primary-key uniqueness Postgres does, including one test that confirms a
+plain `.insert()` *would* reproduce the original error on this fake
+client -- so a future revert back to `insert()` fails the suite the same
+way it failed in production.
+
 `user_live_prices`, widened by migration `0032` from an equity-only
 `(user_id, symbol)` table to `(user_id, symbol, expiry_date, strike_price,
 option_type)` -- `option_type='EQ'` (default) for the pre-existing equity/
