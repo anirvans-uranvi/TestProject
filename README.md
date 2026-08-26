@@ -480,6 +480,23 @@ regardless of which page triggered the refresh.
   instead of inserting -- a colliding row from a racing writer now just
   overwrites instead of erroring, since both writers downloaded the same
   Dhan CSV and would write identical data for that ID anyway.
+
+  **A separate, more consequential bug hit resolution itself, not just a
+  crash**: `dhan_instrument_repo.get_equity_instruments`/`get_fo_instruments`
+  -- read once a `provider_fetch_log` entry already exists for today --
+  used a plain, unpaginated `.select().execute()`, hitting the same
+  "PostgREST caps a response at 1000 rows" limit already fixed once
+  before for the Dashboard's F&O queries (see "Futures & Options" below).
+  A 9,854-row `dhan_equity_instruments` table only ever returned its
+  first 1,000 rows through this path -- RELIANCE/TCS/HDFCBANK/SBIN and
+  most of the Nifty50 sorted past that page and resolved as "not found."
+  This only bit a *second* (or later) refresh of the day from a
+  *different* process -- the first, cache-cold refresh builds its data
+  straight from the Dhan download and never round-trips through this
+  query -- which is why it looked like intermittent Dhan-side flakiness
+  (58/61 symbols resolving one click, 3/61 minutes later) rather than a
+  deterministic truncation bug during live debugging. Fixed by paginating
+  both reads (`_paginate`, the same helper/fix `fo_repo` already uses).
 - **Portfolio Refresh** -- re-syncs holdings/positions from the
   connected broker (`src/utils/data_provider_settings.py::sync_broker_portfolio`,
   wrapping the same `_sync_dhan`/`_sync_zerodha` Settings' "Save & Sync"/

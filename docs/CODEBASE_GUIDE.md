@@ -860,6 +860,44 @@ plain `.insert()` *would* reproduce the original error on this fake
 client -- so a future revert back to `insert()` fails the suite the same
 way it failed in production.
 
+**A fourth bug, this one making resolution itself unreliable rather than
+crashing anything**: `dhan_instrument_repo.get_equity_instruments`/
+`get_fo_instruments` -- the DB-cache-read path `_load_instrument_master`/
+`_load_fo_instrument_master` take once a `provider_fetch_log` entry
+already exists for today -- used a plain, unpaginated `.select().execute()`.
+This is the exact same PostgREST-caps-a-response-at-1000-rows bug
+`fo_repo._paginate` already exists to fix (see the Futures & Options
+section's "A real bug this surfaced" above) -- confirmed live here too:
+`dhan_equity_instruments` had 9,854 rows, the unpaginated SELECT returned
+exactly 1,000, and every `trading_symbol` sorting past that page --
+RELIANCE, TCS, HDFCBANK, SBIN, and the large majority of the Nifty50 --
+resolved as `no Dhan security_id found`, indistinguishable from a
+genuinely unlisted symbol. `dhan_fo_instruments` (85,000+ rows) was even
+more exposed -- under 2% of contracts resolvable through this path.
+
+**Why this looked like intermittent Dhan-side flakiness rather than a
+deterministic bug, across several rounds of live debugging**: the
+*first* instrument-master load of an IST day is cache-cold, so it builds
+its DataFrame straight from the Dhan CSV download and caches that
+complete DataFrame in-memory (`_equity_master_cache`/`_fo_master_cache`)
+-- it never round-trips through this SELECT at all. Any later call in
+that *same* long-lived Streamlit process hits the warm in-memory cache
+and also sees full resolution. Only a call in a *different* process (a
+separate Streamlit Cloud worker, or the same worker after a restart)
+that finds today's cache already warm goes through
+`get_equity_instruments`/`get_fo_instruments` and hit the 1,000-row
+truncation -- so whether a given "Stock & Option Data Refresh" click
+resolved 58/61 symbols or 3/61 depended on which process happened to
+handle it, not on Dhan's API or the time of day, even though the
+symptom (wildly different resolution counts minutes apart) looked
+exactly like upstream flakiness during live investigation. Fixed by
+giving `dhan_instrument_repo` its own local `_paginate` helper (same
+implementation as `fo_repo`'s) and routing both `get_*_instruments`
+functions through it. `tests/test_dhan_instrument_repo.py`'s
+`TestGetEquityInstruments`/`TestGetFoInstruments` regression-lock this
+with a fake client that mimics PostgREST's own `.range()` paging, so a
+future regression back to a plain `.select()` fails the same way.
+
 `user_live_prices`, widened by migration `0032` from an equity-only
 `(user_id, symbol)` table to `(user_id, symbol, expiry_date, strike_price,
 option_type)` -- `option_type='EQ'` (default) for the pre-existing equity/

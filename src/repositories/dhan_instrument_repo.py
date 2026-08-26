@@ -26,9 +26,38 @@ def _chunked(rows: list[dict], size: int = _CHUNK):
         yield rows[i : i + size]
 
 
+def _paginate(query_builder, page_size: int = 1000) -> list[dict]:
+    """Runs `query_builder` (a callable that returns a fresh query) across
+    all pages -- same helper (and same real bug) as fo_repo._paginate:
+    PostgREST caps a single response at a server-configured max (1000 rows
+    on this project) regardless of how many rows actually match. Confirmed
+    live here as the same class of silent truncation: get_equity_instruments
+    without this returned exactly 1000 of 9,854 rows, and whichever
+    trading_symbols sorted past that page (RELIANCE, TCS, HDFCBANK, SBIN,
+    ...) resolved as if they didn't exist -- not an error, just a symbol
+    that "couldn't be found", indistinguishable from a genuinely unlisted
+    one. This only bites the *second* (or later) instrument-master load of
+    an IST day -- the first, cache-cold load builds its DataFrame straight
+    from the Dhan download and never round-trips through this SELECT at
+    all (see dhan_provider.py's _load_instrument_master), which is why this
+    looked like intermittent Dhan-side flakiness rather than a deterministic
+    bug: whichever caller happens to hit the warm in-memory cache (the same
+    Streamlit process that did the download) always saw full resolution,
+    while a different process/worker reading the "already fresh today" DB
+    cache saw the truncated 1000-row slice every time."""
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page = query_builder().range(offset, offset + page_size - 1).execute().data or []
+        rows.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+    return rows
+
+
 def get_equity_instruments(client: Client) -> list[dict]:
-    resp = client.table("dhan_equity_instruments").select("security_id, trading_symbol").execute()
-    return resp.data or []
+    return _paginate(lambda: client.table("dhan_equity_instruments").select("security_id, trading_symbol"))
 
 
 def replace_equity_instruments(client: Client, rows: list[dict]) -> None:
@@ -50,12 +79,15 @@ def replace_equity_instruments(client: Client, rows: list[dict]) -> None:
 
 
 def get_fo_instruments(client: Client) -> list[dict]:
-    resp = (
-        client.table("dhan_fo_instruments")
-        .select("security_id, underlying_symbol, expiry_date, strike_price, option_type")
-        .execute()
+    # Paginated for the same reason get_equity_instruments is -- this
+    # table is even more exposed to the truncation bug (85,000+ rows vs.
+    # the equity slice's ~10,000), so the DB-cache-read path was silently
+    # resolving well under 2% of F&O contracts before this fix.
+    return _paginate(
+        lambda: client.table("dhan_fo_instruments").select(
+            "security_id, underlying_symbol, expiry_date, strike_price, option_type"
+        )
     )
-    return resp.data or []
 
 
 def replace_fo_instruments(client: Client, rows: list[dict]) -> None:

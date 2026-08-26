@@ -1,16 +1,35 @@
-"""Tests for dhan_instrument_repo's replace_equity_instruments/
-replace_fo_instruments -- specifically that they upsert rather than
-plain-insert. Confirmed live: dhan_equity_instruments/dhan_fo_instruments
-(migration 0035) are shared across every user, so two Streamlit sessions
-can independently find today's cache cold and race to repopulate it at
-once (most likely right after IST midnight, when everyone's first click
-of the day hits a cold cache together). Both download ~identical rows
-and both delete-then-write, so a plain `.insert()` can land two rows with
-the same security_id (the primary key) in the same window and raise
-`duplicate key value violates unique constraint
-"dhan_equity_instruments_pkey"`. This fake client enforces the same
-primary-key uniqueness Postgres would, so a regression back to `.insert`
-fails this test the same way it failed in production."""
+"""Tests for dhan_instrument_repo -- two independent live bugs fixed here:
+
+1. replace_equity_instruments/replace_fo_instruments upsert rather than
+   plain-insert. Confirmed live: dhan_equity_instruments/dhan_fo_instruments
+   (migration 0035) are shared across every user, so two Streamlit sessions
+   can independently find today's cache cold and race to repopulate it at
+   once (most likely right after IST midnight, when everyone's first click
+   of the day hits a cold cache together). Both download ~identical rows
+   and both delete-then-write, so a plain `.insert()` can land two rows with
+   the same security_id (the primary key) in the same window and raise
+   `duplicate key value violates unique constraint
+   "dhan_equity_instruments_pkey"`. TestReplaceEquityInstruments/
+   TestReplaceFoInstruments's fake client enforces the same primary-key
+   uniqueness Postgres would, so a regression back to `.insert` fails the
+   same way it failed in production.
+
+2. get_equity_instruments/get_fo_instruments paginate -- same bug, same
+   fix (fo_repo._paginate) as fo_repo.get_all_open_options/
+   get_all_open_futures already needed: PostgREST caps a single response
+   at 1000 rows regardless of how many actually match. Confirmed live:
+   with a plain unpaginated `.select().execute()`, a 9,854-row
+   dhan_equity_instruments table returned exactly 1,000 rows, and every
+   trading_symbol sorting past that page -- RELIANCE, TCS, HDFCBANK, SBIN,
+   ... -- resolved as "not found", indistinguishable from a genuinely
+   unlisted symbol. This only bit the *second* (or later) instrument-master
+   load of an IST day, since the first, cache-cold load builds its
+   DataFrame straight from the Dhan download and never round-trips through
+   this SELECT at all -- which is why it looked like intermittent
+   Dhan-side flakiness rather than a deterministic truncation bug.
+   TestGetEquityInstruments/TestGetFoInstruments's fake client mimics
+   PostgREST's own `.range()` paging so a regression back to an
+   unpaginated `.select()` fails the same way."""
 from __future__ import annotations
 
 import types
@@ -141,3 +160,81 @@ class TestReplaceFoInstruments:
         dhan_instrument_repo.replace_fo_instruments(client, batch)
         dhan_instrument_repo.replace_fo_instruments(client, batch)  # must not raise
         assert len(client.store["dhan_fo_instruments"]) == 20
+
+
+class _FakeRangeQuery:
+    """Mimics PostgREST's own `.select().range(start, end).execute()` --
+    only .range()/.execute() are needed here since _paginate() calls the
+    query-builder callable fresh for each page and applies .range() itself
+    (same fake shape tests/test_fo_repo.py's _FakeRangeQuery uses for
+    fo_repo._paginate)."""
+
+    def __init__(self, all_rows: list[dict]):
+        self.all_rows = all_rows
+        self._start = 0
+        self._end = 0
+
+    def range(self, start: int, end: int):
+        self._start, self._end = start, end
+        return self
+
+    def execute(self):
+        return types.SimpleNamespace(data=self.all_rows[self._start : self._end + 1])
+
+
+class _FakeReadClient:
+    """Just enough of the Client interface for get_equity_instruments/
+    get_fo_instruments: `.table(name).select(...)` returns a fresh
+    _FakeRangeQuery over that table's full row set every call, exactly
+    like a real `client.table(...).select(...)` builder does before
+    `.range()` is applied."""
+
+    def __init__(self, rows: list[dict]):
+        self.rows = rows
+
+    def table(self, _name):
+        return self
+
+    def select(self, *args, **kwargs):
+        return _FakeRangeQuery(self.rows)
+
+
+class TestGetEquityInstruments:
+    def test_paginates_past_the_1000_row_postgrest_cap(self):
+        # The exact real bug: 9,854 real rows, a plain unpaginated
+        # .select().execute() only ever returns the first 1000.
+        rows = [{"security_id": str(i), "trading_symbol": f"SYM{i}"} for i in range(9854)]
+        client = _FakeReadClient(rows)
+        result = dhan_instrument_repo.get_equity_instruments(client)
+        assert len(result) == 9854
+
+    def test_a_symbol_past_the_first_page_is_still_resolvable(self):
+        rows = [{"security_id": str(i), "trading_symbol": f"SYM{i}"} for i in range(1500)]
+        client = _FakeReadClient(rows)
+        result = dhan_instrument_repo.get_equity_instruments(client)
+        symbols = {r["trading_symbol"] for r in result}
+        assert "SYM1499" in symbols  # would be missing under the old unpaginated bug
+
+    def test_small_table_under_one_page_is_unaffected(self):
+        rows = [{"security_id": "1", "trading_symbol": "RELIANCE"}]
+        client = _FakeReadClient(rows)
+        assert dhan_instrument_repo.get_equity_instruments(client) == rows
+
+
+class TestGetFoInstruments:
+    def test_paginates_past_the_1000_row_postgrest_cap(self):
+        # 85,000+ rows in production -- even more exposed to the
+        # truncation bug than the equity table.
+        rows = [
+            {
+                "security_id": str(i),
+                "underlying_symbol": "NIFTY",
+                "expiry_date": "2026-09-30",
+                "strike_price": 25000.0,
+                "option_type": "CE",
+            }
+            for i in range(2500)
+        ]
+        client = _FakeReadClient(rows)
+        result = dhan_instrument_repo.get_fo_instruments(client)
+        assert len(result) == 2500
