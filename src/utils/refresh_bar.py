@@ -362,6 +362,114 @@ def _render_live_prices_summary() -> None:
         st.caption(f"Not live-priced (Dhan has no matching contract, or it's simply not trading): {names}{suffix}")
 
 
+def _dhan_equity_etf_universe(client, user_id: str) -> tuple[str, ...]:
+    """Every symbol a Dhan account's stock-side live-price refresh should
+    quote -- Nifty50 constituents, this account's own portfolio symbols,
+    and every tracked ETF -- the same union `_refresh_user_live_prices`
+    builds for its own Dhan branch. Duplicated rather than shared with
+    that function so the combined refresh's own code path (also used by
+    Zerodha) never has to change to support the standalone "Stock Data
+    Refresh from Dhan" button below."""
+    symbols = (
+        {c.symbol for c in companies_repo.list_current_constituents(client)}
+        | set(portfolio_repo.list_portfolio_symbols(client, user_id))
+        | {c.symbol for c in companies_repo.list_all_companies(client) if c.company_type == CompanyType.ETF}
+    )
+    return tuple(sorted(symbols))
+
+
+def _refresh_dhan_stock_only(client, user_id: str) -> dict:
+    """Backs "Stock Data Refresh from Dhan" -- the equity/ETF leg of a
+    Dhan live-price refresh on its own, skipping F&O entirely."""
+    connection = portfolio_repo.get_broker_connection(client, user_id, "Dhan")
+    if connection is None or not connection.access_token:
+        return {"error": "No connected Dhan account yet -- connect one in Settings' Data Provider section."}
+    symbols = _dhan_equity_etf_universe(client, user_id)
+    result = _refresh_dhan_equity_leg(client, user_id, connection, symbols)
+    if result.get("error"):
+        return {"error": result["error"]}
+    return {"quoted": len(result["prices"]), "total": len(symbols)}
+
+
+def _refresh_dhan_option_only(client, user_id: str) -> dict:
+    """Backs "Option Data Refresh from Dhan" -- the F&O leg of a Dhan
+    live-price refresh on its own, skipping equity/ETF entirely."""
+    connection = portfolio_repo.get_broker_connection(client, user_id, "Dhan")
+    if connection is None or not connection.access_token:
+        return {"error": "No connected Dhan account yet -- connect one in Settings' Data Provider section."}
+    return _refresh_dhan_fo_leg(client, user_id, connection)
+
+
+def _run_dhan_stock_only_refresh(client, user_id: str) -> None:
+    with st.spinner("Refreshing live Dhan stock quotes..."):
+        st.session_state["_refresh_bar_dhan_stock_only"] = _refresh_dhan_stock_only(client, user_id)
+    st.cache_data.clear()
+    st.rerun()
+
+
+def _run_dhan_option_only_refresh(client, user_id: str) -> None:
+    with st.spinner("Refreshing live Dhan option/futures quotes..."):
+        st.session_state["_refresh_bar_dhan_option_only"] = _refresh_dhan_option_only(client, user_id)
+    st.cache_data.clear()
+    st.rerun()
+
+
+def _render_dhan_stock_only_summary() -> None:
+    summary = st.session_state.pop("_refresh_bar_dhan_stock_only", None)
+    if not summary:
+        return
+    if summary.get("error"):
+        st.error(summary["error"])
+        return
+    st.success(f"✅ Cached live Dhan quotes for {summary['quoted']} of {summary['total']} watched symbols.")
+
+
+def _render_dhan_option_only_summary() -> None:
+    summary = st.session_state.pop("_refresh_bar_dhan_option_only", None)
+    if not summary:
+        return
+    if summary.get("error"):
+        # No connected Dhan account -- _refresh_dhan_option_only's own
+        # early-return shape, distinct from a per-contract `fo_error`
+        # below (which still means the connection itself was fine).
+        st.error(summary["error"])
+        return
+    if summary.get("fo_error"):
+        st.error(f"Futures/option live pricing failed: {summary['fo_error']}")
+        return
+    st.success(f"✅ Cached live Dhan quotes for {summary['fo_quoted']} of {summary['fo_total']} futures/option contracts.")
+    if summary.get("fo_missing"):
+        shown = summary["fo_missing"][:20]
+        names = ", ".join(_fmt_fo_contract(c) for c in shown)
+        suffix = f", +{len(summary['fo_missing']) - 20} more" if len(summary["fo_missing"]) > 20 else ""
+        st.caption(f"Not live-priced (Dhan has no matching contract, or it's simply not trading): {names}{suffix}")
+
+
+def _render_dhan_stock_option_refresh_buttons(client, user_id: str) -> None:
+    """The Dhan-provider case of render_stock_refresh_button -- unlike
+    Zerodha/YFinance (a single combined button each), Dhan gets three:
+    the original combined refresh (relabeled "... from Dhan" to
+    disambiguate from the other two) plus two new ones isolating just its
+    equity/ETF leg or just its F&O leg, each reusing
+    _refresh_dhan_equity_leg/_refresh_dhan_fo_leg directly rather than
+    going through the combined _refresh_user_live_prices (which always
+    runs both and is also Zerodha's own code path -- kept untouched)."""
+    st.caption("Stock LTP source: live Dhan quotes (Data Provider setting, in Settings).")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("Stock & Option Data Refresh from Dhan", key="refresh_bar_broker_btn"):
+            _run_live_prices_refresh(client, user_id, "Dhan")
+    with col2:
+        if st.button("Stock Data Refresh from Dhan", key="refresh_bar_dhan_stock_only_btn"):
+            _run_dhan_stock_only_refresh(client, user_id)
+    with col3:
+        if st.button("Option Data Refresh from Dhan", key="refresh_bar_dhan_option_only_btn"):
+            _run_dhan_option_only_refresh(client, user_id)
+    _render_live_prices_summary()
+    _render_dhan_stock_only_summary()
+    _render_dhan_option_only_summary()
+
+
 def render_fundamental_and_bhavcopy_refresh(client) -> None:
     """Settings-only "Data Refresh" section: Fundamental Data Refresh
     (YFinance fundamentals -- PE, PEG, dividend yield, 52-week high/low)
@@ -389,12 +497,17 @@ def render_fundamental_and_bhavcopy_refresh(client) -> None:
 
 def render_stock_refresh_button(client, user_id: str, data_provider: str) -> None:
     """Every page except Settings: shows exactly one of Stock Data
-    Refresh (YFinance/Bhavcopy accounts -- price + screener recompute) or
-    Stock & Option Data Refresh (Dhan/Zerodha accounts -- live broker
-    LTP, plus F&O contracts for Dhan -- see _refresh_user_live_prices),
-    by this account's Data Provider setting (Settings page)."""
+    Refresh (YFinance/Bhavcopy accounts -- price + screener recompute),
+    Stock & Option Data Refresh (Zerodha accounts -- live broker LTP, no
+    separate F&O leg -- see _refresh_user_live_prices), or, for Dhan
+    specifically, three buttons -- the same combined refresh (relabeled
+    "... from Dhan") plus two new ones isolating just its equity or just
+    its F&O leg (see _render_dhan_stock_option_refresh_buttons) -- by
+    this account's Data Provider setting (Settings page)."""
     broker = _BROKER_BY_PROVIDER.get(data_provider)
-    if broker:
+    if broker == "Dhan":
+        _render_dhan_stock_option_refresh_buttons(client, user_id)
+    elif broker:
         st.caption(f"Stock LTP source: live {broker} quotes (Data Provider setting, in Settings).")
         if st.button("Stock & Option Data Refresh", key="refresh_bar_broker_btn"):
             _run_live_prices_refresh(client, user_id, broker)

@@ -404,7 +404,8 @@ regardless of which page triggered the refresh.
 | **Fundamental Data Refresh** | Settings ("Data Refresh" section) | always | `render_fundamental_and_bhavcopy_refresh` |
 | **Bhavcopy Refresh** (NSE + BSE) | Settings, same section | always | `render_fundamental_and_bhavcopy_refresh` |
 | **Stock Data Refresh** | every page except Settings | Data Provider = YFinance/Bhavcopy | `render_stock_refresh_button` |
-| **Stock & Option Data Refresh** | every page except Settings | Data Provider = Dhan/Zerodha | `render_stock_refresh_button` |
+| **Stock & Option Data Refresh** | every page except Settings | Data Provider = Zerodha | `render_stock_refresh_button` |
+| **Stock & Option Data Refresh from Dhan** / **Stock Data Refresh from Dhan** / **Option Data Refresh from Dhan** | every page except Settings | Data Provider = Dhan | `render_stock_refresh_button` → `_render_dhan_stock_option_refresh_buttons` |
 | **Portfolio Refresh** | My Trades, My Holdings, My Positions, My CSP, My CC, My Other Trades | Data Provider = Dhan/Zerodha | `render_portfolio_refresh_button` |
 | **Refresh Instrument Master - Dhan** | Settings ("Data Provider" section) | Data Provider = Dhan | `_render_dhan_instrument_master_refresh` |
 
@@ -425,16 +426,29 @@ regardless of which page triggered the refresh.
   constituents + this account's own portfolio symbols) and caches it in
   `user_live_prices` (migration `0030`) for Dashboard/Stock Detail to
   read as an override (`src/utils/refresh_bar.py::_refresh_user_live_prices`).
-  **Dhan accounts only** (migration `0032`): this same click also widens
-  to every tracked ETF (priced daily but not shown on the Screener table
-  itself) and refetches live LTP for every futures/option contract this
-  account's own portfolio holds, plus the exact CSP/CC option legs the
-  Dashboard's 5% CSP/5% CC columns use (`_dhan_fo_universe`,
-  `DhanProvider.get_fo_quotes`) -- not the full option chain for every
-  strike/expiry, just what the Screener and the account's own positions
-  actually reference. Zerodha has no F&O instrument-lookup mechanism in
-  this codebase yet, so a Zerodha-provider account keeps the equity-only
-  behavior above.
+  Zerodha has no F&O instrument-lookup mechanism in this codebase, so a
+  Zerodha-provider account only ever sees this one equity-only button.
+
+  **Dhan gets three buttons instead of one** (`_render_dhan_stock_option_refresh_buttons`),
+  side by side:
+  - **Stock & Option Data Refresh from Dhan** -- the combined refresh
+    above (same `_refresh_user_live_prices`, just relabeled to
+    disambiguate from the other two), still the only one that widens the
+    equity/ETF universe with every tracked ETF and refetches live LTP for
+    every futures/option contract this account's own portfolio holds plus
+    the exact CSP/CC option legs the Dashboard's 5% CSP/5% CC columns use
+    (`_dhan_fo_universe`, `DhanProvider.get_fo_quotes`, migration `0032`)
+    -- not the full option chain for every strike/expiry, just what the
+    Screener and the account's own positions actually reference.
+  - **Stock Data Refresh from Dhan** -- just the equity/ETF leg
+    (`_refresh_dhan_stock_only`, reusing `_refresh_dhan_equity_leg`
+    directly), no F&O call at all.
+  - **Option Data Refresh from Dhan** -- just the F&O leg
+    (`_refresh_dhan_option_only`, reusing `_refresh_dhan_fo_leg` directly),
+    no equity/ETF call at all.
+
+  All three are independent clicks against the same account -- none of
+  them depend on, or invalidate, either of the others.
 
   **Performance**: Dhan's instrument master (~211,742 rows across every
   exchange/segment, downloaded from `images.dhan.co`) is cached in

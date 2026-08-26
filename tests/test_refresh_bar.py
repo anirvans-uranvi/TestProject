@@ -310,3 +310,80 @@ class TestRefreshUserLivePrices:
 
         assert upsert_calls == [{}]
         assert result == {"broker": "Dhan", "quoted": 0, "total": 1, "fo_quoted": 0, "fo_total": 0, "fo_error": None, "fo_missing": []}
+
+
+class TestRefreshDhanStockOnly:
+    """Backs the standalone "Stock Data Refresh from Dhan" button --
+    _refresh_dhan_equity_leg run on its own, no F&O leg at all."""
+
+    def test_no_connection_returns_an_error(self, monkeypatch):
+        monkeypatch.setattr(refresh_bar.portfolio_repo, "get_broker_connection", lambda client, user_id, broker: None)
+
+        result = refresh_bar._refresh_dhan_stock_only(client=object(), user_id="u1")
+
+        assert "error" in result
+
+    def test_quotes_the_full_equity_etf_universe_and_never_touches_fo(self, monkeypatch):
+        connection = BrokerConnection(user_id="u1", broker="Dhan", client_id="CID1", access_token="TOKEN1")
+        monkeypatch.setattr(refresh_bar.portfolio_repo, "get_broker_connection", lambda client, user_id, broker: connection)
+        _patch_universe(monkeypatch, constituents=("SBIN", "TCS"), portfolio_symbols=("JIOFIN",), etfs=("NIFTYBEES",))
+        captured = _patch_dhan_provider(
+            monkeypatch,
+            quotes={"SBIN": Quote(symbol="SBIN", latest_price=811.9, as_of=datetime(2026, 8, 20, 13, 0), source="dhan")},
+        )
+        upsert_calls = []
+        monkeypatch.setattr(
+            refresh_bar.snapshot_repo, "upsert_user_live_prices", lambda client, user_id, prices: upsert_calls.append(prices)
+        )
+
+        result = refresh_bar._refresh_dhan_stock_only(client=object(), user_id="u1")
+
+        assert set(captured["symbols"]) == {"SBIN", "TCS", "JIOFIN", "NIFTYBEES"}
+        assert "contracts" not in captured  # get_fo_quotes never called
+        assert upsert_calls == [{"SBIN": 811.9}]
+        assert result == {"quoted": 1, "total": 4}
+
+    def test_dhan_auth_error_surfaces_as_an_error(self, monkeypatch):
+        connection = BrokerConnection(user_id="u1", broker="Dhan", client_id="CID1", access_token="TOKEN1")
+        monkeypatch.setattr(refresh_bar.portfolio_repo, "get_broker_connection", lambda client, user_id, broker: connection)
+        _patch_universe(monkeypatch, constituents=("SBIN",), portfolio_symbols=())
+        _patch_dhan_provider(monkeypatch, quotes_error=DhanAuthError("Dhan access token rejected (401): bad token"))
+
+        result = refresh_bar._refresh_dhan_stock_only(client=object(), user_id="u1")
+
+        assert "error" in result
+        assert "401" in result["error"]
+
+
+class TestRefreshDhanOptionOnly:
+    """Backs the standalone "Option Data Refresh from Dhan" button --
+    _refresh_dhan_fo_leg run on its own, no equity/ETF leg at all."""
+
+    def test_no_connection_returns_an_error(self, monkeypatch):
+        monkeypatch.setattr(refresh_bar.portfolio_repo, "get_broker_connection", lambda client, user_id, broker: None)
+
+        result = refresh_bar._refresh_dhan_option_only(client=object(), user_id="u1")
+
+        assert "error" in result
+
+    def test_quotes_the_fo_universe_and_never_touches_equity(self, monkeypatch):
+        connection = BrokerConnection(user_id="u1", broker="Dhan", client_id="CID1", access_token="TOKEN1")
+        monkeypatch.setattr(refresh_bar.portfolio_repo, "get_broker_connection", lambda client, user_id, broker: connection)
+        position = PortfolioPosition(
+            user_id="u1", portfolio_name="My Portfolio", broker="Dhan", raw_name="RELIANCE FUT",
+            symbol="RELIANCE", expiry_date=date(2026, 8, 27), qty=1, avg_price=2900.0,
+        )
+        _patch_universe(monkeypatch, positions=[position])
+        captured = _patch_dhan_provider(monkeypatch)
+        fo_upsert_calls = []
+        monkeypatch.setattr(
+            refresh_bar.snapshot_repo, "upsert_user_live_fo_prices", lambda client, user_id, prices: fo_upsert_calls.append(prices)
+        )
+
+        result = refresh_bar._refresh_dhan_option_only(client=object(), user_id="u1")
+
+        assert "symbols" not in captured  # get_quotes never called
+        assert set(captured["contracts"]) == {("RELIANCE", date(2026, 8, 27), 0.0, "FUT")}
+        assert fo_upsert_calls == [{}]
+        assert result["fo_total"] == 1
+        assert "error" not in result
