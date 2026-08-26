@@ -2595,33 +2595,48 @@ P&L-shaped numbers; `Momentum` sits just before `1D`/`5D`/`20D` (the
 returns it's computed from) — see the dict literal in `_render_csp_tab`
 for the exact order, which `pd.DataFrame` preserves as column order.
 
-**Analyse Trade's own legs table was later rebuilt to match these exact
-same columns** (`Trade Date`/`Underlying`/`Expiry`/`Strike`/`Qty`/`Avg
+**Analyse Trade's own legs table was later rebuilt to match these
+columns** (`Trade Date`/`Underlying`/`Expiry`/`Strike`/`Qty`/`Avg
 Price`/`Credit`/`LTP`/`P&L`/`Target P&L`/`Stop Loss`/`Breakeven`/`LTP
-Underlying`/`Momentum`/`1D`/`5D`/`20D`, renamed `Max Credit` → `Credit`
-along the way), replacing its original, much plainer `Type`/`Broker`/
-`Instrument`/`Expiry`/`Strike`/`Option Type`/`Qty`/`Avg Price`/`LTP`/
-`P&L` shape. Unlike My CSP (Position-only, pre-filtered to CSP-tagged
-trades), Analyse Trade has to work for *any* Trade shape and must still
-show every leg — Holding legs included — since the merge/split controls
-below the table select rows by position in `trade_legs`, unfiltered.
-`Credit`/`Target P&L`/`Stop Loss` (`csp_max_credit`/`csp_target_pnl`/
-`csp_stop_loss`, computed and persisted exactly like My CSP/My CC) only
-populate for a leg that's a genuine **short** option (`leg_type ==
-"Position"`, `option_type` and `strike_price` both set, `qty < 0`) — a
-short call qualifies too (see My CC's own reuse of these same three
-functions), but a Holding, a future (`option_type` is `None`), or a long
-option all show `None`/"—". `Breakeven` is narrower still — it's
-specifically `csp_breakeven_price` (`Strike - Avg Price`), the textbook
-*put* breakeven, so it only populates when the leg is additionally
-`option_type == OptionType.PE`; a short call passes the "short option"
-gate above for `Credit`/`Target P&L`/`Stop Loss` but still shows "—" for
-`Breakeven`. `LTP Underlying`/`Momentum`/`1D`/`5D`/`20D` apply to *every*
-leg with a resolved `symbol`, Holdings included, since they describe the
-underlying itself rather than the specific leg's own instrument — the
-same `load_latest_prices`/`load_live_broker_prices`/`load_returns_and_pe`
-calls My CSP/My CC already make, just over the distinct symbol set
-across this one Trade's legs instead of a whole CSP/CC bucket.
+Underlying`, renamed `Max Credit` → `Credit` along the way), replacing
+its original, much plainer `Type`/`Broker`/`Instrument`/`Expiry`/
+`Strike`/`Option Type`/`Qty`/`Avg Price`/`LTP`/`P&L` shape. Unlike My CSP
+(Position-only, pre-filtered to CSP-tagged trades), Analyse Trade has to
+work for *any* Trade shape and must still show every leg — Holding legs
+included — since the merge/split controls below the table select rows by
+position in `trade_legs`, unfiltered. `Credit`/`Target P&L`/`Stop Loss`
+(`csp_max_credit`/`csp_target_pnl`/`csp_stop_loss`, computed and
+persisted exactly like My CSP/My CC) only populate for a leg that's a
+genuine **short** option (`leg_type == "Position"`, `option_type` and
+`strike_price` both set, `qty < 0`) — a short call qualifies too (see My
+CC's own reuse of these same three functions), but a Holding, a future
+(`option_type` is `None`), or a long option all show `None`/"—".
+`Breakeven` is narrower still — it's specifically `csp_breakeven_price`
+(`Strike - Avg Price`), the textbook *put* breakeven, so it only
+populates when the leg is additionally `option_type == OptionType.PE`; a
+short call passes the "short option" gate above for `Credit`/`Target
+P&L`/`Stop Loss` but still shows "—" for `Breakeven`. `LTP Underlying`
+applies to *every* leg with a resolved `symbol`, Holdings included, since
+it describes the underlying itself rather than the specific leg's own
+instrument — the same `load_latest_prices`/`load_live_broker_prices`
+calls My CSP/My CC already make, just over the distinct symbol set across
+this one Trade's legs instead of a whole CSP/CC bucket.
+
+**`Momentum`/`1D`/`5D`/`20D` were pulled back out of the table again, on
+request, into their own section right above it** — one tile per distinct
+underlying `symbol` across `trade_legs` (`load_returns_and_pe` over that
+same symbol set), styled exactly like `2_Stock_Detail.py`'s (the Equity
+page's) own "B · Momentum" scorecard tile: `st.metric(f"{symbol} -- B ·
+Momentum", "1D/5D/20D")`, a markdown line spelling out the three
+percentages (`format_pct`), then `pass_fail_badge(criterion_b(...))` —
+the same ✅ Pass/❌ Fail/N/A text Stock Detail's own scorecard uses, not
+the compact `pass_fail_icon` symbol My CSP/My CC's table cells use. Laid
+out via `st.columns(len(leg_symbols))`, one column per symbol (almost
+always exactly one, since a Trade is normally single-underlying, but a
+manually-merged Trade could span more) — this is a fact about the
+underlying, not something that varies leg to leg, so repeating it as four
+more columns on every leg row was redundant once there was somewhere
+better to put it.
 
 **`P&L%` was folded into `P&L` itself, on request** — there's no
 separate `P&L%` column anymore. `_fmt_pnl(pnl, pnl_pct, target_pnl,

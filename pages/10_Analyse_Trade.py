@@ -11,7 +11,7 @@ from src.calculations.classification import criterion_b
 from src.models.enums import OptionType
 from src.repositories import portfolio_repo, settings_repo
 from src.services import portfolio_service
-from src.utils.formatting import format_inr, pass_fail_icon
+from src.utils.formatting import format_inr, format_pct, pass_fail_badge
 from src.utils.portfolio_page import (
     build_trade_legs,
     ensure_cache_bust,
@@ -162,13 +162,37 @@ st.caption(
     "Same columns as My CSP. Credit/Target P&L/Stop Loss only compute for a short option leg (any short "
     "CE/PE, not just a put); Breakeven is specifically the CSP breakeven (Strike - Avg Price), shown only "
     "for a short put leg -- blank for every other leg shape (a Holding, a future, a long option, a short "
-    "call), same as this app's other CSP-formula reuses. LTP Underlying/Momentum/1D/5D/20D apply to every "
-    "leg with a resolved symbol, holdings included."
+    "call), same as this app's other CSP-formula reuses. LTP Underlying applies to every leg with a "
+    "resolved symbol, holdings included."
 )
 
-# --- Legs table ---------------------------------------------------------
 trade_legs = trade["legs"]
+leg_symbols = tuple(sorted({leg["symbol"] for leg in trade_legs if leg["symbol"]}))
+returns_by_symbol = load_returns_and_pe(client, leg_symbols, st.session_state["portfolio_cache_bust"])
 
+# --- Momentum -------------------------------------------------------------
+# Same "B · Momentum" scorecard tile Stock Detail (Equity page) shows for
+# a single symbol -- one tile per distinct underlying resolved across this
+# Trade's legs (almost always just one, but a manually-merged Trade could
+# span more), rather than repeating it as a column on every leg row.
+st.markdown("**Momentum**")
+if not leg_symbols:
+    st.caption("No resolved underlying to show momentum for.")
+else:
+    momentum_cols = st.columns(len(leg_symbols))
+    for col, symbol in zip(momentum_cols, leg_symbols):
+        with col:
+            rp = returns_by_symbol.get(symbol)
+            return_1d = rp["return_1d"] if rp else None
+            return_5d = rp["return_5d"] if rp else None
+            return_20d = rp["return_20d"] if rp else None
+            st.metric(f"{symbol} -- B · Momentum", "1D/5D/20D")
+            st.markdown(f"1D {format_pct(return_1d)} · 5D {format_pct(return_5d)} · 20D {format_pct(return_20d)}")
+            st.markdown(pass_fail_badge(criterion_b(return_1d, return_5d, return_20d)))
+
+st.divider()
+
+# --- Legs table ---------------------------------------------------------
 try:
     saved_position_meta = load_position_meta(client, user_id, st.session_state["portfolio_cache_bust"])
 except APIError:
@@ -177,7 +201,6 @@ except APIError:
     saved_position_meta = []
 position_meta_by_leg = {(m.broker, m.raw_name): m for m in saved_position_meta if m.portfolio_name == portfolio_name}
 
-leg_symbols = tuple(sorted({leg["symbol"] for leg in trade_legs if leg["symbol"]}))
 ltp_by_symbol = load_latest_prices(client, leg_symbols, st.session_state["portfolio_cache_bust"])
 # Same broker-live-first, daily_screener_snapshots-fallback preference as
 # My CSP/My CC's own "LTP Underlying" -- applies to every leg here
@@ -185,7 +208,6 @@ ltp_by_symbol = load_latest_prices(client, leg_symbols, st.session_state["portfo
 # not the leg's own instrument.
 live_ltp_by_symbol = load_live_broker_prices(client, user_id, leg_symbols, st.session_state["portfolio_cache_bust"])
 ltp_by_symbol = {**ltp_by_symbol, **live_ltp_by_symbol}
-returns_by_symbol = load_returns_and_pe(client, leg_symbols, st.session_state["portfolio_cache_bust"])
 
 leg_table_rows = []
 for leg in trade_legs:
@@ -220,11 +242,6 @@ for leg in trade_legs:
         breakeven_price = portfolio_service.csp_breakeven_price(leg["strike_price"], leg["avg_price"])
         breakeven_pct = portfolio_service.csp_breakeven_pct(breakeven_price, underlying_ltp_for_breakeven)
 
-    rp = returns_by_symbol.get(leg["symbol"]) if leg["symbol"] else None
-    return_1d = rp["return_1d"] if rp else None
-    return_5d = rp["return_5d"] if rp else None
-    return_20d = rp["return_20d"] if rp else None
-
     leg_table_rows.append(
         {
             "Trade Date": trade_date_for_leg.strftime("%d %b %Y") if trade_date_for_leg else None,
@@ -240,10 +257,6 @@ for leg in trade_legs:
             "Stop Loss": new_stop_loss,
             "Breakeven": _fmt_breakeven(breakeven_price, breakeven_pct),
             "LTP Underlying": ltp_by_symbol.get(leg["symbol"]) if leg["symbol"] else None,
-            "Momentum": pass_fail_icon(criterion_b(return_1d, return_5d, return_20d)),
-            "1D": return_1d,
-            "5D": return_5d,
-            "20D": return_20d,
         }
     )
 
@@ -261,9 +274,6 @@ legs_event = st.dataframe(
         "Credit": st.column_config.NumberColumn(format="₹%,.2f"),
         "Stop Loss": st.column_config.NumberColumn(format="₹%,.2f"),
         "LTP Underlying": st.column_config.NumberColumn(format="₹%,.2f"),
-        "1D": st.column_config.NumberColumn(format="%+.2f%%"),
-        "5D": st.column_config.NumberColumn(format="%+.2f%%"),
-        "20D": st.column_config.NumberColumn(format="%+.2f%%"),
     },
 )
 
