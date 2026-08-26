@@ -564,6 +564,19 @@ def csp_breakeven_pct(breakeven_price: float | None, underlying_ltp: float | Non
     return (breakeven_price / underlying_ltp - 1) * 100
 
 
+def covered_call_breakeven_price(stock_avg_price: float | None, premium_avg_price: float | None) -> float | None:
+    """The textbook Covered Call breakeven price: `stock_avg_price -
+    premium_avg_price` -- the call premium collected reduces the stock's
+    effective cost basis by that much (unlike a CSP, this is relative to
+    the stock's own purchase price, not the option's strike -- see
+    csp_breakeven_price). `None` (-> N/A) when either input is missing,
+    e.g. no Holding leg was found for the trade the call was written
+    against."""
+    if stock_avg_price is None or premium_avg_price is None:
+        return None
+    return stock_avg_price - premium_avg_price
+
+
 def csp_max_credit(avg_price: float | None, qty: float | None) -> float | None:
     """Total premium collected for writing a CSP leg -- `avg_price *
     abs(qty)`. `abs()` because `qty` is signed (negative for a short

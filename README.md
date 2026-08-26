@@ -51,8 +51,8 @@ pages/                  Streamlit multipage app (each still its own script,
                               "My Portfolio"
   11_My_CSP.py                Every Trade with Trade Type "CSP" -- one position leg per row, with underlying
                               LTP + 1D/5D/20D change -- sidebar label "CSP", nested under "My Trades"
-  12_My_CC.py                 Every Trade with Trade Type "Covered Call" from My Trades, same Stock/Index/Other
-                              split -- sidebar label "CC", nested under "My Trades"
+  12_My_CC.py                 Every short-call leg from a "Covered Call"-tagged Trade, + underlying LTP/1D/5D/20D
+                              and stock-cost-basis Breakeven -- sidebar label "CC", nested under "My Trades"
   13_My_Other_Trades.py       Every Trade from My Trades whose Trade Type is neither "CSP" nor "Covered Call" --
                               sidebar label "Other Trades", nested under "My Trades"
   10_Analyse_Trade.py          One Trade's legs -- correct underlying, rename trade type, merge/split
@@ -817,14 +817,16 @@ live-synced one.
 **My CC** and **My Other Trades** are filtered views of the exact same
 Trade list My Trades computes (`portfolio_service.group_into_trades`) --
 `is_covered_call_trade_type`/`is_other_trade_type` split it by `trade_type`
-the same way My CSP's `is_csp_trade_type` already did, and each still
-splits the result into the same Stock/Index/Other bucket tables My Trades
-uses. Neither adds new columns or analytics beyond what My Trades already
-shows (that richer per-leg breakdown -- breakeven, target P&L, stop-loss
-ratchet -- is CSP-specific, see My CSP below); a Trade lands on My CC only
-once its Trade Type is renamed to "Covered Call" on Analyse Trade (or it
-was auto-classified as one, see "Auto-classifying a new Trade" below),
-and on My Other Trades by default (including the untouched "Trade" label,
+the same way My CSP's `is_csp_trade_type` already did. My CC then renders
+the same per-leg breakdown as My CSP (breakeven, target P&L, stop-loss
+ratchet -- see My CC below for how Breakeven differs from My CSP's); My
+Other Trades stays at My Trades' own per-trade summary depth (that
+richer per-leg breakdown doesn't generalize to an arbitrary multi-leg
+strategy, see My Other Trades below) and keeps the same Stock/Index/Other
+bucket tables My Trades uses. A Trade lands on My CC only once its Trade
+Type is renamed to "Covered Call" on Analyse Trade (or it was
+auto-classified as one, see "Auto-classifying a new Trade" below), and on
+My Other Trades by default (including the untouched "Trade" label,
 and any auto-classified type other than CSP/Covered Call -- see "Trade
 Type is auto-classified for a new trade" under My Trades below).
 
@@ -1309,27 +1311,49 @@ identity `(portfolio_name, broker, raw_name)`. Like the other Portfolio
 pages, one tab per portfolio; a portfolio with no "CSP"-tagged Trades
 shows a plain caption rather than an empty table.
 
-### My CC (`pages/12_My_CC.py`) and My Other Trades (`pages/13_My_Other_Trades.py`)
+### My CC (`pages/12_My_CC.py`)
 
-Unlike My CSP, these two don't add any per-leg options analytics (no
-Breakeven/Target P&L/Stop Loss ratchet -- that machinery is CSP-specific).
-Each is just My Trades' own Stock/Index/Other Trades tables
+Every Trade whose Trade Type is exactly "Covered Call"
+(`is_covered_call_trade_type`, case-insensitive/trimmed) -- one row per
+short-**call** position leg, same Stock/Index/Other bucket split as My
+Trades, same **Underlying**/**Expiry**/**Strike**/**Qty**/**Avg
+Price**/**LTP**/**LTP Underlying**/**Momentum**/**1D/5D/20D** columns as
+My CSP, and the same **Trade Date**/**Max Credit**/**P&L**/**Target
+P&L**/**Stop Loss** mechanics (`csp_max_credit`/`csp_target_pnl`/
+`csp_stop_loss`) -- none of the three are actually put-specific despite
+the name; they're just premium-collected/time-decay-target/ratcheting-
+stop math, equally valid for a short call. A trade's Holding leg (the
+covered stock itself) isn't shown as its own row -- same as My CSP
+silently skipping a stray Holding leg -- but its `Avg Price` (the
+stock's own cost basis) feeds:
+
+- **Breakeven** -- unlike My CSP's `Strike - Avg Price` (meaningful only
+  relative to a short put's own strike), a Covered Call's breakeven is
+  relative to the *stock's* cost basis: `Stock Avg Price - Call Avg
+  Price`, followed by how far that sits from the underlying's current
+  price in parentheses, same `(Breakeven / LTP Underlying - 1)` % as My
+  CSP. Shows "—" if the trade has no Holding leg to read a cost basis
+  from (e.g. a naked short call mislabeled "Covered Call").
+
+### My Other Trades (`pages/13_My_Other_Trades.py`)
+
+Unlike My CSP/My CC, this one doesn't add any per-leg options analytics
+(no Breakeven/Target P&L/Stop Loss ratchet -- that machinery assumes a
+single well-defined option leg, which an arbitrary multi-leg strategy
+doesn't have). It's just My Trades' own Stock/Index/Other Trades tables
 (`portfolio_service.group_into_trades`, same **Underlying Instrument**/
 **Trade Type**/**Legs**/**Total P&L** columns, same "⚠️" mismatch marker,
-same row-select → "Analyse Trade" flow), pre-filtered by `trade_type`
-before the bucket split:
+same row-select → "Analyse Trade" flow), pre-filtered to
+`is_other_trade_type(trade_type)` -- i.e. neither "CSP" nor "Covered
+Call" -- before the bucket split, so the untouched default "Trade"
+label, a Strangle, a Jade Lizard/Twisted Sister, or any other free-text
+Trade Type all land here.
 
-- **My CC** keeps only Trades where `is_covered_call_trade_type(trade_type)`
-  is true (Trade Type exactly "Covered Call", case-insensitive/trimmed).
-- **My Other Trades** keeps everything else -- `is_other_trade_type(trade_type)`,
-  i.e. neither "CSP" nor "Covered Call" -- so the untouched default
-  "Trade" label, a Strangle, a Jade Lizard/Twisted Sister, or any other
-  free-text Trade Type all land here.
-
-Together with My CSP, every Trade shown on My Trades appears on exactly
-one of these three filtered pages (a Trade's `trade_type` can only match
-one of `is_csp_trade_type`/`is_covered_call_trade_type`/`is_other_trade_type`
-at a time) -- My Trades itself is unfiltered and keeps showing all of them.
+Together with My CSP and My CC, every Trade shown on My Trades appears
+on exactly one of these three filtered pages (a Trade's `trade_type` can
+only match one of `is_csp_trade_type`/`is_covered_call_trade_type`/
+`is_other_trade_type` at a time) -- My Trades itself is unfiltered and
+keeps showing all of them.
 
 ## Docker
 

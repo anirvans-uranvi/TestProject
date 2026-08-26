@@ -111,7 +111,7 @@ pages/
   8_My_Holdings.py                   Equity holdings, ETFs & Mutual Funds / Stocks split, identical columns
   9_My_Positions.py                  Per-leg F&O positions, split into Stock Options / Index Options / Others
   11_My_CSP.py                       Every position leg from a "CSP"-tagged Trade, + underlying LTP/1D/5D/20D
-  12_My_CC.py                        My Trades' own tables, filtered to Trade Type "Covered Call"
+  12_My_CC.py                        Every short-call leg from a "Covered Call"-tagged Trade, + Breakeven/1D/5D/20D
   13_My_Other_Trades.py               My Trades' own tables, filtered to neither "CSP" nor "Covered Call"
   10_Analyse_Trade.py                 One Trade's legs -- correct underlying/trade type, merge/split (hidden page)
 src/
@@ -1283,11 +1283,13 @@ into Stock Options/Index Options/Others tables, valued against each
 file's own LTP -- see the Positions subsection near the end of this
 section for why), `pages/11_My_CSP.py` (every position leg from a
 "CSP"-tagged Trade, with the underlying's own LTP/1D/5D/20D change -- see
-its own subsection below), `pages/12_My_CC.py` and
-`pages/13_My_Other_Trades.py` (My Trades' own Stock/Index/Other tables,
-filtered to Trade Type "Covered Call" and to neither "CSP" nor "Covered
-Call" respectively -- see their own subsection below, right after My
-CSP's), and `pages/10_Analyse_Trade.py` (one Trade's
+its own subsection below), `pages/12_My_CC.py` (every short-call position
+leg from a "Covered Call"-tagged Trade, with its own Breakeven relative
+to the covered stock's cost basis -- see its own subsection below, right
+after My CSP's), `pages/13_My_Other_Trades.py` (My Trades' own
+Stock/Index/Other tables, filtered to neither "CSP" nor "Covered Call" --
+see its own subsection further below), and `pages/10_Analyse_Trade.py`
+(one Trade's
 detail, registered `visibility="hidden"` in `app.py` so it's reachable
 via `st.switch_page` but never shows as its own sidebar link). There used
 to be a sixth page here, `pages/6_My_Broker.py` (CSV upload, connect
@@ -2731,41 +2733,47 @@ this table).
   differs from what's stored (a small float-tolerance check), so a
   render where nothing crossed a new band writes nothing.
 
-**My CC (`pages/12_My_CC.py`) and My Other Trades
-(`pages/13_My_Other_Trades.py`)** — unlike My CSP above, these two add
-**no** new analytics; each is a byte-for-byte copy of
+**My Other Trades (`pages/13_My_Other_Trades.py`)** — unlike My CSP/My
+CC, this one adds **no** new analytics; it's a byte-for-byte copy of
 `7_My_Trades.py`'s own `_render_trades_table`/`_render_trades_tab` (same
 `build_trade_legs` + `group_into_trades` call, same `Underlying
 Instrument`/`Trade Type`/`Legs`/`Total P&L` columns, same "⚠️"
 `trade_type_mismatch` marker + caption, same row-select →
 `st.switch_page("pages/10_Analyse_Trade.py")` flow, same Stock
 Trades/Index Trades/Other Trades bucket split) with exactly one line
-added: the `trades` list is filtered by `trade_type` before the bucket
-split, using two new predicates next to `is_csp_trade_type` in
-`portfolio_service.py`:
+added: the `trades` list is filtered to `is_other_trade_type(trade_type)`
+(`not is_csp_trade_type(trade_type) and not
+is_covered_call_trade_type(trade_type)`) before the bucket split, so the
+default `"Trade"` label, a Strangle, a Jade Lizard/Twisted Sister, or any
+other free-text Trade Type all land here. This was a deliberate scope
+choice, not an oversight — My Other Trades' arbitrary multi-leg
+strategies don't have a single well-defined breakeven/credit/target
+shape the way a CSP or Covered Call does, so inventing one wasn't
+requested; it stays at My Trades' own summary-table depth (per-trade
+Total P&L, not per-leg breakeven/target/stop-loss) until a real formula
+is asked for.
 
-- `is_covered_call_trade_type(trade_type)` — `trade_type.strip().lower()
-  == "covered call"`, same case-insensitive/trimmed convention as
-  `is_csp_trade_type`. My CC filters to this.
-- `is_other_trade_type(trade_type)` — `not is_csp_trade_type(trade_type)
-  and not is_covered_call_trade_type(trade_type)`. My Other Trades
-  filters to this, so the default `"Trade"` label, a Strangle, a Jade
-  Lizard/Twisted Sister, or any other free-text Trade Type all land here.
-  Together, every Trade `group_into_trades` produces satisfies exactly
-  one of `is_csp_trade_type`/`is_covered_call_trade_type`/
-  `is_other_trade_type` — the three pages partition My Trades' full list
-  with no overlap and no gaps. My Trades itself is unfiltered and keeps
-  showing everything, unchanged.
-
-This was a deliberate scope choice, not an oversight: My CSP's
-Breakeven/Target P&L/Stop Loss ratchet columns are CSP-specific
-(`csp_breakeven_price`/`csp_target_pnl`/`csp_stop_loss` all assume a
-single short put leg and a `portfolio_position_meta` Trade Date) and
-don't generalize cleanly to a Covered Call's holding+short-call shape or
-to My Other Trades' arbitrary multi-leg strategies — inventing
-equivalent formulas for those wasn't requested, so My CC/My Other Trades
-stay at My Trades' own summary-table depth (per-trade Total P&L, not
-per-leg breakeven/target/stop-loss) until a real formula is asked for.
+**My CC (`pages/12_My_CC.py`)** — like My CSP, this renders one row per
+short-**call** Position leg (Holding legs are looked at only to find the
+covered stock's cost basis, then dropped from the table itself, same as
+My CSP silently skips a stray Holding leg) across the same Stock
+Trades/Index Trades/Other Trades bucket split. `Max Credit`/`Target
+P&L`/`Stop Loss` reuse My CSP's own `csp_max_credit`/`csp_target_pnl`/
+`csp_stop_loss` unchanged — despite the `csp_` name, none of the three
+actually assume a *put*: they're premium-collected/time-decay-target/
+ratcheting-stop math that applies identically to any short option leg
+being held for credit. `Breakeven` is the one column that's genuinely
+put-specific in My CSP (`csp_breakeven_price` = `strike - avg_price`,
+meaningful only relative to a short put's own strike) and doesn't
+generalize to a Covered Call, whose textbook breakeven is relative to
+the *stock's* cost basis, not the call's strike — so My CC uses its own
+`portfolio_service.covered_call_breakeven_price(stock_avg_price,
+premium_avg_price)` (`stock_avg_price - premium_avg_price`), looked up
+per-trade from that trade's own Holding leg's `avg_price` (`None` — "—"
+in the table — if a trade has no Holding leg, e.g. a naked short call
+someone mislabeled "Covered Call"). `csp_breakeven_pct`'s `(breakeven /
+underlying_ltp - 1) * 100` is generic enough to reuse as-is for either
+page's Breakeven %.
 
 `app.py` groups all five of `7_My_Trades.py`/`11_My_CSP.py`/
 `12_My_CC.py`/`13_My_Other_Trades.py`/`10_Analyse_Trade.py` (hidden)
