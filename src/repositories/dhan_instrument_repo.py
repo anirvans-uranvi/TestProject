@@ -26,6 +26,22 @@ def _chunked(rows: list[dict], size: int = _CHUNK):
         yield rows[i : i + size]
 
 
+def _delete_all(client: Client, table_name: str, size: int = _CHUNK) -> None:
+    """Deletes every row in `table_name` in ID-sized batches rather than
+    one unbounded `.delete().neq("security_id", "")` -- confirmed live:
+    once dhan_fo_instruments grew to ~85,000 rows, that single delete hit
+    Postgres's statement timeout (`57014 canceling statement due to
+    statement timeout`) and rolled back entirely, leaving the table
+    completely untouched (stale rows and all) rather than partially
+    cleared. Loops select-a-batch-of-ids/delete-that-batch until nothing
+    is left, so no single statement scales with the table's full size."""
+    while True:
+        batch = client.table(table_name).select("security_id").limit(size).execute().data
+        if not batch:
+            return
+        client.table(table_name).delete().in_("security_id", [r["security_id"] for r in batch]).execute()
+
+
 def _paginate(query_builder, page_size: int = 1000) -> list[dict]:
     """Runs `query_builder` (a callable that returns a fresh query) across
     all pages -- same helper (and same real bug) as fo_repo._paginate:
@@ -73,7 +89,7 @@ def replace_equity_instruments(client: Client, rows: list[dict]) -> None:
     # makes a colliding chunk overwrite instead of erroring; the two
     # racing writers' data is the same Dhan download anyway, so whichever
     # finishes last just harmlessly re-writes the same rows.
-    client.table("dhan_equity_instruments").delete().neq("security_id", "").execute()
+    _delete_all(client, "dhan_equity_instruments")
     for chunk in _chunked(rows):
         client.table("dhan_equity_instruments").upsert(chunk, on_conflict="security_id").execute()
 
@@ -94,6 +110,6 @@ def replace_fo_instruments(client: Client, rows: list[dict]) -> None:
     # upsert, not insert -- same cross-session race as
     # replace_equity_instruments above, on the same shared-cache table
     # family (migration 0035), same fix.
-    client.table("dhan_fo_instruments").delete().neq("security_id", "").execute()
+    _delete_all(client, "dhan_fo_instruments")
     for chunk in _chunked(rows):
         client.table("dhan_fo_instruments").upsert(chunk, on_conflict="security_id").execute()

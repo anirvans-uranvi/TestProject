@@ -29,7 +29,17 @@
    Dhan-side flakiness rather than a deterministic truncation bug.
    TestGetEquityInstruments/TestGetFoInstruments's fake client mimics
    PostgREST's own `.range()` paging so a regression back to an
-   unpaginated `.select()` fails the same way."""
+   unpaginated `.select()` fails the same way.
+
+3. replace_equity_instruments/replace_fo_instruments delete in ID-sized
+   batches (_delete_all) rather than one unbounded `.delete().neq(...)`.
+   Confirmed live: once dhan_fo_instruments grew to ~85,000 rows, that
+   single delete hit Postgres's own statement timeout (`57014 canceling
+   statement due to statement timeout`) and rolled back entirely --
+   leaving the table completely untouched (including stale `exchange`
+   values from before migration 0037 backfilled them) rather than
+   partially cleared. TestDeleteAll confirms a table bigger than one
+   batch is still fully cleared."""
 from __future__ import annotations
 
 import types
@@ -48,10 +58,16 @@ class _FakeTable:
         self.store = store
         self.name = name
         self._pending_delete = False
+        self._pending_delete_filter = None  # (column, {values}) -- None means "delete everything"
         self._pending_upsert = None
         self._pending_insert = None
+        self._pending_limit = None
 
     def select(self, *args, **kwargs):
+        return self
+
+    def limit(self, n):
+        self._pending_limit = n
         return self
 
     def insert(self, payload):
@@ -69,10 +85,18 @@ class _FakeTable:
     def neq(self, column, value):
         return self
 
+    def in_(self, column, values):
+        self._pending_delete_filter = (column, set(values))
+        return self
+
     def execute(self):
         rows = self.store.setdefault(self.name, [])
         if self._pending_delete:
-            rows.clear()
+            if self._pending_delete_filter is not None:
+                column, values = self._pending_delete_filter
+                self.store[self.name] = [r for r in rows if r[column] not in values]
+            else:
+                rows.clear()
             return types.SimpleNamespace(data=[])
         if self._pending_insert is not None:
             existing_ids = {r["security_id"] for r in rows}
@@ -93,6 +117,8 @@ class _FakeTable:
                 else:
                     rows.append(item)
             return types.SimpleNamespace(data=payload)
+        if self._pending_limit is not None:
+            return types.SimpleNamespace(data=list(rows[: self._pending_limit]))
         return types.SimpleNamespace(data=list(rows))
 
 
@@ -106,6 +132,28 @@ class _FakeClient:
 
 def _rows(n: int, offset: int = 0) -> list[dict]:
     return [{"security_id": str(i), "trading_symbol": f"SYM{i}"} for i in range(offset, offset + n)]
+
+
+class TestDeleteAll:
+    def test_clears_a_table_bigger_than_one_batch(self):
+        # Regression: a single unbounded delete hit Postgres's statement
+        # timeout once dhan_fo_instruments grew past ~85,000 rows and
+        # rolled back entirely, leaving stale rows untouched. Confirms
+        # the batched delete actually clears a table spanning more than
+        # one batch, not just one small enough to fit in a single delete.
+        client = _FakeClient()
+        client.store["dhan_fo_instruments"] = [{"security_id": str(i)} for i in range(7)]
+
+        dhan_instrument_repo._delete_all(client, "dhan_fo_instruments", size=3)
+
+        assert client.store["dhan_fo_instruments"] == []
+
+    def test_empty_table_is_a_no_op(self):
+        client = _FakeClient()
+
+        dhan_instrument_repo._delete_all(client, "dhan_fo_instruments", size=3)  # must not raise
+
+        assert client.store.get("dhan_fo_instruments", []) == []
 
 
 class TestReplaceEquityInstruments:

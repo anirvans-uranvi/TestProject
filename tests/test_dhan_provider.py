@@ -12,8 +12,17 @@ skip-unresolved fix, added after a live regression: widening the
 watched-symbol universe to every tracked ETF (migration 0032) meant one
 ETF Dhan's equity instrument master didn't carry made get_quotes raise
 and silently wipe out live pricing for the ENTIRE batch, not just that
-one symbol."""
-from datetime import date, datetime
+one symbol.
+
+Also covers _load_instrument_master/_load_fo_instrument_master's DB-cache
+behavior when a `client` is given: no freshness check and no download
+fallback at all -- a client-backed call only ever reads
+dhan_equity_instruments/dhan_fo_instruments (migration 0035) verbatim,
+however old, and raises pointing at Settings' "Refresh Instrument Master
+- Dhan" button if the table has never been populated. That button
+(refresh_dhan_instrument_master) is the only thing left that actually
+downloads and persists this data -- see TestRefreshDhanInstrumentMaster."""
+from datetime import date
 
 import httpx
 import pandas as pd
@@ -22,15 +31,6 @@ import pytest
 import src.data_providers.dhan_provider as dhan_provider
 from src.data_providers.base import ProviderError
 from src.data_providers.dhan_provider import DhanAuthError, DhanProvider, resolve_fo_security_id
-
-
-class _FakeFetchLogEntry:
-    """Stand-in for fetch_log_repo.get_last_successful_fetch's return
-    value -- only `finished_at` is read by the instrument-master loaders'
-    freshness check."""
-
-    def __init__(self, on_date: date):
-        self.finished_at = datetime.combine(on_date, datetime.min.time()).replace(hour=12, tzinfo=dhan_provider.IST)
 
 
 class _FakeResponse:
@@ -181,23 +181,25 @@ class TestGetQuotes:
 
 
 class TestLoadInstrumentMasterDbCache:
-    """Migration 0035: the shared dhan_equity_instruments table. `client`
-    is never touched for real here -- dhan_instrument_repo/fetch_log_repo
-    are monkeypatched directly, so any non-None sentinel stands in for a
-    real Supabase client."""
+    """Migration 0035: the shared dhan_equity_instruments table.
+    _load_instrument_master no longer has any freshness concept or
+    download fallback at all when `client` is given -- confirmed live as
+    the real cause of "Stock & Option Data Refresh" being unpredictably
+    slow (whichever process/worker judged the cache "not fresh today"
+    paid for a full ~211,742-row CSV download on that click). Settings'
+    "Refresh Instrument Master - Dhan" button (refresh_dhan_instrument_master)
+    is now the only thing that downloads and persists this; a
+    client-backed call here just reads the DB cache verbatim, however old
+    it is, and raises if it's never been populated at all. `client` is
+    never touched for real here -- dhan_instrument_repo is monkeypatched
+    directly, so any non-None sentinel stands in for a real Supabase
+    client."""
 
-    def test_fresh_db_entry_is_used_without_downloading(self, monkeypatch):
-        today = dhan_provider.now_ist().date()
-
+    def test_db_entry_is_used_without_downloading_no_matter_how_old(self, monkeypatch):
         def fail_download(*a, **k):
-            raise AssertionError("should not download when the DB cache is fresh")
+            raise AssertionError("a client-backed call must never download")
 
         monkeypatch.setattr(dhan_provider.pd, "read_csv", fail_download)
-        monkeypatch.setattr(
-            dhan_provider.fetch_log_repo,
-            "get_last_successful_fetch",
-            lambda client, fetch_type, provider_name: _FakeFetchLogEntry(today),
-        )
         monkeypatch.setattr(
             dhan_provider.dhan_instrument_repo,
             "get_equity_instruments",
@@ -208,39 +210,27 @@ class TestLoadInstrumentMasterDbCache:
 
         assert df["trading_symbol"].tolist() == ["RELIANCE"]
 
-    def test_stale_or_missing_db_entry_downloads_and_persists(self, monkeypatch):
+    def test_empty_db_table_raises_pointing_at_the_refresh_button_instead_of_downloading(self, monkeypatch):
+        # Regression: this path used to silently download+persist on a
+        # cache miss -- now that Stock & Option Data Refresh no longer
+        # does that implicitly, a never-populated table must fail loudly
+        # with actionable guidance, not fall back to a real download.
+        def fail_download(*a, **k):
+            raise AssertionError("a client-backed call must never download")
+
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", fail_download)
+        monkeypatch.setattr(dhan_provider.dhan_instrument_repo, "get_equity_instruments", lambda client: [])
+
+        with pytest.raises(ProviderError, match="Refresh Instrument Master"):
+            dhan_provider._load_instrument_master(client=object())
+
+    def test_client_none_still_downloads_for_script_or_cron_usage(self, monkeypatch):
+        # The one context with no Supabase-backed cache to read at all
+        # (factory.py's plain-cron wiring, or a test) -- must keep the
+        # old real-download behavior since there's no alternative source.
         monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _EQUITY_MASTER_FIXTURE)
-        monkeypatch.setattr(
-            dhan_provider.fetch_log_repo, "get_last_successful_fetch", lambda client, fetch_type, provider_name: None
-        )
-        written = {}
-        logged = {}
-        monkeypatch.setattr(
-            dhan_provider.dhan_instrument_repo,
-            "replace_equity_instruments",
-            lambda client, rows: written.setdefault("rows", rows),
-        )
-        monkeypatch.setattr(dhan_provider.fetch_log_repo, "log_fetch", lambda client, entry: logged.setdefault("entry", entry))
 
-        df = dhan_provider._load_instrument_master(client=object())
-
-        assert set(df["trading_symbol"]) == {"RELIANCE", "TCS"}
-        assert {r["trading_symbol"] for r in written["rows"]} == {"RELIANCE", "TCS"}
-        assert logged["entry"].provider_name == "equity"
-        assert logged["entry"].fetch_type == dhan_provider.FetchType.DHAN_INSTRUMENT_MASTER
-
-    def test_stale_db_entry_from_a_prior_day_is_ignored(self, monkeypatch):
-        yesterday = dhan_provider.now_ist().date() - dhan_provider.timedelta(days=1)
-        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _EQUITY_MASTER_FIXTURE)
-        monkeypatch.setattr(
-            dhan_provider.fetch_log_repo,
-            "get_last_successful_fetch",
-            lambda client, fetch_type, provider_name: _FakeFetchLogEntry(yesterday),
-        )
-        monkeypatch.setattr(dhan_provider.dhan_instrument_repo, "replace_equity_instruments", lambda client, rows: None)
-        monkeypatch.setattr(dhan_provider.fetch_log_repo, "log_fetch", lambda client, entry: None)
-
-        df = dhan_provider._load_instrument_master(client=object())
+        df = dhan_provider._load_instrument_master(client=None)
 
         assert set(df["trading_symbol"]) == {"RELIANCE", "TCS"}
 
@@ -547,21 +537,14 @@ class TestLoadFoInstrumentMaster:
 
 class TestLoadFoInstrumentMasterDbCache:
     """Migration 0035: the shared dhan_fo_instruments table -- same
-    fresh/stale-or-missing behavior as TestLoadInstrumentMasterDbCache,
-    for the F&O loader."""
+    no-freshness-check, no-download-fallback behavior as
+    TestLoadInstrumentMasterDbCache, for the F&O loader."""
 
-    def test_fresh_db_entry_is_used_without_downloading(self, monkeypatch):
-        today = dhan_provider.now_ist().date()
-
+    def test_db_entry_is_used_without_downloading_no_matter_how_old(self, monkeypatch):
         def fail_download(*a, **k):
-            raise AssertionError("should not download when the DB cache is fresh")
+            raise AssertionError("a client-backed call must never download")
 
         monkeypatch.setattr(dhan_provider.pd, "read_csv", fail_download)
-        monkeypatch.setattr(
-            dhan_provider.fetch_log_repo,
-            "get_last_successful_fetch",
-            lambda client, fetch_type, provider_name: _FakeFetchLogEntry(today),
-        )
         monkeypatch.setattr(
             dhan_provider.dhan_instrument_repo,
             "get_fo_instruments",
@@ -579,28 +562,89 @@ class TestLoadFoInstrumentMasterDbCache:
         assert df["expiry_date"].iloc[0] == date(2026, 9, 24)
         assert df["exchange"].tolist() == ["NSE"]
 
-    def test_stale_or_missing_db_entry_downloads_and_persists(self, monkeypatch):
+    def test_empty_db_table_raises_pointing_at_the_refresh_button_instead_of_downloading(self, monkeypatch):
+        def fail_download(*a, **k):
+            raise AssertionError("a client-backed call must never download")
+
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", fail_download)
+        monkeypatch.setattr(dhan_provider.dhan_instrument_repo, "get_fo_instruments", lambda client: [])
+
+        with pytest.raises(ProviderError, match="Refresh Instrument Master"):
+            dhan_provider._load_fo_instrument_master(client=object())
+
+    def test_client_none_still_downloads_for_script_or_cron_usage(self, monkeypatch):
         monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
-        monkeypatch.setattr(
-            dhan_provider.fetch_log_repo, "get_last_successful_fetch", lambda client, fetch_type, provider_name: None
+
+        df = dhan_provider._load_fo_instrument_master(client=None)
+
+        assert not df.empty
+
+
+class TestRefreshDhanInstrumentMaster:
+    """Settings' "Refresh Instrument Master - Dhan" button -- the only
+    thing left that downloads Dhan's instrument-master CSV and persists
+    both slices, now that _load_instrument_master/_load_fo_instrument_master
+    never do so implicitly on a cache miss."""
+
+    def test_downloads_once_persists_both_slices_and_updates_in_memory_caches(self, monkeypatch):
+        # One clean equity row plus the full F&O fixture -- concatenated
+        # rather than reusing _FO_MASTER_FIXTURE alone for both slices,
+        # since none of its rows are SEM_INSTRUMENT_NAME == "EQUITY" (it
+        # would raise "zero NSE equity rows" if fed to
+        # _download_equity_master on its own).
+        combined_raw = pd.concat(
+            [
+                pd.DataFrame(
+                    [
+                        {
+                            "SEM_SMST_SECURITY_ID": "1001", "SEM_TRADING_SYMBOL": "RELIANCE",
+                            "SEM_EXM_EXCH_ID": "NSE", "SEM_SEGMENT": "E", "SEM_INSTRUMENT_NAME": "EQUITY",
+                        }
+                    ]
+                ),
+                _FO_MASTER_FIXTURE,
+            ],
+            ignore_index=True,
         )
+        download_count = {"n": 0}
+
+        def counting_read_csv(*a, **k):
+            download_count["n"] += 1
+            return combined_raw
+
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", counting_read_csv)
         written = {}
-        logged = {}
+        logged = []
+        monkeypatch.setattr(
+            dhan_provider.dhan_instrument_repo,
+            "replace_equity_instruments",
+            lambda client, rows: written.setdefault("equity_rows", rows),
+        )
         monkeypatch.setattr(
             dhan_provider.dhan_instrument_repo,
             "replace_fo_instruments",
-            lambda client, rows: written.setdefault("rows", rows),
+            lambda client, rows: written.setdefault("fo_rows", rows),
         )
-        monkeypatch.setattr(dhan_provider.fetch_log_repo, "log_fetch", lambda client, entry: logged.setdefault("entry", entry))
+        monkeypatch.setattr(dhan_provider.fetch_log_repo, "log_fetch", lambda client, entry: logged.append(entry))
 
-        df = dhan_provider._load_fo_instrument_master(client=object())
+        summary = dhan_provider.refresh_dhan_instrument_master(client=object())
 
-        assert not df.empty
-        # Persisted rows must be JSON/DB-safe -- expiry_date a plain ISO
-        # string, not a raw date object.
-        assert all(isinstance(r["expiry_date"], str) for r in written["rows"])
-        assert logged["entry"].provider_name == "fo"
-        assert logged["entry"].fetch_type == dhan_provider.FetchType.DHAN_INSTRUMENT_MASTER
+        # One download shared between both slices (_get_raw_instrument_master),
+        # not one per slice -- same sharing get_quotes/get_fo_quotes already
+        # relied on for a cache-cold "Stock & Option Data Refresh".
+        assert download_count["n"] == 1
+        assert written["equity_rows"] == [{"security_id": "1001", "trading_symbol": "RELIANCE"}]
+        assert {r["security_id"] for r in written["fo_rows"]} == {"50001", "50002", "50003", "50004", "60001", "70001"}
+        assert {entry.provider_name for entry in logged} == {"equity", "fo"}
+        assert summary == {"equity_count": 1, "fo_count": 6}
+
+        # The in-memory caches must be updated immediately too -- a
+        # resolve call in this same process right after the button click
+        # must see the fresh data, not whatever was cached before.
+        equity_df = dhan_provider._load_instrument_master(client=object())
+        fo_df = dhan_provider._load_fo_instrument_master(client=object())
+        assert equity_df["trading_symbol"].tolist() == ["RELIANCE"]
+        assert set(fo_df["security_id"]) == {"50001", "50002", "50003", "50004", "60001", "70001"}
 
 
 class TestResolveFoSecurityId:

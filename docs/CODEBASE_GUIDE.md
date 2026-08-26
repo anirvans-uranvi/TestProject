@@ -756,7 +756,11 @@ today's IST-calendar-day data -- a fresh download is persisted back via
 the new `src/repositories/dhan_instrument_repo.py` (delete-then-insert,
 same convention as `fo_repo.clear_dashboard_fo_metrics`/
 `upsert_dashboard_fo_metrics`) before being cached in-memory, so the *next*
-process/user skips the download too. `client=None` keeps the exact old
+process/user skips the download too. **This freshness-check-then-download
+behavior was later removed** (see "Decoupling instrument-master downloads
+from Stock & Option Data Refresh entirely" further below) -- a
+`client`-backed call now never downloads at all, only ever reads whatever
+`refresh_dhan_instrument_master` last persisted. `client=None` keeps the exact old
 in-memory-only behavior (`factory.py::get_price_provider`'s plain-cron path
 never has a Supabase client to give a generic `PriceDataProvider`). Hit the
 same RLS gap described above: `0035` itself granted `dhan_equity_instruments`/
@@ -920,6 +924,61 @@ existing rows until the next wholesale replace) and through
 `get_fo_quotes` split resolved `security_id`s into `NSE_FNO`/`BSE_FNO`
 lists by that column before calling `get_ltp_by_security_id`, instead of
 one hardcoded list.
+
+**A sixth bug, hit repairing the fifth live**: `dhan_instrument_repo`'s
+`replace_equity_instruments`/`replace_fo_instruments` cleared their table
+with one unbounded `.delete().neq("security_id", "")` before upserting.
+Once `dhan_fo_instruments` grew to ~85,000 rows, that single `DELETE`
+statement hit Postgres's own `statement_timeout` (`57014 canceling
+statement due to statement timeout`) and rolled back **entirely** --
+confirmed live while force-refreshing the table to backfill migration
+`0037`'s new `exchange` column: the whole replace failed, leaving every
+row (stale `exchange='NSE'` default included) completely untouched,
+not partially cleared. Fixed with a new `_delete_all(client, table_name)`
+helper: selects up to `_CHUNK` (500) existing `security_id`s, deletes just
+that batch via `.delete().in_("security_id", ids)`, and loops until
+nothing's left -- no single statement scales with the table's full size
+regardless of how large it grows. `tests/test_dhan_instrument_repo.py`'s
+`TestDeleteAll` regression-locks this against a table spanning more than
+one batch.
+
+**Decoupling instrument-master downloads from Stock & Option Data
+Refresh entirely.** Every fix above still left one thing unresolved: a
+`client`-backed `_load_instrument_master`/`_load_fo_instrument_master`
+call would download+persist a fresh Dhan CSV inline, on request, whenever
+it judged the DB cache "not fresh today" (`provider_fetch_log` freshness
+check). That made "Stock & Option Data Refresh" unpredictably slow --
+whichever process/worker's click happened to find the cache stale paid
+for the full ~211,742-row download right there, while every other click
+that day stayed fast. On request, this was decoupled outright rather than
+tuned further: both loaders now, when given a `client`, **never**
+download -- they read `dhan_equity_instruments`/`dhan_fo_instruments`
+verbatim, however old, and raise a `ProviderError` pointing at a new
+Settings button if the table has never been populated at all (no more
+freshness check or "stale means re-download" branch — see their own
+docstrings). A new module-level function,
+`dhan_provider.refresh_dhan_instrument_master(client)`, is now the
+*only* thing that downloads Dhan's CSV and persists both slices --
+shares one raw download between the equity/F&O filters (same
+`_get_raw_instrument_master` sharing the old cache-cold refresh path
+used), persists both, logs both `provider_fetch_log` entries, and
+critically also clears/repopulates this process's own in-memory caches
+immediately (not just the DB ones), so a resolve call in the *same*
+process right after the click sees the fresh data too rather than
+serving whatever was cached for "today" until the process restarts.
+Exposed as **"Refresh Instrument Master - Dhan"**
+(`src/utils/data_provider_settings.py::_render_dhan_instrument_master_refresh`),
+shown in Settings' Data Provider section only when the account's
+provider is Dhan, right below the connect/credentials form -- needs no
+broker connection or token of its own, since the instrument master
+(`images.dhan.co/api-data/api-scrip-master.csv`) is public Dhan
+reference data. `client=None` (the plain-cron `factory.py::get_price_provider`
+path, or a script/test with no Supabase wiring) is untouched and keeps
+the old real-download-on-miss behavior, since there's no DB cache to read
+there at all. `to_ist` and the `fetch_log_repo.get_last_successful_fetch`
+freshness check are no longer used by either loader (`get_last_successful_fetch`
+is now only called from `_render_dhan_instrument_master_refresh`, for
+that button's own "Last instrument master refresh: ..." caption).
 
 `user_live_prices`, widened by migration `0032` from an equity-only
 `(user_id, symbol)` table to `(user_id, symbol, expiry_date, strike_price,

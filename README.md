@@ -406,6 +406,7 @@ regardless of which page triggered the refresh.
 | **Stock Data Refresh** | every page except Settings | Data Provider = YFinance/Bhavcopy | `render_stock_refresh_button` |
 | **Stock & Option Data Refresh** | every page except Settings | Data Provider = Dhan/Zerodha | `render_stock_refresh_button` |
 | **Portfolio Refresh** | My Trades, My Holdings, My Positions, My CSP, My CC, My Other Trades | Data Provider = Dhan/Zerodha | `render_portfolio_refresh_button` |
+| **Refresh Instrument Master - Dhan** | Settings ("Data Provider" section) | Data Provider = Dhan | `_render_dhan_instrument_master_refresh` |
 
 - **Fundamental Data Refresh** -- a fresh Yahoo Finance fundamentals
   fetch only (PE, PEG, dividend yield, 52-week high/low), via
@@ -438,15 +439,23 @@ regardless of which page triggered the refresh.
   **Performance**: Dhan's instrument master (~211,742 rows across every
   exchange/segment, downloaded from `images.dhan.co`) is cached in
   Supabase, shared across every user and process
-  (`dhan_equity_instruments`/`dhan_fo_instruments`, migration `0035`) --
-  refreshed at most once per IST calendar day (tracked via
-  `provider_fetch_log`, `fetch_type="dhan_instrument_master"`), so a cold
-  Streamlit process no longer pays for a fresh multi-MB download on every
-  restart. On a cache-cold day, both the equity and F&O loaders
-  (`dhan_provider.py::_load_instrument_master`/`_load_fo_instrument_master`)
-  share **one** raw download (`_get_raw_instrument_master`, held under a
-  lock for the duration) rather than each downloading the full file
-  independently.
+  (`dhan_equity_instruments`/`dhan_fo_instruments`, migration `0035`).
+  This button **only ever reads that cache** (`dhan_provider.py::_load_
+  instrument_master`/`_load_fo_instrument_master`) -- it never downloads
+  Dhan's CSV itself, however old the cache is. That used to be automatic
+  (refreshed on this button's own click whenever the cache "wasn't fresh
+  today"), but made the click unpredictably slow depending on which
+  process/worker happened to handle it, since a cache-cold click paid for
+  a fresh ~211,742-row download inline. Refreshing that cache is now a
+  separate, explicit step: Settings' **"Refresh Instrument Master -
+  Dhan"** button (`dhan_provider.py::refresh_dhan_instrument_master`,
+  shown only when Data Provider is Dhan -- see [Connecting a
+  broker](#connecting-a-broker-settings--data-provider) above), which
+  downloads both the equity and F&O slices from **one** shared raw
+  download (`_get_raw_instrument_master`) and persists both. If the cache
+  has never been populated at all, Stock & Option Data Refresh fails with
+  a clear message pointing at that button instead of silently downloading
+  or resolving nothing.
 
   The equity and F&O legs (`_refresh_dhan_equity_leg`/`_refresh_dhan_fo_leg`)
   run **sequentially**, not concurrently -- this was tried as a
@@ -460,23 +469,23 @@ regardless of which page triggered the refresh.
   Supabase `client` (`snapshot_repo.upsert_*`, `_dhan_fo_universe`, and
   the instrument-master loaders' own DB reads/writes) -- confirmed live
   as `httpx.RemoteProtocolError`, since that client's connection isn't
-  safe for two threads to use at once either. The two genuinely expensive
-  shared resources (the CSV download, and every Dhan API call via
-  `_throttle`'s global rate gate) are already serialized by locks
-  regardless of threading, so sequential execution here gives up only the
+  safe for two threads to use at once either. Every Dhan API call is
+  already serialized by a lock regardless of threading (`_throttle`'s
+  global rate gate), so sequential execution here gives up only the
   overlap of the two legs' own network *wait* time -- a small trade for
   not corrupting Supabase connections.
 
   Going sequential above only serializes one *call*'s own two legs --
-  it doesn't stop two different users (or two tabs) independently hitting
-  a cache-cold `dhan_equity_instruments`/`dhan_fo_instruments` at once,
-  since that shared table is exactly what migration `0035` is for.
-  `dhan_instrument_repo`'s replace functions used to `delete()` then
-  `insert()` the fresh rows -- two overlapping callers' inserts could
-  land the same `security_id` (the primary key) twice, confirmed live as
-  `duplicate key value violates unique constraint
-  "dhan_equity_instruments_pkey"` surfacing through the Stock & Option
-  Data Refresh button. Fixed by upserting (`on_conflict="security_id"`)
+  it doesn't stop two different users (or two tabs) independently
+  clicking "Refresh Instrument Master - Dhan" at once, both racing to
+  repopulate `dhan_equity_instruments`/`dhan_fo_instruments`, the shared
+  table migration `0035` is for. `dhan_instrument_repo`'s replace
+  functions used to `delete()` then `insert()` the fresh rows -- two
+  overlapping callers' inserts could land the same `security_id` (the
+  primary key) twice, confirmed live as `duplicate key value violates
+  unique constraint "dhan_equity_instruments_pkey"` surfacing through the
+  Stock & Option Data Refresh button (back when that button could trigger
+  this download itself). Fixed by upserting (`on_conflict="security_id"`)
   instead of inserting -- a colliding row from a racing writer now just
   overwrites instead of erroring, since both writers downloaded the same
   Dhan CSV and would write identical data for that ID anyway.
@@ -910,6 +919,16 @@ security every other per-user table here relies on -- not separately
 encrypted. This app's own code only ever calls the read-only endpoints
 above. "Disconnect" removes the saved credentials only; previously synced
 holdings/positions are left as-is.
+
+Right below the connect form, a separate **"Refresh Instrument Master -
+Dhan"** button (`_render_dhan_instrument_master_refresh`) appears
+whenever Data Provider is Dhan -- needs no connection/token of its own,
+since Dhan's instrument master is public reference data. This is the
+*only* thing that downloads and persists `dhan_equity_instruments`/
+`dhan_fo_instruments` (migration `0035`); Stock & Option Data Refresh
+only ever reads whatever this button last fetched, however old (see
+[On-demand refresh](#on-demand-refresh-the-refresh-bar) above for why
+that was deliberately decoupled).
 
 **Zerodha** (`src/data_providers/zerodha_provider.py`) works through a
 genuinely different mechanism -- Kite Connect is a paid, app-based

@@ -175,18 +175,19 @@ def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
     deliberately reverted from an earlier `ThreadPoolExecutor` version.
     Confirmed live: both legs make calls through this function's own
     `client` -- the instrument-master loaders internally
-    (dhan_provider.py, migration 0035's Supabase cache) and this
-    function's own `snapshot_repo.upsert_*`/`_dhan_fo_universe` reads --
-    and Supabase's cached client object is not safe for two threads to
-    call concurrently (`httpx.RemoteProtocolError`, the connection gets
-    corrupted rather than queued). The two genuinely expensive shared
-    resources this was trying to overlap are already serialized by locks
-    regardless of threading -- the Dhan CSV download
-    (`_get_raw_instrument_master`, once per IST day) and every Dhan API
-    call (`_throttle`, a global minimum-interval gate) -- so sequential
-    execution here costs little beyond not overlapping the two legs' own
-    network *wait* time, a small trade for not corrupting Supabase
-    connections. Returns a small summary dict for
+    (dhan_provider.py's _load_instrument_master/_load_fo_instrument_master,
+    reading migration 0035's Supabase cache -- see their own docstrings
+    for why this button no longer downloads Dhan's instrument-master CSV
+    itself at all, that's now Settings' own "Refresh Instrument Master -
+    Dhan" button's job) and this function's own
+    `snapshot_repo.upsert_*`/`_dhan_fo_universe` reads -- and Supabase's
+    cached client object is not safe for two threads to call concurrently
+    (`httpx.RemoteProtocolError`, the connection gets corrupted rather
+    than queued). Every Dhan API call is already serialized by a lock
+    regardless of threading (`_throttle`, a global minimum-interval
+    gate), so sequential execution here costs little beyond not
+    overlapping the two legs' own network *wait* time, a small trade for
+    not corrupting Supabase connections. Returns a small summary dict for
     _render_live_prices_summary."""
     connection = portfolio_repo.get_broker_connection(client, user_id, broker)
     if connection is None or not connection.access_token:

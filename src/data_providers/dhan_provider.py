@@ -26,7 +26,7 @@ from src.models.enums import FetchStatus, FetchType
 from src.models.fetch_log import ProviderFetchLog
 from src.models.market_data import PricePoint, Quote
 from src.repositories import dhan_instrument_repo, fetch_log_repo
-from src.utils.timezones import now_ist, to_ist
+from src.utils.timezones import now_ist
 
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -170,42 +170,40 @@ def _download_equity_master(raw_df: pd.DataFrame) -> pd.DataFrame:
 def _load_instrument_master(client: Client | None = None) -> pd.DataFrame:
     """Returns the NSE-equity slice of Dhan's instrument master, checking
     (in order) an in-memory same-process cache, then -- if `client` is
-    given -- the shared `dhan_equity_instruments` table (migration 0035,
-    fresh if refreshed today per `provider_fetch_log`), only falling back
-    to a real Dhan download (`_download_equity_master`) when neither has
-    today's data. A fresh download is persisted back to `client` (so the
-    *next* process/user skips the download too) before being cached
-    in-memory. `client=None` (e.g. no Supabase wiring available) keeps
-    this in-memory-only, same as before this cache existed."""
+    given -- the shared `dhan_equity_instruments` table (migration 0035).
+
+    Deliberately does NOT fall back to a real Dhan download when `client`
+    is given and the DB cache is empty/stale -- that used to happen here
+    on request (this app's own "Stock & Option Data Refresh" button would
+    silently pay for a full ~211,742-row CSV download whenever it judged
+    the cache "not fresh today"), which made that button unpredictably
+    slow depending on which process/worker happened to handle a given
+    click. `refresh_dhan_instrument_master` (Settings' "Refresh Instrument
+    Master - Dhan" button) is now the *only* thing that downloads and
+    persists this data; a `client`-backed call here just reads whatever's
+    already there, however old, and raises a clear `ProviderError`
+    pointing at that button if the table has never been populated at all
+    (get_quotes/get_fo_quotes let this propagate as a real, actionable
+    error rather than silently resolving nothing). `client=None` (e.g. a
+    script/cron context with no Supabase wiring at all) keeps the old
+    real-download fallback, since there's no cache to read there in the
+    first place."""
     today = now_ist().date().isoformat()
     with _master_cache_lock:
         cached = _equity_master_cache.get(today)
     if cached is not None:
         return cached
 
-    df: pd.DataFrame | None = None
     if client is not None:
-        entry = fetch_log_repo.get_last_successful_fetch(client, FetchType.DHAN_INSTRUMENT_MASTER, "equity")
-        if entry is not None and to_ist(entry.finished_at).date().isoformat() == today:
-            rows = dhan_instrument_repo.get_equity_instruments(client)
-            if rows:
-                df = pd.DataFrame(rows)
-
-    if df is None:
-        df = _download_equity_master(_get_raw_instrument_master())
-        if client is not None:
-            started_at = datetime.now(IST)
-            dhan_instrument_repo.replace_equity_instruments(client, df.to_dict("records"))
-            fetch_log_repo.log_fetch(
-                client,
-                ProviderFetchLog(
-                    provider_name="equity",
-                    fetch_type=FetchType.DHAN_INSTRUMENT_MASTER,
-                    status=FetchStatus.SUCCESS,
-                    started_at=started_at,
-                    finished_at=datetime.now(IST),
-                ),
+        rows = dhan_instrument_repo.get_equity_instruments(client)
+        if not rows:
+            raise ProviderError(
+                'Dhan instrument master has never been fetched -- click "Refresh Instrument Master - Dhan" '
+                "in Settings' Data Provider section first."
             )
+        df = pd.DataFrame(rows)
+    else:
+        df = _download_equity_master(_get_raw_instrument_master())
 
     with _master_cache_lock:
         _equity_master_cache.clear()  # only "today" is ever relevant
@@ -340,48 +338,100 @@ def _download_fo_master(raw_df: pd.DataFrame) -> pd.DataFrame:
 
 def _load_fo_instrument_master(client: Client | None = None) -> pd.DataFrame:
     """F&O counterpart of _load_instrument_master -- same in-memory ->
-    shared dhan_fo_instruments table (migration 0035) -> real download
-    fallback chain, persisted independently from the equity slice
-    (provider_name="fo" vs "equity" in provider_fetch_log)."""
+    shared dhan_fo_instruments table (migration 0035) chain, same
+    deliberate no-download-on-miss behavior when `client` is given (see
+    _load_instrument_master's own docstring for why) -- persisted
+    independently from the equity slice (provider_name="fo" vs "equity"
+    in provider_fetch_log), but both are always refreshed together by
+    refresh_dhan_instrument_master."""
     today = now_ist().date().isoformat()
     with _master_cache_lock:
         cached = _fo_master_cache.get(today)
     if cached is not None:
         return cached
 
-    df: pd.DataFrame | None = None
     if client is not None:
-        entry = fetch_log_repo.get_last_successful_fetch(client, FetchType.DHAN_INSTRUMENT_MASTER, "fo")
-        if entry is not None and to_ist(entry.finished_at).date().isoformat() == today:
-            rows = dhan_instrument_repo.get_fo_instruments(client)
-            if rows:
-                df = pd.DataFrame(rows)
-                df["expiry_date"] = pd.to_datetime(df["expiry_date"]).dt.date
-                df["strike_price"] = df["strike_price"].astype(float)
-
-    if df is None:
+        rows = dhan_instrument_repo.get_fo_instruments(client)
+        if not rows:
+            raise ProviderError(
+                'Dhan F&O instrument master has never been fetched -- click "Refresh Instrument Master - '
+                'Dhan" in Settings\' Data Provider section first.'
+            )
+        df = pd.DataFrame(rows)
+        df["expiry_date"] = pd.to_datetime(df["expiry_date"]).dt.date
+        df["strike_price"] = df["strike_price"].astype(float)
+    else:
         df = _download_fo_master(_get_raw_instrument_master())
-        if client is not None:
-            started_at = datetime.now(IST)
-            db_rows = df.assign(expiry_date=df["expiry_date"].astype(str), strike_price=df["strike_price"].astype(float)).to_dict(
-                "records"
-            )
-            dhan_instrument_repo.replace_fo_instruments(client, db_rows)
-            fetch_log_repo.log_fetch(
-                client,
-                ProviderFetchLog(
-                    provider_name="fo",
-                    fetch_type=FetchType.DHAN_INSTRUMENT_MASTER,
-                    status=FetchStatus.SUCCESS,
-                    started_at=started_at,
-                    finished_at=datetime.now(IST),
-                ),
-            )
 
     with _master_cache_lock:
         _fo_master_cache.clear()  # only "today" is ever relevant
         _fo_master_cache[today] = df
     return df
+
+
+def refresh_dhan_instrument_master(client: Client) -> dict:
+    """Settings' "Refresh Instrument Master - Dhan" button
+    (src/utils/data_provider_settings.py) -- the *only* thing that
+    downloads Dhan's instrument master CSV and persists the equity/F&O
+    slices (dhan_equity_instruments/dhan_fo_instruments, migration 0035)
+    now that _load_instrument_master/_load_fo_instrument_master no
+    longer do so implicitly on a cache miss (see their own docstrings for
+    why that was decoupled from Stock & Option Data Refresh). Downloads
+    the raw CSV once (shared via _get_raw_instrument_master, same as the
+    equity/F&O legs of a live-price refresh already share it), filters
+    both slices from it, persists both, and logs both fetches.
+
+    Also updates this process's own in-memory caches immediately, not
+    just the DB ones -- otherwise a resolve call in *this same process*
+    right after clicking the button would keep serving whatever it
+    already had cached for today until the process restarts or the IST
+    date rolls over, making the button look like it did nothing.
+
+    Needs no broker connection or access token -- the instrument master
+    (images.dhan.co/api-data/api-scrip-master.csv) is public Dhan
+    reference data, not account-specific. Returns
+    `{"equity_count", "fo_count"}` for the button's own success message."""
+    raw = _get_raw_instrument_master()
+    today = now_ist().date().isoformat()
+
+    equity_df = _download_equity_master(raw)
+    started_at = datetime.now(IST)
+    dhan_instrument_repo.replace_equity_instruments(client, equity_df.to_dict("records"))
+    fetch_log_repo.log_fetch(
+        client,
+        ProviderFetchLog(
+            provider_name="equity",
+            fetch_type=FetchType.DHAN_INSTRUMENT_MASTER,
+            status=FetchStatus.SUCCESS,
+            started_at=started_at,
+            finished_at=datetime.now(IST),
+        ),
+    )
+
+    fo_df = _download_fo_master(raw)
+    started_at = datetime.now(IST)
+    fo_db_rows = fo_df.assign(
+        expiry_date=fo_df["expiry_date"].astype(str), strike_price=fo_df["strike_price"].astype(float)
+    ).to_dict("records")
+    dhan_instrument_repo.replace_fo_instruments(client, fo_db_rows)
+    fetch_log_repo.log_fetch(
+        client,
+        ProviderFetchLog(
+            provider_name="fo",
+            fetch_type=FetchType.DHAN_INSTRUMENT_MASTER,
+            status=FetchStatus.SUCCESS,
+            started_at=started_at,
+            finished_at=datetime.now(IST),
+        ),
+    )
+
+    with _master_cache_lock:
+        _equity_master_cache.clear()
+        _equity_master_cache[today] = equity_df
+        _fo_master_cache.clear()
+        _fo_master_cache[today] = fo_df
+
+    return {"equity_count": len(equity_df), "fo_count": len(fo_df)}
 
 
 def resolve_fo_security_id(

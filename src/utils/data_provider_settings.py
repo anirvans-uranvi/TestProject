@@ -25,7 +25,7 @@ import streamlit as st
 from postgrest.exceptions import APIError
 
 from src.data_providers.base import ProviderError
-from src.data_providers.dhan_provider import DhanAuthError, DhanProvider
+from src.data_providers.dhan_provider import DhanAuthError, DhanProvider, refresh_dhan_instrument_master
 from src.data_providers.zerodha_provider import ZerodhaAuthError, ZerodhaProvider
 from src.models.enums import FetchStatus, FetchType
 from src.models.fetch_log import ProviderFetchLog
@@ -34,7 +34,7 @@ from src.models.user import UserSettings
 from src.repositories import fetch_log_repo, fo_repo, portfolio_repo, settings_repo
 from src.services import portfolio_service
 from src.utils.portfolio_page import ensure_cache_bust
-from src.utils.timezones import now_ist, to_ist
+from src.utils.timezones import format_ist, now_ist, to_ist
 
 _PROVIDER_LABELS = {"yfinance_bhavcopy": "YFinance + NSE/BSE Bhavcopy", "dhan": "Dhan", "zerodha": "Zerodha"}
 
@@ -384,6 +384,37 @@ def _render_dhan_connect_section(*, client, user_id: str) -> None:
             _sync_dhan(client=client, user_id=user_id, connection=updated_connection)
 
 
+def _render_dhan_instrument_master_refresh(*, client) -> None:
+    """"Refresh Instrument Master - Dhan" -- the only thing that
+    downloads and persists dhan_equity_instruments/dhan_fo_instruments
+    (migration 0035) now that Stock & Option Data Refresh no longer does
+    so implicitly on a stale-cache click (see dhan_provider.py's
+    _load_instrument_master/_load_fo_instrument_master docstrings for
+    why that was decoupled). Shown regardless of whether a Dhan account
+    is actually connected yet -- the instrument master is public Dhan
+    reference data, unrelated to any one account's own credentials, so
+    there's nothing to connect first."""
+    entry = fetch_log_repo.get_last_successful_fetch(client, FetchType.DHAN_INSTRUMENT_MASTER, "fo")
+    when = format_ist(entry.finished_at) if entry else "never"
+    st.caption(f"Last instrument master refresh: {when}")
+    st.caption(
+        "Resolves every symbol/contract Stock & Option Data Refresh needs to quote (~211,742-row Dhan CSV, "
+        "so it's a slower, deliberately separate step -- Stock & Option Data Refresh only ever reads "
+        "whatever was fetched here, however old, rather than re-downloading this itself)."
+    )
+    if st.button("Refresh Instrument Master - Dhan", key="dhan_instrument_master_refresh_btn"):
+        with st.spinner("Downloading Dhan's instrument master..."):
+            try:
+                summary = refresh_dhan_instrument_master(client)
+            except ProviderError as exc:
+                st.error(f"Failed to refresh Dhan instrument master: {exc}")
+            else:
+                st.success(
+                    f"Refreshed -- {summary['equity_count']} equity/ETF instruments, "
+                    f"{summary['fo_count']} futures/option contracts."
+                )
+
+
 def _render_zerodha_connect_section(*, client, user_id: str) -> None:
     try:
         connection = portfolio_repo.get_broker_connection(client, user_id, "Zerodha")
@@ -542,6 +573,8 @@ def render_data_provider_section(*, client, user_id: str, current: UserSettings)
 
     if selected == "dhan":
         _render_dhan_connect_section(client=client, user_id=user_id)
+        st.divider()
+        _render_dhan_instrument_master_refresh(client=client)
     elif selected == "zerodha":
         _render_zerodha_connect_section(client=client, user_id=user_id)
     else:
