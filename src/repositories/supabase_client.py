@@ -33,12 +33,17 @@ def get_anon_client() -> Client:
 
 
 def get_user_client(access_token: str, refresh_token: str | None = None) -> Client:
-    """Anon client scoped to a logged-in user's session so RLS applies."""
+    """Anon client scoped to a logged-in user's session so RLS applies.
+
+    `auth.set_session()` transparently exchanges an expired access token
+    for a new one via the refresh token -- deliberately left to propagate
+    on failure (e.g. the refresh token itself is invalid/expired) instead
+    of being swallowed, so `session.get_user_client_cached()` can react by
+    signing the user out cleanly rather than continuing with a client
+    stuck on a stale, now-rejected access token.
+    """
     client = get_anon_client()
     client.postgrest.auth(access_token)
     if refresh_token:
-        try:
-            client.auth.set_session(access_token, refresh_token)
-        except Exception:  # noqa: BLE001 - session refresh is best-effort here
-            pass
+        client.auth.set_session(access_token, refresh_token)
     return client

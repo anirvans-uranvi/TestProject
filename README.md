@@ -201,6 +201,29 @@ settings.
   Templates -> Reset Password -> add `{{ .Token }}` somewhere in the body
   (Supabase's default template doesn't show it by default, only the
   link). The link Supabase still includes is otherwise unused by this app.
+- **Logged-in sessions used to get silently, permanently kicked not long
+  after login.** Root cause: `get_user_client()` calls `auth.set_session()`
+  on every page render, which transparently swaps an expired access token
+  for a new one via the refresh token -- but a brand new `Client` is built
+  on every single Streamlit rerun, and the refreshed token pair was never
+  written back anywhere. Supabase also rotates refresh tokens on every use
+  (the old one is invalidated the instant a new one is issued), so the
+  *next* rerun after the access token's ~1 hour expiry retried that same
+  now-stale refresh token and failed -- silently, since `is_logged_in()`
+  only checks token *presence*, not validity, so the app just looked
+  broken instead of re-prompting for login. `get_user_client_cached()` in
+  `src/utils/session.py` now reads the (possibly just-refreshed) session
+  back off the client via `auth.get_session()` after every call and
+  re-saves both tokens into `st.session_state`, so a session now survives
+  for as long as the refresh token itself stays valid -- Supabase's
+  default is a sliding 30 days -- instead of breaking on the first click
+  after the first hour. If the stored refresh token is ever rejected
+  outright (already used from another tab, or a genuinely stale session),
+  it signs the user out and reruns so they land back on a normal login
+  form instead of a wall of 401s. The initial access-token lifetime
+  itself (default 3600s) is a Supabase project setting, not something
+  this repo controls -- Dashboard -> Authentication -> Sessions, if you
+  want that window itself longer.
 
 ## Environment variables
 

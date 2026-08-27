@@ -35,7 +35,41 @@ def current_user_email() -> str | None:
 
 
 def get_user_client_cached() -> Client:
-    return get_user_client(st.session_state["sb_access_token"], st.session_state.get("sb_refresh_token"))
+    """Builds a fresh Supabase client scoped to the logged-in user, and
+    persists any refreshed access/refresh token pair back into
+    st.session_state.
+
+    This is the fix for sessions getting "disconnected" not long after
+    login: get_user_client()'s set_session() call transparently swaps an
+    expired access token for a new one using the refresh token, but that
+    only ever updated the one throwaway Client instance built for that
+    single call -- a brand new Client is created on every Streamlit
+    rerun, and the refreshed pair was never written back here. Supabase
+    also rotates refresh tokens on every use (the old one is invalidated
+    the moment a new one is issued), so the *next* rerun after the access
+    token's ~1 hour expiry would retry that same now-stale refresh token
+    from session_state and fail -- silently, since is_logged_in() only
+    checks token *presence*, not validity, so the app just looked broken
+    instead of re-prompting for login. Persisting the refreshed pair here
+    every time keeps the session alive for as long as the refresh token
+    itself remains valid (Supabase's default is a sliding 30 days)
+    instead of breaking on the very next click after the first hour.
+
+    If the stored refresh token has itself been rejected (already used
+    from another tab, or genuinely expired), sign out and rerun so the
+    user lands back on the normal login form instead of a wall of 401s.
+    """
+    try:
+        client = get_user_client(st.session_state["sb_access_token"], st.session_state.get("sb_refresh_token"))
+    except Exception:  # noqa: BLE001 - refresh token invalid/expired
+        sign_out()
+        st.rerun()
+        raise  # pragma: no cover - st.rerun() never returns; re-raises if it somehow did
+    session = client.auth.get_session()
+    if session is not None:
+        st.session_state["sb_access_token"] = session.access_token
+        st.session_state["sb_refresh_token"] = session.refresh_token
+    return client
 
 
 def sign_in(email: str, password: str) -> str | None:
