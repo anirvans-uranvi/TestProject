@@ -1470,6 +1470,57 @@ only match one of `is_csp_trade_type`/`is_covered_call_trade_type`/
 `is_other_trade_type` at a time) -- My Trades itself is unfiltered and
 keeps showing all of them.
 
+### Trade History (`pages/14_Trade_History.py`) -- Dhan only
+
+Unlike every other portfolio page above, this one isn't built from
+holdings/positions (a current-state snapshot with no notion of what's
+already been closed) -- it's built from `portfolio_trade_fills`
+(migration `0038_portfolio_trade_fills.sql`), one row per executed fill,
+synced via Settings' Data Provider section -> **"Sync Trade History from
+Dhan"** button (`src/utils/data_provider_settings.py`'s
+`_render_dhan_trade_history_sync`, calling `DhanProvider.get_trade_history`
+against `GET /v2/trades/{from-date}/{to-date}/{page}`). Deliberately a
+separate sync from Stock & Option Data Refresh / Portfolio Refresh --
+pulling a potentially long date range of history is a different
+cost/cadence than syncing a current-state snapshot, same reasoning as
+Settings' "Refresh Instrument Master - Dhan" button being split out on
+its own. The first sync lets you pick how far back to backfill (a date
+picker defaulting to 365 days ago); every sync after that is incremental,
+continuing from the latest already-synced fill's date. Fills are
+**upserted**, not replaced -- unlike `replace_broker_holdings`/
+`replace_broker_positions`'s delete-then-insert semantics, a historical
+fill is never deleted just because a later sync's date range doesn't
+happen to include it again (`portfolio_repo.upsert_trade_fills`, keyed on
+`exchange_trade_id`, the exchange's own stable per-fill identifier).
+
+The page itself has two sections:
+- **Realized P&L** -- `portfolio_service.compute_realized_pnl` FIFO-matches
+  every fill into closed lots, grouped by contract identity (symbol,
+  expiry, strike, option type -- a plain equity fill's latter three are
+  all `None`, which is itself a valid, distinct group). This is the one
+  place in the app showing *realized*, not unrealized, P&L -- every other
+  portfolio page's P&L is computed against a still-open position's LTP.
+  Any quantity never closed by a group's fills isn't shown here at all;
+  it's exactly what's already visible as a current
+  `portfolio_holding`/`portfolio_position` row elsewhere.
+- **Trade Journal** -- every synced fill, flat, filterable by symbol.
+
+**Not attempted here**: linking a closed lot back to My Trades/Analyse
+Trade's manual "Trade" grouping (`group_into_trades`/`trade_id`) -- that
+grouping has no notion of a closed position at all today (it only ever
+sees currently-open holdings/positions rows), so Realized P&L groups by
+raw contract identity instead, independent of any Trade Type label.
+
+> [!NOTE]
+> `dhan_trade_fills_from_api` (the `/v2/trades` row parser) is
+> deliberately left unimplemented pending confirmation of the endpoint's
+> real response shape against a live account -- Dhan's docs confirm the
+> fields it returns but not whether option/future contract details come
+> as structured fields (like `/v2/positions` provides) or need decoding
+> from `customSymbol` by hand. The sync button surfaces this plainly
+> ("Not available yet: ...") rather than guessing at a shape and getting
+> it wrong. See that function's docstring in `src/services/portfolio_service.py`.
+
 ## Docker
 
 ```bash

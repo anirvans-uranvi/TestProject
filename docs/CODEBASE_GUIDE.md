@@ -1977,12 +1977,15 @@ sees; don't confuse the two if you touch either) — rather than a separate
 module, since the auth/header/throttle mechanics are identical; only the
 credentials differ (per-account here, one row per `(user_id, "Dhan")`,
 vs. one app-wide pair from `.env`/`Settings` for the cron price
-pipeline). Three new methods were added to
-that same class: `get_holdings()` (`GET /v2/holdings`), `get_positions()`
-(`GET /v2/positions`), and `get_ltp_by_security_id()` (`POST
-/v2/marketfeed/ltp`, generalized to arbitrary exchange segments like
-`NSE_FNO`/`IDX_I`, unlike the existing `get_quotes()` which is hardcoded
-to `NSE_EQ` for the equity pipeline). These deliberately skip the
+pipeline). Methods added to that same class: `get_holdings()` (`GET
+/v2/holdings`), `get_positions()` (`GET /v2/positions`),
+`get_ltp_by_security_id()` (`POST /v2/marketfeed/ltp`, generalized to
+arbitrary exchange segments like `NSE_FNO`/`IDX_I`, unlike the existing
+`get_quotes()` which is hardcoded to `NSE_EQ` for the equity pipeline),
+and `get_trade_history(from_date, to_date)` (`GET
+/v2/trades/{from-date}/{to-date}/{page}`, paginating from page `0` until
+an empty page comes back — feeds the Trade History page's Realized
+P&L/journal, see the Portfolio pages section below). These deliberately skip the
 `@retry`-decorated, auto-backoff `_post()` the price pipeline uses — a
 manual sync click should fail fast (especially on an expired token)
 rather than silently retrying for up to ~20s — and instead go through a
@@ -2959,6 +2962,97 @@ under one `st.navigation` dict section, `"My Trades"` — see the
 `st.Page(...)` list) was needed to get My CSP/My CC/My Other Trades to
 render nested under a "My Trades" sidebar header instead of as
 top-level, unrelated-looking sidebar entries.
+
+**Trade History (`pages/14_Trade_History.py`)** — Dhan only, and the one
+portfolio page that doesn't belong in the `st.navigation` groupings
+above: it's registered under `"My Portfolio"` (alongside Holdings/
+Positions) in `app.py`, not `"My Trades"`, since it shares neither
+`build_trade_legs`/`group_into_trades` nor Stock & Option Data Refresh/
+Portfolio Refresh with that family — **a real gap this caught**: the page
+was written and fully tested before it occurred that `app.py`'s explicit
+`st.Page(...)` registration (this repo doesn't use file-based page
+auto-discovery — see the "Streamlit app" section) means a new
+`pages/*.py` file is completely unreachable, no error, no 404, just
+absent from the sidebar, until it's added there by hand.
+
+Built from `portfolio_trade_fills` (migration
+`0038_portfolio_trade_fills.sql`) instead of holdings/positions — one row
+per executed fill, synced via Settings' **"Sync Trade History from
+Dhan"** button (`data_provider_settings.py`'s
+`_render_dhan_trade_history_sync`, calling the new
+`DhanProvider.get_trade_history(from_date, to_date)`, which paginates
+`GET /v2/trades/{from-date}/{to-date}/{page}` — page starts at `0`, Dhan
+returns an empty list once exhausted). Deliberately a separate, explicit
+sync from `_sync_dhan`/`sync_broker_portfolio`'s holdings/positions
+snapshot, same "read from cache vs. download and persist" decoupling
+reasoning as `_render_dhan_instrument_master_refresh` — pulling a
+potentially long date range of history is a different cost/cadence than
+a fast current-state sync, and a first-time backfill is a one-off,
+occasional action (the render function shows an `st.date_input`
+defaulting to 365 days ago only on the very first sync; every sync after
+that continues automatically from `portfolio_repo.latest_trade_fill_date`
++ 1 day). Logs a new `FetchType.TRADE_HISTORY_SYNC` fetch, needing its
+own `provider_fetch_log` CHECK-constraint migration (`0039`, same
+drop/recreate pattern as `0033`/`0037`) plus its own narrow-by-value
+INSERT policy (same RLS gap as `0034`/`0036` — `provider_fetch_log` has
+no `user_id` column to scope by).
+
+`portfolio_repo.upsert_trade_fills` is the one place this whole feature
+departs from `replace_broker_holdings`/`replace_broker_positions`'s
+delete-then-insert "replace" semantics: fills are **upserted**, keyed on
+`(user_id, portfolio_name, broker, exchange_trade_id)` — the exchange's
+own stable, unique-per-fill identifier — so historical fills are never
+lost just because a later sync's date range doesn't happen to include
+them again. This single difference is called out explicitly in both the
+table's migration comment and the repo function's docstring, since it's
+easy to reflexively copy the holdings/positions pattern here and silently
+delete history.
+
+`portfolio_service.compute_realized_pnl` is the analytical core — a
+pure, thoroughly-tested FIFO lot-matcher (see
+`tests/test_portfolio_service.py::TestComputeRealizedPnl`, covering full
+close, partial close, multiple-opens-closed-oldest-first, a position
+*flip* — a closing fill larger than every open lot opens a new lot in the
+opposite direction rather than erroring — and confirming two different
+contracts sharing a symbol never cross-match). Grouped by contract
+identity (`symbol`, `expiry_date`, `strike_price`, `option_type` — a
+plain equity fill has the latter three all `None`, itself a valid,
+distinct group key), it emits one dict per closed lot with charges
+pro-rated by qty from both the opening and closing fill's own
+`taxes_and_charges`/`brokerage` (each converted to a per-unit rate since
+one fill can be partially consumed across several separate closes). Any
+quantity never closed isn't emitted at all — it's exactly what's already
+visible as a current `portfolio_holding`/`portfolio_position` row
+elsewhere. Guards against float drift on repeated subtraction with a
+`1e-9` epsilon rather than exact-zero comparisons, since real money math
+over many partial fills can otherwise leave a lot "open" at
+`1e-13` instead of `0`.
+
+**Deliberately left unimplemented**: `portfolio_service.dhan_trade_fills_from_api`
+(the `/v2/trades` row parser feeding `trade_fills_to_records`) raises
+`NotImplementedError` — Dhan's docs confirm the fields `/v2/trades`
+returns (`exchangeTradeId`, `customSymbol`, `exchangeSegment`,
+`transactionType`, `tradedQuantity`, `tradedPrice`, `exchangeTime`, the
+per-fill charge fields, etc.) but never confirm whether option/future
+contract detail arrives as structured fields the way `drvExpiryDate`/
+`drvStrikePrice`/`drvOptionType` do on `/v2/positions` (see
+`dhan_positions_from_api` above), or needs decoding from `customSymbol`
+by hand instead. Writing this by guessing risks silently corrupting every
+option/future fill's symbol/strike/expiry with no obvious symptom — worse
+than refusing to guess. The Settings button's click handler catches this
+specific exception and shows "Not available yet: ..." rather than
+crashing. Write this function's body only after inspecting one real page
+of live trade history (see its own docstring for the exact plan), then
+reuse `_dhan_underlying_symbol` for symbol decoding the same way
+`dhan_positions_from_api` does if the structured fields turn out to be
+present.
+
+**Not attempted at all**: linking a closed lot back to My Trades/Analyse
+Trade's manual "Trade" grouping (`group_into_trades`/`trade_id`) — that
+grouping only ever sees currently-open holdings/positions rows, with no
+notion of a closed position, so Realized P&L groups by raw contract
+identity instead, independent of any Trade Type label. Revisit only if
+that turns out to be insufficient in practice.
 
 ## Auth: a non-obvious quirk
 

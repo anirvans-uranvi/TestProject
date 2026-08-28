@@ -16,12 +16,12 @@ from __future__ import annotations
 
 import calendar
 import re
-from collections import Counter
+from collections import Counter, deque
 from datetime import date, timedelta
 
 from src.models.company import Company
 from src.models.enums import CompanyType, OptionType
-from src.models.portfolio import PortfolioHolding, PortfolioPosition
+from src.models.portfolio import PortfolioHolding, PortfolioPosition, PortfolioTradeFill
 
 
 _MONTH_ABBR = {
@@ -285,6 +285,138 @@ def _dedupe_raw_names(positions: list[dict]) -> None:
             candidate = f"{base} #{n}"
         p["raw_name"] = candidate
         seen.add(candidate)
+
+
+def dhan_trade_fills_from_api(rows: list[dict]) -> list[dict]:
+    """Translates GET /v2/trades rows (dhan_provider.get_trade_history)
+    into this app's own trade-fill-dict shape, for trade_fills_to_records.
+
+    NOT YET IMPLEMENTED -- deliberately. Dhan's docs confirm /v2/trades
+    returns orderId/exchangeOrderId/exchangeTradeId, customSymbol,
+    exchangeSegment, transactionType, tradedQuantity, tradedPrice,
+    exchangeTime, productType, orderType, isin, instrument, and a set of
+    per-fill charge fields (sebiTax, stt, brokerageCharges,
+    serviceTax, exchangeTransactionCharges, stampDuty) -- but do NOT
+    confirm whether structured drvExpiryDate/drvStrikePrice/drvOptionType
+    fields (which /v2/positions provides directly -- see
+    dhan_positions_from_api above) are also present here, or whether
+    option/future contract details must instead be decoded from
+    customSymbol by hand. This module's own docstring already carries the
+    exact same caveat for every other endpoint ("verify against a live
+    account/sandbox... Dhan has changed response shapes across
+    releases"), and it fully applies here: write this function's body
+    only after inspecting one real page of live trade history, then reuse
+    _dhan_underlying_symbol for symbol decoding the same way
+    dhan_positions_from_api does if the structured fields turn out to be
+    present."""
+    raise NotImplementedError(
+        "dhan_trade_fills_from_api needs the real /v2/trades response shape confirmed "
+        "against a live account before it can be written -- see this function's docstring"
+    )
+
+
+def trade_fills_to_records(
+    user_id: str, portfolio_name: str, broker: str, fills: list[dict]
+) -> list[PortfolioTradeFill]:
+    """Converts parsed trade-fill dicts into PortfolioTradeFill rows ready
+    for portfolio_repo.upsert_trade_fills -- same conversion pattern as
+    holdings_to_records/positions_to_records."""
+    return [
+        PortfolioTradeFill(
+            user_id=user_id,
+            portfolio_name=portfolio_name,
+            broker=broker,
+            exchange_trade_id=f["exchange_trade_id"],
+            order_id=f.get("order_id"),
+            raw_name=f["raw_name"],
+            symbol=f["symbol"],
+            expiry_date=f["expiry_date"],
+            strike_price=f["strike_price"],
+            option_type=f["option_type"],
+            transaction_type=f["transaction_type"],
+            qty=f["qty"],
+            price=f["price"],
+            product_type=f.get("product_type"),
+            traded_at=f["traded_at"],
+            brokerage=f.get("brokerage", 0),
+            taxes_and_charges=f.get("taxes_and_charges", 0),
+        )
+        for f in fills
+    ]
+
+
+def _trade_fill_contract_key(fill: PortfolioTradeFill) -> tuple:
+    return (fill.symbol, fill.expiry_date, fill.strike_price, fill.option_type)
+
+
+def compute_realized_pnl(fills: list[PortfolioTradeFill]) -> list[dict]:
+    """FIFO lot-matching over every synced trade fill, grouped by contract
+    identity -- (symbol, expiry_date, strike_price, option_type). A plain
+    equity/ETF fill has the latter three all None, which is itself a
+    valid, distinct group key (one equity = one group), so stock and
+    option/future fills are never cross-matched.
+
+    Within each group, fills are walked in traded_at order keeping a FIFO
+    queue of open lots. A fill on the *same* side as the current net
+    position (or the group's very first fill) opens a new lot. A fill on
+    the *opposite* side consumes open lots oldest-first, emitting one
+    closed-lot dict per (partial or full) match -- `gross_pnl` follows the
+    entry side: a long lot's close is `(exit_price - entry_price) * qty`,
+    a short lot's is `(entry_price - exit_price) * qty`. If a closing
+    fill's quantity exceeds every open lot's remaining quantity (a
+    position *flip*, e.g. long 10 fully closed by a sell of 15), the
+    excess opens a new lot in the new direction rather than being dropped
+    or raising.
+
+    Any quantity never closed by the end of a group's fills isn't emitted
+    at all -- that's exactly what's already visible as a current
+    portfolio_position/portfolio_holding row elsewhere; this function only
+    ever reports on what's actually closed. Charges are pro-rated by qty
+    from both the opening and closing fill's own taxes_and_charges (each
+    per-unit, `fill.taxes_and_charges / fill.qty`, since a fill can be
+    partially consumed across several closes)."""
+    _EPS = 1e-9  # guards against float drift on repeated subtraction, not a real trading tolerance
+    groups: dict[tuple, list[PortfolioTradeFill]] = {}
+    for fill in fills:
+        groups.setdefault(_trade_fill_contract_key(fill), []).append(fill)
+
+    closed_lots: list[dict] = []
+    for (symbol, expiry_date, strike_price, option_type), group_fills in groups.items():
+        ordered = sorted(group_fills, key=lambda f: f.traded_at)
+        open_lots: deque = deque()  # each: [qty_remaining(signed), price, traded_at, charge_per_unit]
+        for fill in ordered:
+            charge_per_unit = (fill.taxes_and_charges + fill.brokerage) / fill.qty if fill.qty else 0.0
+            remaining_qty = fill.qty if fill.transaction_type == "BUY" else -fill.qty
+            while abs(remaining_qty) > _EPS and open_lots and (open_lots[0][0] > 0) != (remaining_qty > 0):
+                lot = open_lots[0]
+                close_qty = min(abs(lot[0]), abs(remaining_qty))
+                entry_price, entry_time, entry_charge = lot[1], lot[2], lot[3]
+                is_long_lot = lot[0] > 0
+                gross_pnl = (fill.price - entry_price) * close_qty if is_long_lot else (entry_price - fill.price) * close_qty
+                total_charges = (entry_charge + charge_per_unit) * close_qty
+                closed_lots.append(
+                    {
+                        "symbol": symbol,
+                        "expiry_date": expiry_date,
+                        "strike_price": strike_price,
+                        "option_type": option_type,
+                        "entry_time": entry_time,
+                        "exit_time": fill.traded_at,
+                        "qty_closed": close_qty,
+                        "entry_price": entry_price,
+                        "exit_price": fill.price,
+                        "gross_pnl": gross_pnl,
+                        "charges": total_charges,
+                        "net_pnl": gross_pnl - total_charges,
+                    }
+                )
+                lot[0] -= close_qty if is_long_lot else -close_qty
+                remaining_qty -= close_qty if remaining_qty > 0 else -close_qty
+                if abs(lot[0]) < _EPS:
+                    open_lots.popleft()
+            if abs(remaining_qty) > _EPS:
+                open_lots.append([remaining_qty, fill.price, fill.traded_at, charge_per_unit])
+    return closed_lots
 
 
 def zerodha_holdings_from_api(rows: list[dict]) -> list[dict]:

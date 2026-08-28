@@ -5,12 +5,13 @@ sync (Settings' "Data Provider" section) became the only way to
 populate holdings/positions -- see git history for the removed
 parse_zerodha_csv/parse_dhan_csv/parse_zerodha_positions_csv/
 parse_dhan_positions_csv tests."""
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
 from src.models.company import Company
 from src.models.enums import CompanyType, OptionType
+from src.models.portfolio import PortfolioTradeFill
 from src.services import portfolio_service
 
 
@@ -1176,3 +1177,193 @@ class TestApplyFallbackOptionLtp:
         stock_row = self._position(option_type=None, strike_price=None, expiry_date=None)
         positions = portfolio_service.apply_fallback_option_ltp([stock_row], {})
         assert positions[0]["ltp"] is None
+
+
+class TestDhanTradeFillsFromApi:
+    def test_raises_pending_live_shape_confirmation(self):
+        # Deliberate placeholder -- see the function's own docstring. Dhan's
+        # docs don't confirm whether /v2/trades carries structured
+        # drvExpiryDate/drvStrikePrice/drvOptionType fields the way
+        # /v2/positions does, so this is intentionally left unimplemented
+        # until a real account's response has been inspected. Replace this
+        # test with real coverage once that happens.
+        with pytest.raises(NotImplementedError):
+            portfolio_service.dhan_trade_fills_from_api([{"some": "row"}])
+
+
+class TestTradeFillsToRecords:
+    def test_builds_portfolio_trade_fill_models(self):
+        fills = [
+            {
+                "exchange_trade_id": "T1",
+                "order_id": "O1",
+                "raw_name": "SBIN",
+                "symbol": "SBIN",
+                "expiry_date": None,
+                "strike_price": None,
+                "option_type": None,
+                "transaction_type": "BUY",
+                "qty": 10,
+                "price": 900.0,
+                "product_type": "CNC",
+                "traded_at": datetime(2026, 8, 1, 9, 30),
+                "brokerage": 20.0,
+                "taxes_and_charges": 5.0,
+            }
+        ]
+        records = portfolio_service.trade_fills_to_records("u1", "Portfolio 1", "Dhan", fills)
+        assert len(records) == 1
+        assert records[0].user_id == "u1"
+        assert records[0].exchange_trade_id == "T1"
+        assert records[0].symbol == "SBIN"
+        assert records[0].transaction_type == "BUY"
+        assert records[0].qty == 10
+        assert records[0].brokerage == 20.0
+        assert records[0].taxes_and_charges == 5.0
+
+    def test_charges_default_to_zero_when_absent(self):
+        fills = [
+            {
+                "exchange_trade_id": "T1",
+                "raw_name": "SBIN",
+                "symbol": "SBIN",
+                "expiry_date": None,
+                "strike_price": None,
+                "option_type": None,
+                "transaction_type": "SELL",
+                "qty": 10,
+                "price": 900.0,
+                "traded_at": datetime(2026, 8, 1, 9, 30),
+            }
+        ]
+        records = portfolio_service.trade_fills_to_records("u1", "Portfolio 1", "Dhan", fills)
+        assert records[0].brokerage == 0
+        assert records[0].taxes_and_charges == 0
+
+
+class TestComputeRealizedPnl:
+    _next_id = 0
+
+    def _fill(self, **overrides) -> PortfolioTradeFill:
+        TestComputeRealizedPnl._next_id += 1
+        base = dict(
+            user_id="u1",
+            portfolio_name="Portfolio 1",
+            broker="Dhan",
+            exchange_trade_id=f"T{TestComputeRealizedPnl._next_id}",
+            raw_name="SBIN",
+            symbol="SBIN",
+            expiry_date=None,
+            strike_price=None,
+            option_type=None,
+            transaction_type="BUY",
+            qty=10,
+            price=100.0,
+            traded_at=datetime(2026, 8, 1, 9, 30),
+            brokerage=0.0,
+            taxes_and_charges=0.0,
+        )
+        base.update(overrides)
+        return PortfolioTradeFill(**base)
+
+    def test_fully_open_position_emits_nothing(self):
+        fills = [self._fill(transaction_type="BUY", qty=10, price=100.0)]
+        assert portfolio_service.compute_realized_pnl(fills) == []
+
+    def test_full_close_of_a_long_position(self):
+        fills = [
+            self._fill(transaction_type="BUY", qty=100, price=10.0, traded_at=datetime(2026, 8, 1, 9, 30)),
+            self._fill(transaction_type="SELL", qty=100, price=12.0, traded_at=datetime(2026, 8, 2, 9, 30)),
+        ]
+        closed = portfolio_service.compute_realized_pnl(fills)
+        assert len(closed) == 1
+        assert closed[0]["qty_closed"] == 100
+        assert closed[0]["entry_price"] == 10.0
+        assert closed[0]["exit_price"] == 12.0
+        assert closed[0]["gross_pnl"] == pytest.approx(200.0)
+        assert closed[0]["net_pnl"] == pytest.approx(200.0)  # no charges in this fixture
+
+    def test_partial_close_leaves_the_remainder_unclosed(self):
+        fills = [
+            self._fill(transaction_type="BUY", qty=100, price=10.0, traded_at=datetime(2026, 8, 1)),
+            self._fill(transaction_type="SELL", qty=40, price=12.0, traded_at=datetime(2026, 8, 2)),
+        ]
+        closed = portfolio_service.compute_realized_pnl(fills)
+        assert len(closed) == 1
+        assert closed[0]["qty_closed"] == 40
+        assert closed[0]["gross_pnl"] == pytest.approx(80.0)
+
+    def test_multiple_opens_are_closed_oldest_first(self):
+        fills = [
+            self._fill(transaction_type="BUY", qty=50, price=10.0, traded_at=datetime(2026, 8, 1)),
+            self._fill(transaction_type="BUY", qty=50, price=11.0, traded_at=datetime(2026, 8, 2)),
+            self._fill(transaction_type="SELL", qty=100, price=15.0, traded_at=datetime(2026, 8, 3)),
+        ]
+        closed = portfolio_service.compute_realized_pnl(fills)
+        assert len(closed) == 2
+        assert closed[0]["entry_price"] == 10.0
+        assert closed[0]["qty_closed"] == 50
+        assert closed[1]["entry_price"] == 11.0
+        assert closed[1]["qty_closed"] == 50
+
+    def test_short_position_close_profits_when_bought_back_lower(self):
+        fills = [
+            self._fill(transaction_type="SELL", qty=100, price=20.0, traded_at=datetime(2026, 8, 1)),
+            self._fill(transaction_type="BUY", qty=100, price=15.0, traded_at=datetime(2026, 8, 2)),
+        ]
+        closed = portfolio_service.compute_realized_pnl(fills)
+        assert len(closed) == 1
+        assert closed[0]["gross_pnl"] == pytest.approx(500.0)
+
+    def test_position_flip_opens_a_new_lot_in_the_new_direction(self):
+        fills = [
+            self._fill(transaction_type="BUY", qty=10, price=100.0, traded_at=datetime(2026, 8, 1)),
+            self._fill(transaction_type="SELL", qty=15, price=110.0, traded_at=datetime(2026, 8, 2)),
+            self._fill(transaction_type="BUY", qty=5, price=105.0, traded_at=datetime(2026, 8, 3)),
+        ]
+        closed = portfolio_service.compute_realized_pnl(fills)
+        assert len(closed) == 2
+        # First close: the original long 10 fully closed by part of the sell.
+        assert closed[0]["qty_closed"] == 10
+        assert closed[0]["entry_price"] == 100.0
+        assert closed[0]["exit_price"] == 110.0
+        assert closed[0]["gross_pnl"] == pytest.approx(100.0)
+        # Second close: the flip-opened short 5 (at the sell's own price) closed by the final buy.
+        assert closed[1]["qty_closed"] == 5
+        assert closed[1]["entry_price"] == 110.0
+        assert closed[1]["exit_price"] == 105.0
+        assert closed[1]["gross_pnl"] == pytest.approx(25.0)
+
+    def test_different_contracts_on_the_same_symbol_never_cross_match(self):
+        stock_buy = self._fill(
+            symbol="RELIANCE", strike_price=None, option_type=None, expiry_date=None,
+            transaction_type="BUY", qty=10, price=2500.0, traded_at=datetime(2026, 8, 1),
+        )
+        option_sell = self._fill(
+            symbol="RELIANCE", strike_price=2500.0, option_type=OptionType.CE, expiry_date=date(2026, 8, 25),
+            transaction_type="SELL", qty=10, price=2500.0, traded_at=datetime(2026, 8, 1),
+        )
+        closed = portfolio_service.compute_realized_pnl([stock_buy, option_sell])
+        assert closed == []  # both remain open in their own separate contract-identity group
+
+    def test_charges_are_prorated_by_qty_across_partial_closes(self):
+        fills = [
+            self._fill(
+                transaction_type="BUY", qty=100, price=10.0, traded_at=datetime(2026, 8, 1),
+                brokerage=10.0, taxes_and_charges=10.0,  # 0.20/unit total
+            ),
+            self._fill(
+                transaction_type="SELL", qty=40, price=12.0, traded_at=datetime(2026, 8, 2),
+                brokerage=0.0, taxes_and_charges=0.0,
+            ),
+            self._fill(
+                transaction_type="SELL", qty=60, price=12.0, traded_at=datetime(2026, 8, 3),
+                brokerage=0.0, taxes_and_charges=0.0,
+            ),
+        ]
+        closed = portfolio_service.compute_realized_pnl(fills)
+        assert len(closed) == 2
+        assert closed[0]["charges"] == pytest.approx(0.20 * 40)
+        assert closed[1]["charges"] == pytest.approx(0.20 * 60)
+        # Entry charge is spent exactly once in total across both closes.
+        assert closed[0]["charges"] + closed[1]["charges"] == pytest.approx(20.0)

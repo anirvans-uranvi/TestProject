@@ -640,6 +640,22 @@ class DhanProvider(PriceDataProvider):
         """Raw rows from GET /v2/positions -- one per open F&O position."""
         return self._request("GET", f"{BASE_URL}/positions") or []
 
+    def get_trade_history(self, from_date: date, to_date: date) -> list[dict]:
+        """Raw rows from GET /v2/trades/{from-date}/{to-date}/{page} -- one
+        per executed fill, paginated (page starts at 0, Dhan returns an
+        empty list once exhausted). Response shape per Dhan's v2 docs as
+        researched; verify against a live account before relying on this,
+        same caveat as the rest of this module."""
+        rows: list[dict] = []
+        page = 0
+        while True:
+            url = f"{BASE_URL}/trades/{from_date.isoformat()}/{to_date.isoformat()}/{page}"
+            batch = self._request("GET", url) or []
+            if not batch:
+                return rows
+            rows.extend(batch)
+            page += 1
+
     def get_ltp_by_security_id(self, security_ids_by_segment: dict[str, list[str]]) -> dict[str, float]:
         """POST /v2/marketfeed/ltp for arbitrary exchange segments (e.g.
         NSE_FNO, IDX_I for index options) -- unlike get_quotes() above,

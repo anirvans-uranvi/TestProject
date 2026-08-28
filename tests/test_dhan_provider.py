@@ -308,6 +308,52 @@ class TestGetPositions:
         assert provider.get_positions() == [{"netQty": -780}]
 
 
+class TestGetTradeHistory:
+    def test_single_page_stops_after_one_empty_page(self, monkeypatch):
+        calls = []
+
+        def fake_request(method, url, json=None, headers=None, timeout=None):
+            calls.append(url)
+            page = url.rsplit("/", 1)[-1]
+            if page == "0":
+                return _FakeResponse(200, json_data=[{"exchangeTradeId": "T1"}])
+            return _FakeResponse(200, json_data=[])
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
+
+        rows = provider.get_trade_history(date(2026, 8, 1), date(2026, 8, 25))
+
+        assert rows == [{"exchangeTradeId": "T1"}]
+        assert len(calls) == 2  # page 0 (one row), page 1 (empty, stops)
+        assert calls[0].endswith("/trades/2026-08-01/2026-08-25/0")
+        assert calls[1].endswith("/trades/2026-08-01/2026-08-25/1")
+
+    def test_concatenates_multiple_non_empty_pages(self, monkeypatch):
+        pages = {
+            "0": [{"exchangeTradeId": "T1"}],
+            "1": [{"exchangeTradeId": "T2"}],
+            "2": [],
+        }
+
+        def fake_request(method, url, json=None, headers=None, timeout=None):
+            page = url.rsplit("/", 1)[-1]
+            return _FakeResponse(200, json_data=pages[page])
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
+
+        rows = provider.get_trade_history(date(2026, 8, 1), date(2026, 8, 25))
+
+        assert rows == [{"exchangeTradeId": "T1"}, {"exchangeTradeId": "T2"}]
+
+    def test_no_trades_at_all_returns_empty_list(self, monkeypatch):
+        monkeypatch.setattr(httpx, "request", lambda *a, **k: _FakeResponse(200, json_data=[]))
+        provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
+
+        assert provider.get_trade_history(date(2026, 8, 1), date(2026, 8, 25)) == []
+
+
 class TestGetLtpBySecurityId:
     def test_flattens_nested_segment_response(self, monkeypatch):
         def fake_request(method, url, json=None, headers=None, timeout=None):

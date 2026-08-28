@@ -5,6 +5,8 @@ scopes every row to auth.uid() = user_id, same as
 saved_filters/alerts/user_settings."""
 from __future__ import annotations
 
+from datetime import date, datetime
+
 from supabase import Client
 
 from src.models.portfolio import (
@@ -12,6 +14,7 @@ from src.models.portfolio import (
     PortfolioHolding,
     PortfolioPosition,
     PortfolioPositionMeta,
+    PortfolioTradeFill,
     PortfolioTradeGroup,
     PortfolioTradeMeta,
 )
@@ -294,3 +297,53 @@ def set_position_stop_loss(
         }
     ]
     client.table("portfolio_position_meta").upsert(payload, on_conflict="user_id,portfolio_name,broker,raw_name").execute()
+
+
+def list_trade_fills(client: Client, user_id: str) -> list[PortfolioTradeFill]:
+    """Every synced trade fill across every one of the user's portfolios
+    (migration 0038) -- same shape as list_holdings/list_positions, feeds
+    both the Trade History page's Trade Journal table and
+    portfolio_service.compute_realized_pnl."""
+    resp = client.table("portfolio_trade_fills").select("*").eq("user_id", user_id).execute()
+    return [PortfolioTradeFill.model_validate(r) for r in (resp.data or [])]
+
+
+def latest_trade_fill_date(client: Client, user_id: str, portfolio_name: str, broker: str) -> date | None:
+    """The most recent traded_at date already stored for (user_id,
+    portfolio_name, broker), or None if nothing has been synced yet --
+    lets _render_dhan_trade_history_sync make every sync after the first
+    one incremental (fetch from here forward instead of re-pulling all
+    history every click)."""
+    resp = (
+        client.table("portfolio_trade_fills")
+        .select("traded_at")
+        .eq("user_id", user_id)
+        .eq("portfolio_name", portfolio_name)
+        .eq("broker", broker)
+        .order("traded_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not resp.data:
+        return None
+    return datetime.fromisoformat(resp.data[0]["traded_at"]).date()
+
+
+def upsert_trade_fills(
+    client: Client, user_id: str, portfolio_name: str, broker: str, fills: list[PortfolioTradeFill]
+) -> None:
+    """Upserts newly-synced fills -- deliberately NOT the delete-then-insert
+    "replace" semantics replace_broker_holdings/replace_broker_positions
+    use: a historical fill must never disappear just because a later
+    sync's date range didn't happen to include it again. Keyed on
+    (user_id, portfolio_name, broker, exchange_trade_id), the exchange's
+    own stable, unique-per-fill identifier, so re-syncing an overlapping
+    date range is always safe (same row, same values, no duplicate)."""
+    if not fills:
+        return
+    payload = [f.model_dump(mode="json", exclude={"synced_at"}) for f in fills]
+    (
+        client.table("portfolio_trade_fills")
+        .upsert(payload, on_conflict="user_id,portfolio_name,broker,exchange_trade_id")
+        .execute()
+    )

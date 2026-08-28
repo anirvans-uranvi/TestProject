@@ -5,7 +5,7 @@ leaving every other broker/portfolio untouched -- including a portfolio
 that's never been uploaded to before, which is how a brand-new portfolio
 gets created (nothing to delete, just an insert)."""
 import types
-from datetime import date
+from datetime import date, datetime
 
 from src.models.enums import OptionType
 from src.models.portfolio import (
@@ -13,6 +13,7 @@ from src.models.portfolio import (
     PortfolioHolding,
     PortfolioPosition,
     PortfolioPositionMeta,
+    PortfolioTradeFill,
     PortfolioTradeGroup,
     PortfolioTradeMeta,
 )
@@ -27,6 +28,8 @@ class _FakeTable:
         self._pending_delete = False
         self._pending_upsert = None
         self._filters: dict = {}
+        self._order: tuple | None = None
+        self._limit: int | None = None
 
     def select(self, *args, **kwargs):
         return self
@@ -49,7 +52,12 @@ class _FakeTable:
         self._filters[column] = value
         return self
 
-    def limit(self, _n):
+    def order(self, column, desc=False):
+        self._order = (column, desc)
+        return self
+
+    def limit(self, n):
+        self._limit = n
         return self
 
     def execute(self):
@@ -73,6 +81,12 @@ class _FakeTable:
         if self._pending_delete:
             self.calls.append(("delete", self.name, dict(self._filters)))
             self.store[self.name] = [r for r in rows if r not in matching]
+            return types.SimpleNamespace(data=matching)
+        if self._order is not None:
+            column, desc = self._order
+            matching = sorted(matching, key=lambda r: r[column], reverse=desc)
+        if self._limit is not None:
+            matching = matching[: self._limit]
         return types.SimpleNamespace(data=matching)
 
 
@@ -714,3 +728,126 @@ class TestPositionMeta:
         rows = client.store["portfolio_position_meta"]
         assert len(rows) == 1
         assert rows[0]["stop_loss"] == 0.0
+
+
+def _fill_row(portfolio_name, broker, exchange_trade_id, traded_at="2026-08-01T09:30:00", symbol="SBIN", user_id="u1"):
+    return {
+        "user_id": user_id,
+        "portfolio_name": portfolio_name,
+        "broker": broker,
+        "exchange_trade_id": exchange_trade_id,
+        "order_id": None,
+        "raw_name": symbol,
+        "symbol": symbol,
+        "expiry_date": None,
+        "strike_price": None,
+        "option_type": None,
+        "transaction_type": "BUY",
+        "qty": 10,
+        "price": 100.0,
+        "product_type": None,
+        "traded_at": traded_at,
+        "brokerage": 0,
+        "taxes_and_charges": 0,
+        "synced_at": None,
+    }
+
+
+def _fill_model(portfolio_name, broker, exchange_trade_id, traded_at=datetime(2026, 8, 1, 9, 30)):
+    return PortfolioTradeFill(
+        user_id="u1", portfolio_name=portfolio_name, broker=broker, exchange_trade_id=exchange_trade_id,
+        raw_name="SBIN", symbol="SBIN", transaction_type="BUY", qty=10, price=100.0, traded_at=traded_at,
+    )
+
+
+class TestListTradeFills:
+    def test_returns_only_the_requested_users_rows_as_models(self):
+        client = _FakeClient()
+        client.store["portfolio_trade_fills"] = [
+            _fill_row("Portfolio 1", "Dhan", "T1"),
+            {**_fill_row("Portfolio 1", "Dhan", "T2"), "user_id": "u2"},
+        ]
+
+        result = portfolio_repo.list_trade_fills(client, "u1")
+
+        assert len(result) == 1
+        assert isinstance(result[0], PortfolioTradeFill)
+        assert result[0].exchange_trade_id == "T1"
+
+
+class TestLatestTradeFillDate:
+    def test_none_when_nothing_synced_yet(self):
+        client = _FakeClient()
+
+        assert portfolio_repo.latest_trade_fill_date(client, "u1", "Portfolio 1", "Dhan") is None
+
+    def test_returns_the_most_recent_traded_at_date(self):
+        client = _FakeClient()
+        client.store["portfolio_trade_fills"] = [
+            _fill_row("Portfolio 1", "Dhan", "T1", traded_at="2026-08-01T09:30:00"),
+            _fill_row("Portfolio 1", "Dhan", "T2", traded_at="2026-08-15T09:30:00"),
+            _fill_row("Portfolio 1", "Dhan", "T3", traded_at="2026-08-05T09:30:00"),
+        ]
+
+        assert portfolio_repo.latest_trade_fill_date(client, "u1", "Portfolio 1", "Dhan") == date(2026, 8, 15)
+
+    def test_ignores_other_portfolios_and_brokers(self):
+        client = _FakeClient()
+        client.store["portfolio_trade_fills"] = [
+            _fill_row("Portfolio 1", "Dhan", "T1", traded_at="2026-08-01T09:30:00"),
+            _fill_row("Portfolio 2", "Dhan", "T2", traded_at="2026-08-20T09:30:00"),
+            _fill_row("Portfolio 1", "Zerodha", "T3", traded_at="2026-08-25T09:30:00"),
+        ]
+
+        assert portfolio_repo.latest_trade_fill_date(client, "u1", "Portfolio 1", "Dhan") == date(2026, 8, 1)
+
+
+class TestUpsertTradeFills:
+    def test_empty_list_is_a_no_op(self):
+        client = _FakeClient()
+
+        portfolio_repo.upsert_trade_fills(client, "u1", "Portfolio 1", "Dhan", [])
+
+        assert client.store.get("portfolio_trade_fills", []) == []
+
+    def test_inserts_new_fills(self):
+        client = _FakeClient()
+        fills = [_fill_model("Portfolio 1", "Dhan", "T1")]
+
+        portfolio_repo.upsert_trade_fills(client, "u1", "Portfolio 1", "Dhan", fills)
+
+        rows = client.store["portfolio_trade_fills"]
+        assert len(rows) == 1
+        assert rows[0]["exchange_trade_id"] == "T1"
+
+    def test_resyncing_an_overlapping_date_range_does_not_duplicate(self):
+        # The core append-only guarantee: re-syncing the same fill twice
+        # (e.g. an overlapping date range on a later sync) must upsert in
+        # place, not create a second row.
+        client = _FakeClient()
+        fills = [_fill_model("Portfolio 1", "Dhan", "T1")]
+
+        portfolio_repo.upsert_trade_fills(client, "u1", "Portfolio 1", "Dhan", fills)
+        portfolio_repo.upsert_trade_fills(client, "u1", "Portfolio 1", "Dhan", fills)
+
+        assert len(client.store["portfolio_trade_fills"]) == 1
+
+    def test_a_second_sync_adds_new_fills_without_dropping_earlier_ones(self):
+        # Never a delete-then-insert "replace" like holdings/positions --
+        # a fill from an earlier sync must survive a later, non-overlapping one.
+        client = _FakeClient()
+        portfolio_repo.upsert_trade_fills(client, "u1", "Portfolio 1", "Dhan", [_fill_model("Portfolio 1", "Dhan", "T1")])
+
+        portfolio_repo.upsert_trade_fills(client, "u1", "Portfolio 1", "Dhan", [_fill_model("Portfolio 1", "Dhan", "T2")])
+
+        rows = client.store["portfolio_trade_fills"]
+        assert {r["exchange_trade_id"] for r in rows} == {"T1", "T2"}
+
+    def test_insert_payload_omits_synced_at_so_the_db_default_applies(self):
+        client = _FakeClient()
+
+        portfolio_repo.upsert_trade_fills(client, "u1", "Portfolio 1", "Dhan", [_fill_model("Portfolio 1", "Dhan", "T1")])
+
+        upsert_calls = [c for c in client.calls if c[0] == "upsert"]
+        assert len(upsert_calls) == 1
+        assert "synced_at" not in upsert_calls[0][2][0]

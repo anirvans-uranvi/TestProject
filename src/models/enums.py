@@ -100,6 +100,12 @@ class FetchType(StrEnum):
     # src/data_providers/dhan_provider.py's instrument-master loaders
     # download+persist a fresh shared copy to dhan_equity_instruments/
     # dhan_fo_instruments -- provider_name is "equity" or "fo"
+    TRADE_HISTORY_SYNC = "trade_history_sync"  # logged by Settings'
+    # "Sync Trade History from Dhan" button (src/utils/data_provider_settings.py's
+    # _render_dhan_trade_history_sync), pulling GET /v2/trades into
+    # portfolio_trade_fills -- separate from PORTFOLIO_SYNC since it's an
+    # independent, differently-paced sync (append-only fills, not a
+    # current-state snapshot)
 
 
 class FetchStatus(StrEnum):

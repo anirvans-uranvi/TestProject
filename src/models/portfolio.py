@@ -177,3 +177,39 @@ class BrokerConnection(BaseModel):
     access_token: str | None = None
     api_secret: str | None = None
     token_saved_at: datetime | None = None
+
+
+class PortfolioTradeFill(BaseModel):
+    """One executed fill from a broker's trade-history API (see
+    portfolio_service.py's dhan_trade_fills_from_api). Append-only,
+    unlike PortfolioHolding/PortfolioPosition -- a sync never deletes
+    existing rows, it only upserts (keyed on exchange_trade_id, which the
+    exchange guarantees is stable and unique per fill) newly-fetched
+    ones, so historical fills are never lost just because a later sync's
+    date range doesn't happen to include them again. `symbol`/
+    `expiry_date`/`strike_price`/`option_type` are None when the
+    instrument couldn't be decoded, same convention as PortfolioPosition
+    -- a plain equity/ETF fill has all three None, which is itself a
+    valid, distinct grouping key for compute_realized_pnl (one equity =
+    one contract-identity group)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    user_id: str
+    portfolio_name: str
+    broker: str
+    exchange_trade_id: str
+    order_id: str | None = None
+    raw_name: str
+    symbol: str | None = None
+    expiry_date: date | None = None
+    strike_price: float | None = None
+    option_type: OptionType | None = None
+    transaction_type: str  # "BUY" / "SELL"
+    qty: float
+    price: float
+    product_type: str | None = None
+    traded_at: datetime
+    brokerage: float = 0
+    taxes_and_charges: float = 0  # sum of Dhan's sebiTax+stt+exchangeTransactionCharges+stampDuty+serviceTax
+    synced_at: datetime | None = None

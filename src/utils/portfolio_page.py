@@ -43,6 +43,15 @@ def load_holdings(_client, _user_id: str, _cache_bust: int):
     return portfolio_repo.list_holdings(_client, _user_id)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def load_trade_fills(_client, _user_id: str, _cache_bust: int):
+    """Trade History page (14) only -- shares the same _cache_bust counter
+    as every other loader here, so a fresh "Sync Trade History from Dhan"
+    click (data_provider_settings.py's _bump_cache_bust) shows up
+    immediately rather than waiting out this 60s TTL."""
+    return portfolio_repo.list_trade_fills(_client, _user_id)
+
+
 def _fo_contract_key(p) -> tuple[str, date, float, str] | None:
     """This position leg's (symbol, expiry_date, strike_price,
     option_type) natural key, matching user_live_prices' F&O rows

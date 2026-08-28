@@ -415,6 +415,81 @@ def _render_dhan_instrument_master_refresh(*, client) -> None:
                 )
 
 
+def _render_dhan_trade_history_sync(*, client, user_id: str) -> None:
+    """"Sync Trade History from Dhan" -- pulls GET /v2/trades into
+    portfolio_trade_fills (migration 0038), feeding the Trade History
+    page's realized-P&L/trade-journal views. A separate, explicit sync
+    from _sync_dhan/sync_broker_portfolio's holdings/positions snapshot --
+    same reasoning as _render_dhan_instrument_master_refresh's own
+    decoupling: pulling a potentially long date range of history is a
+    different cost/cadence than the fast current-snapshot sync, and a
+    first-time backfill is a one-off, occasional action. Requires an
+    already-connected Dhan account (_render_dhan_connect_section, shown
+    just above this in render_data_provider_section) -- there's no
+    trade-history credential separate from the one used for
+    holdings/positions."""
+    try:
+        connection = portfolio_repo.get_broker_connection(client, user_id, "Dhan")
+    except APIError:
+        return  # _render_dhan_connect_section above already surfaced the same migration-not-applied message
+    if connection is None:
+        return  # nothing to sync until a Dhan account is connected above
+
+    portfolio_name = portfolio_repo.get_or_default_portfolio_name(client, user_id)
+    latest = portfolio_repo.latest_trade_fill_date(client, user_id, portfolio_name, "Dhan")
+    st.caption(f"Last trade synced: {latest.isoformat() if latest else 'never'}")
+
+    if latest is None:
+        from_date = st.date_input(
+            "Sync from",
+            value=date.today() - timedelta(days=365),
+            key="dhan_trade_history_from_date",
+            help="First sync only -- how far back to backfill. Later syncs continue automatically from "
+            "wherever the last one left off.",
+        )
+    else:
+        from_date = latest + timedelta(days=1)
+
+    if st.button("Sync Trade History from Dhan", key="dhan_trade_history_sync_btn"):
+        started_at = datetime.now(timezone.utc)
+        to_date_value = date.today()
+        if from_date > to_date_value:
+            st.info("Already up to date.")
+            return
+        provider = DhanProvider(client_id=connection.client_id, access_token=connection.access_token)
+        with st.spinner(f"Fetching trades from {from_date} to {to_date_value}..."):
+            try:
+                raw_rows = provider.get_trade_history(from_date, to_date_value)
+                fills = portfolio_service.dhan_trade_fills_from_api(raw_rows)
+            except DhanAuthError:
+                st.error(
+                    "Your Dhan access token was rejected -- it's likely expired (Dhan tokens last ~24 hours). "
+                    "Generate a new one on web.dhan.co and paste it above."
+                )
+                return
+            except ProviderError as exc:
+                st.error(f"Could not sync trade history from Dhan: {exc}")
+                return
+            except NotImplementedError as exc:
+                st.error(f"Not available yet: {exc}")
+                return
+        records = portfolio_service.trade_fills_to_records(user_id, portfolio_name, "Dhan", fills)
+        portfolio_repo.upsert_trade_fills(client, user_id, portfolio_name, "Dhan", records)
+        fetch_log_repo.log_fetch(
+            client,
+            ProviderFetchLog(
+                provider_name="dhan",
+                fetch_type=FetchType.TRADE_HISTORY_SYNC,
+                status=FetchStatus.SUCCESS,
+                started_at=started_at,
+                finished_at=datetime.now(timezone.utc),
+            ),
+        )
+        _bump_cache_bust()
+        st.success(f"Synced {len(records)} trade fill(s) from {from_date} to {to_date_value}.")
+        st.rerun()
+
+
 def _render_zerodha_connect_section(*, client, user_id: str) -> None:
     try:
         connection = portfolio_repo.get_broker_connection(client, user_id, "Zerodha")
@@ -575,6 +650,8 @@ def render_data_provider_section(*, client, user_id: str, current: UserSettings)
         _render_dhan_connect_section(client=client, user_id=user_id)
         st.divider()
         _render_dhan_instrument_master_refresh(client=client)
+        st.divider()
+        _render_dhan_trade_history_sync(client=client, user_id=user_id)
     elif selected == "zerodha":
         _render_zerodha_connect_section(client=client, user_id=user_id)
     else:
