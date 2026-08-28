@@ -1491,7 +1491,8 @@ continuing from the latest already-synced fill's date. Fills are
 `replace_broker_positions`'s delete-then-insert semantics, a historical
 fill is never deleted just because a later sync's date range doesn't
 happen to include it again (`portfolio_repo.upsert_trade_fills`, keyed on
-`exchange_trade_id`, the exchange's own stable per-fill identifier).
+`exchange_trade_id` -- **not** Dhan's own same-named API field, see the
+note below).
 
 The page itself has two sections:
 - **Realized P&L** -- `portfolio_service.compute_realized_pnl` FIFO-matches
@@ -1512,14 +1513,22 @@ sees currently-open holdings/positions rows), so Realized P&L groups by
 raw contract identity instead, independent of any Trade Type label.
 
 > [!NOTE]
-> `dhan_trade_fills_from_api` (the `/v2/trades` row parser) is
-> deliberately left unimplemented pending confirmation of the endpoint's
-> real response shape against a live account -- Dhan's docs confirm the
-> fields it returns but not whether option/future contract details come
-> as structured fields (like `/v2/positions` provides) or need decoding
-> from `customSymbol` by hand. The sync button surfaces this plainly
-> ("Not available yet: ...") rather than guessing at a shape and getting
-> it wrong. See that function's docstring in `src/services/portfolio_service.py`.
+> **A real bug in Dhan's own API, found by inspecting a live response
+> before writing the parser**: `/v2/trades`' `exchangeTradeId` field --
+> documented as the exchange's unique-per-fill trade id, and this
+> feature's originally-intended natural key -- comes back the literal
+> string `"0"` on **every** fill, confirmed across 400 real rows spanning
+> different orders/symbols/times. `dhan_trade_fills_from_api`
+> (`src/services/portfolio_service.py`) builds a synthetic composite
+> (`orderId:exchangeOrderId:exchangeTime:tradedQuantity:tradedPrice`)
+> instead, stored in the same `exchange_trade_id` column -- stable across
+> re-syncs since none of those inputs change once a trade has settled.
+> The same inspection also confirmed `/v2/trades` *does* carry structured
+> `drvExpiryDate`/`drvStrikePrice`/`drvOptionType` fields directly (same
+> as `/v2/positions`), but `customSymbol` is a different, space-separated
+> format from positions/holdings' hyphen-joined `tradingSymbol` (e.g.
+> `"GOLD 31 AUG 135000 PUT"`, not `"GOLD-31AUG-135000-PUT"`) -- the
+> underlying is simply its first token.
 
 ## Docker
 

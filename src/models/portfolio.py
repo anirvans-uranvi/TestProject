@@ -183,10 +183,14 @@ class PortfolioTradeFill(BaseModel):
     """One executed fill from a broker's trade-history API (see
     portfolio_service.py's dhan_trade_fills_from_api). Append-only,
     unlike PortfolioHolding/PortfolioPosition -- a sync never deletes
-    existing rows, it only upserts (keyed on exchange_trade_id, which the
-    exchange guarantees is stable and unique per fill) newly-fetched
-    ones, so historical fills are never lost just because a later sync's
-    date range doesn't happen to include them again. `symbol`/
+    existing rows, it only upserts (keyed on exchange_trade_id) newly-
+    fetched ones, so historical fills are never lost just because a later
+    sync's date range doesn't happen to include them again.
+    `exchange_trade_id` is NOT Dhan's own same-named API field despite the
+    column name -- that field comes back the literal string "0" on every
+    fill (confirmed live), not a real unique id -- see
+    dhan_trade_fills_from_api's docstring for the synthetic composite used
+    instead. `symbol`/
     `expiry_date`/`strike_price`/`option_type` are None when the
     instrument couldn't be decoded, same convention as PortfolioPosition
     -- a plain equity/ETF fill has all three None, which is itself a

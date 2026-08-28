@@ -1180,15 +1180,88 @@ class TestApplyFallbackOptionLtp:
 
 
 class TestDhanTradeFillsFromApi:
-    def test_raises_pending_live_shape_confirmation(self):
-        # Deliberate placeholder -- see the function's own docstring. Dhan's
-        # docs don't confirm whether /v2/trades carries structured
-        # drvExpiryDate/drvStrikePrice/drvOptionType fields the way
-        # /v2/positions does, so this is intentionally left unimplemented
-        # until a real account's response has been inspected. Replace this
-        # test with real coverage once that happens.
-        with pytest.raises(NotImplementedError):
-            portfolio_service.dhan_trade_fills_from_api([{"some": "row"}])
+    # Verbatim (values), shape confirmed live 2026-08-27 against a real
+    # account -- see dhan_trade_fills_from_api's own docstring for the
+    # exchangeTradeId="0" bug this uncovered.
+    _LIVE_PUT_FILL = {
+        "dhanClientId": "1107705688",
+        "orderId": "228260827162002",
+        "exchangeOrderId": "623962328507896",
+        "exchangeTradeId": "0",
+        "transactionType": "SELL",
+        "exchangeSegment": "MCX_COMM",
+        "productType": "MARGIN",
+        "orderType": None,
+        "customSymbol": "GOLD 31 AUG 135000 PUT",
+        "securityId": "566396",
+        "tradedQuantity": 400,
+        "tradedPrice": 19.75,
+        "isin": "",
+        "instrument": "OPTFUT",
+        "sebiTax": 0.0079,
+        "stt": 3.95,
+        "brokerageCharges": 20.0,
+        "serviceTax": 4.1958,
+        "exchangeTransactionCharges": 3.3022,
+        "stampDuty": 0.0,
+        "createTime": "NA",
+        "updateTime": "NA",
+        "exchangeTime": "2026-08-27T16:12:15",
+        "drvExpiryDate": "2026-08-31",
+        "drvOptionType": "PUT",
+        "drvStrikePrice": 135000.0,
+    }
+
+    def test_parses_a_live_option_fill(self):
+        fills = portfolio_service.dhan_trade_fills_from_api([self._LIVE_PUT_FILL])
+        assert len(fills) == 1
+        fill = fills[0]
+        assert fill["symbol"] == "GOLD"
+        assert fill["expiry_date"] == date(2026, 8, 31)
+        assert fill["strike_price"] == 135000.0
+        assert fill["option_type"] == OptionType.PE
+        assert fill["transaction_type"] == "SELL"
+        assert fill["qty"] == 400
+        assert fill["price"] == 19.75
+        assert fill["product_type"] == "MARGIN"
+        assert fill["traded_at"] == datetime(2026, 8, 27, 16, 12, 15)
+        assert fill["brokerage"] == 20.0
+
+    def test_call_option_decodes_the_same_way(self):
+        row = {**self._LIVE_PUT_FILL, "customSymbol": "NIFTY 01 SEP 25000 CALL", "drvOptionType": "CALL"}
+        fill = portfolio_service.dhan_trade_fills_from_api([row])[0]
+        assert fill["symbol"] == "NIFTY"
+        assert fill["option_type"] == OptionType.CE
+
+    def test_synthesizes_exchange_trade_id_since_dhans_own_field_is_always_zero(self):
+        # The real bug this guards against: exchangeTradeId comes back "0"
+        # on every fill regardless of order/symbol/time -- confirmed live
+        # across 400 rows -- so it can never be used as a unique key.
+        fill = portfolio_service.dhan_trade_fills_from_api([self._LIVE_PUT_FILL])[0]
+        assert fill["exchange_trade_id"] != "0"
+        assert "228260827162002" in fill["exchange_trade_id"]  # orderId
+        assert "623962328507896" in fill["exchange_trade_id"]  # exchangeOrderId
+
+    def test_two_distinct_fills_with_dhans_broken_id_get_distinct_synthetic_ids(self):
+        other = {**self._LIVE_PUT_FILL, "orderId": "999", "exchangeOrderId": "888", "exchangeTime": "2026-08-27T16:13:00"}
+        fills = portfolio_service.dhan_trade_fills_from_api([self._LIVE_PUT_FILL, other])
+        assert fills[0]["exchange_trade_id"] != fills[1]["exchange_trade_id"]
+
+    def test_charges_are_summed_from_all_five_dhan_fields(self):
+        fill = portfolio_service.dhan_trade_fills_from_api([self._LIVE_PUT_FILL])[0]
+        expected = 0.0079 + 3.95 + 4.1958 + 3.3022 + 0.0  # sebiTax+stt+serviceTax+exchangeTransactionCharges+stampDuty
+        assert fill["taxes_and_charges"] == pytest.approx(expected)
+
+    def test_a_single_token_custom_symbol_is_treated_as_a_plain_equity(self):
+        # Not yet confirmed live (every fill seen so far was an option) --
+        # inferred by analogy with dhan_positions_from_api's non-derivative
+        # handling, same as this function's own docstring notes.
+        row = {**self._LIVE_PUT_FILL, "customSymbol": "SBIN", "drvExpiryDate": "0001-01-01", "drvOptionType": None, "drvStrikePrice": None}
+        fill = portfolio_service.dhan_trade_fills_from_api([row])[0]
+        assert fill["symbol"] == "SBIN"
+        assert fill["expiry_date"] is None
+        assert fill["strike_price"] is None
+        assert fill["option_type"] is None
 
 
 class TestTradeFillsToRecords:

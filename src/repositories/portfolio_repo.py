@@ -336,9 +336,11 @@ def upsert_trade_fills(
     "replace" semantics replace_broker_holdings/replace_broker_positions
     use: a historical fill must never disappear just because a later
     sync's date range didn't happen to include it again. Keyed on
-    (user_id, portfolio_name, broker, exchange_trade_id), the exchange's
-    own stable, unique-per-fill identifier, so re-syncing an overlapping
-    date range is always safe (same row, same values, no duplicate)."""
+    (user_id, portfolio_name, broker, exchange_trade_id) -- a synthetic,
+    stable-per-fill id (NOT Dhan's own same-named field, which comes back
+    "0" for every fill -- see portfolio_service.dhan_trade_fills_from_api),
+    so re-syncing an overlapping date range is always safe (same row,
+    same values, no duplicate)."""
     if not fills:
         return
     payload = [f.model_dump(mode="json", exclude={"synced_at"}) for f in fills]

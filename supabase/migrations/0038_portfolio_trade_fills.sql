@@ -13,9 +13,15 @@
 -- delete-then-insert "replace" semantics: a historical fill must never
 -- disappear just because a later sync's date range didn't happen to
 -- include it again. Syncs upsert on (user_id, portfolio_name, broker,
--- exchange_trade_id) -- exchange_trade_id is the exchange's own stable,
--- unique-per-fill identifier, so re-syncing an overlapping date range is
--- always safe (same row, same values, no duplicate).
+-- exchange_trade_id) -- despite the name, this is NOT Dhan's own
+-- exchangeTradeId API field: confirmed live, that field comes back the
+-- literal string "0" on every single fill regardless of order/symbol/
+-- time, so it's useless as a unique key. dhan_trade_fills_from_api
+-- (src/services/portfolio_service.py) builds a synthetic composite
+-- (orderId:exchangeOrderId:exchangeTime:tradedQuantity:tradedPrice)
+-- instead and stores it in this column -- stable across re-syncs of the
+-- same fill, so an overlapping date range is always safe (same row, same
+-- values, no duplicate).
 --
 -- broker-agnostic shape (a `broker` column, like every other portfolio_*
 -- table) even though only Dhan writes to it today -- costs nothing now

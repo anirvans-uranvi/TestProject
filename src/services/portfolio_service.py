@@ -17,7 +17,7 @@ from __future__ import annotations
 import calendar
 import re
 from collections import Counter, deque
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from src.models.company import Company
 from src.models.enums import CompanyType, OptionType
@@ -291,28 +291,67 @@ def dhan_trade_fills_from_api(rows: list[dict]) -> list[dict]:
     """Translates GET /v2/trades rows (dhan_provider.get_trade_history)
     into this app's own trade-fill-dict shape, for trade_fills_to_records.
 
-    NOT YET IMPLEMENTED -- deliberately. Dhan's docs confirm /v2/trades
-    returns orderId/exchangeOrderId/exchangeTradeId, customSymbol,
-    exchangeSegment, transactionType, tradedQuantity, tradedPrice,
-    exchangeTime, productType, orderType, isin, instrument, and a set of
-    per-fill charge fields (sebiTax, stt, brokerageCharges,
-    serviceTax, exchangeTransactionCharges, stampDuty) -- but do NOT
-    confirm whether structured drvExpiryDate/drvStrikePrice/drvOptionType
-    fields (which /v2/positions provides directly -- see
-    dhan_positions_from_api above) are also present here, or whether
-    option/future contract details must instead be decoded from
-    customSymbol by hand. This module's own docstring already carries the
-    exact same caveat for every other endpoint ("verify against a live
-    account/sandbox... Dhan has changed response shapes across
-    releases"), and it fully applies here: write this function's body
-    only after inspecting one real page of live trade history, then reuse
-    _dhan_underlying_symbol for symbol decoding the same way
-    dhan_positions_from_api does if the structured fields turn out to be
-    present."""
-    raise NotImplementedError(
-        "dhan_trade_fills_from_api needs the real /v2/trades response shape confirmed "
-        "against a live account before it can be written -- see this function's docstring"
-    )
+    Confirmed live against a real account (2026-08-27): /v2/trades DOES
+    carry structured drvExpiryDate/drvStrikePrice/drvOptionType fields
+    directly, same as /v2/positions -- so contract detail is read the same
+    way dhan_positions_from_api does (same _DHAN_NO_EXPIRY_SENTINEL/
+    _DHAN_OPTION_TYPES). `customSymbol` is NOT the same format as
+    positions/holdings' hyphen-joined `tradingSymbol` though -- it's
+    space-separated and human-readable (e.g. "GOLD 31 AUG 135000 PUT",
+    "NIFTY 01 SEP 25000 CALL"), so _dhan_underlying_symbol (built for the
+    hyphen format) does NOT apply here. The underlying is simply the first
+    space-separated token -- true for a derivative's multi-token string,
+    and equally true for a plain equity/ETF fill's single-token symbol
+    (unconfirmed live -- inferred by analogy with how tradingSymbol works
+    for a non-derivative row elsewhere in this module -- since every fill
+    seen live so far was an option).
+
+    **A real bug in Dhan's own API found here**: `exchangeTradeId` --
+    documented as the exchange's unique-per-fill trade identifier, and
+    this table's originally-intended natural key -- comes back the
+    literal string `"0"` on every single fill (confirmed live across 400
+    rows spanning multiple orders/symbols/times). It is NOT usable as a
+    unique key. A synthetic composite (`orderId:exchangeOrderId:
+    exchangeTime:tradedQuantity:tradedPrice`) is used instead, stored in
+    the same `exchange_trade_id` column -- stable across re-syncs of the
+    same fill (all inputs are immutable once a trade has settled), so
+    upsert_trade_fills' dedup still works correctly."""
+    fills = []
+    for row in rows:
+        custom_symbol = str(row.get("customSymbol") or "").strip()
+        expiry_raw = row.get("drvExpiryDate")
+        expiry_str = str(expiry_raw)[:10] if expiry_raw else None
+        is_derivative = bool(expiry_str and expiry_str != _DHAN_NO_EXPIRY_SENTINEL)
+        option_type_raw = str(row.get("drvOptionType") or "").strip().upper()
+        strike_raw = row.get("drvStrikePrice")
+        order_id = str(row.get("orderId") or "")
+        exchange_time = row.get("exchangeTime")
+        traded_qty = row.get("tradedQuantity")
+        traded_price = row.get("tradedPrice")
+        fills.append(
+            {
+                # See docstring: Dhan's own exchangeTradeId is always "0" on
+                # this endpoint, so a synthetic composite stands in for it.
+                "exchange_trade_id": f"{order_id}:{row.get('exchangeOrderId')}:{exchange_time}:{traded_qty}:{traded_price}",
+                "order_id": order_id or None,
+                "raw_name": custom_symbol or str(row.get("securityId") or ""),
+                "symbol": custom_symbol.split()[0] if custom_symbol else None,
+                "expiry_date": date.fromisoformat(expiry_str) if is_derivative else None,
+                "strike_price": float(strike_raw) if strike_raw else None,
+                "option_type": _DHAN_OPTION_TYPES.get(option_type_raw),
+                "transaction_type": str(row.get("transactionType") or "").strip().upper(),
+                "qty": float(traded_qty or 0),
+                "price": float(traded_price or 0),
+                "product_type": row.get("productType"),
+                "traded_at": datetime.fromisoformat(exchange_time),
+                "brokerage": float(row.get("brokerageCharges") or 0),
+                "taxes_and_charges": sum(
+                    float(row.get(key) or 0)
+                    for key in ("sebiTax", "stt", "serviceTax", "exchangeTransactionCharges", "stampDuty")
+                ),
+            }
+        )
+    return fills
 
 
 def trade_fills_to_records(

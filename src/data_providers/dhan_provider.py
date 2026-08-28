@@ -640,21 +640,32 @@ class DhanProvider(PriceDataProvider):
         """Raw rows from GET /v2/positions -- one per open F&O position."""
         return self._request("GET", f"{BASE_URL}/positions") or []
 
-    def get_trade_history(self, from_date: date, to_date: date) -> list[dict]:
+    def get_trade_history(self, from_date: date, to_date: date, max_pages: int = 500) -> list[dict]:
         """Raw rows from GET /v2/trades/{from-date}/{to-date}/{page} -- one
         per executed fill, paginated (page starts at 0, Dhan returns an
         empty list once exhausted). Response shape per Dhan's v2 docs as
         researched; verify against a live account before relying on this,
-        same caveat as the rest of this module."""
+        same caveat as the rest of this module.
+
+        `max_pages` is a safety cap, not a documented Dhan limit -- if
+        pagination ever misbehaves (e.g. the `page` segment turns out to be
+        ignored server-side and every page echoes the same non-empty
+        batch), this raises instead of looping forever. 500 pages is far
+        beyond what even a very active account should hit for a normal
+        sync window."""
         rows: list[dict] = []
         page = 0
-        while True:
+        while page < max_pages:
             url = f"{BASE_URL}/trades/{from_date.isoformat()}/{to_date.isoformat()}/{page}"
             batch = self._request("GET", url) or []
             if not batch:
                 return rows
             rows.extend(batch)
             page += 1
+        raise ProviderError(
+            f"Dhan trade history did not terminate after {max_pages} pages ({len(rows)} rows so far) -- "
+            "pagination may not be behaving as documented; narrow the date range and retry."
+        )
 
     def get_ltp_by_security_id(self, security_ids_by_segment: dict[str, list[str]]) -> dict[str, float]:
         """POST /v2/marketfeed/ltp for arbitrary exchange segments (e.g.

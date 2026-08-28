@@ -3000,13 +3000,39 @@ no `user_id` column to scope by).
 `portfolio_repo.upsert_trade_fills` is the one place this whole feature
 departs from `replace_broker_holdings`/`replace_broker_positions`'s
 delete-then-insert "replace" semantics: fills are **upserted**, keyed on
-`(user_id, portfolio_name, broker, exchange_trade_id)` — the exchange's
-own stable, unique-per-fill identifier — so historical fills are never
-lost just because a later sync's date range doesn't happen to include
-them again. This single difference is called out explicitly in both the
-table's migration comment and the repo function's docstring, since it's
-easy to reflexively copy the holdings/positions pattern here and silently
-delete history.
+`(user_id, portfolio_name, broker, exchange_trade_id)` — so historical
+fills are never lost just because a later sync's date range doesn't
+happen to include them again. This single difference is called out
+explicitly in both the table's migration comment and the repo function's
+docstring, since it's easy to reflexively copy the holdings/positions
+pattern here and silently delete history.
+
+**A real bug in Dhan's own API, found before `dhan_trade_fills_from_api`
+was even written** — by design, per its own docstring, the first
+implementation step was inspecting one real live page of `/v2/trades`
+rather than guessing at the shape. That inspection (2026-08-27, 400 real
+fills) found `exchangeTradeId` — documented as the exchange's
+unique-per-fill trade id, and this table's originally-intended natural
+key — comes back the literal string `"0"` on *every single fill*,
+regardless of order/symbol/time. Completely unusable as a key.
+`dhan_trade_fills_from_api` builds a synthetic composite instead
+(`orderId:exchangeOrderId:exchangeTime:tradedQuantity:tradedPrice`,
+stored in the same `exchange_trade_id` column despite not being Dhan's
+own field of that name) — stable across re-syncs since none of those
+inputs change once a trade has settled, so `upsert_trade_fills`' dedup
+still works correctly. The same inspection also settled the two open
+questions from the plan: `/v2/trades` *does* carry structured
+`drvExpiryDate`/`drvStrikePrice`/`drvOptionType` fields directly, read
+the same way `dhan_positions_from_api` does (same
+`_DHAN_NO_EXPIRY_SENTINEL`/`_DHAN_OPTION_TYPES`) — but `customSymbol` is
+a *different* format from positions/holdings' hyphen-joined
+`tradingSymbol` (space-separated and human-readable, e.g. `"GOLD 31 AUG
+135000 PUT"` rather than a `"GOLD-31AUG-135000-PUT"`-style string), so
+`_dhan_underlying_symbol` does NOT apply here — the underlying is simply
+`customSymbol.split()[0]`. A plain equity/ETF fill's single-token
+`customSymbol` (e.g. `"SBIN"`) falls out of that same logic for free,
+though this branch is inferred by analogy rather than confirmed live —
+every fill seen in the real inspection was an option.
 
 `portfolio_service.compute_realized_pnl` is the analytical core — a
 pure, thoroughly-tested FIFO lot-matcher (see
@@ -3028,24 +3054,19 @@ elsewhere. Guards against float drift on repeated subtraction with a
 over many partial fills can otherwise leave a lot "open" at
 `1e-13` instead of `0`.
 
-**Deliberately left unimplemented**: `portfolio_service.dhan_trade_fills_from_api`
-(the `/v2/trades` row parser feeding `trade_fills_to_records`) raises
-`NotImplementedError` — Dhan's docs confirm the fields `/v2/trades`
-returns (`exchangeTradeId`, `customSymbol`, `exchangeSegment`,
-`transactionType`, `tradedQuantity`, `tradedPrice`, `exchangeTime`, the
-per-fill charge fields, etc.) but never confirm whether option/future
-contract detail arrives as structured fields the way `drvExpiryDate`/
-`drvStrikePrice`/`drvOptionType` do on `/v2/positions` (see
-`dhan_positions_from_api` above), or needs decoding from `customSymbol`
-by hand instead. Writing this by guessing risks silently corrupting every
-option/future fill's symbol/strike/expiry with no obvious symptom — worse
-than refusing to guess. The Settings button's click handler catches this
-specific exception and shows "Not available yet: ..." rather than
-crashing. Write this function's body only after inspecting one real page
-of live trade history (see its own docstring for the exact plan), then
-reuse `_dhan_underlying_symbol` for symbol decoding the same way
-`dhan_positions_from_api` does if the structured fields turn out to be
-present.
+`DhanProvider.get_trade_history` also carries a `max_pages=500` safety
+cap (raising `ProviderError` if hit, already handled by the sync
+button's existing `except ProviderError` branch) — not a documented Dhan
+limit, but a guard against the pagination loop never terminating if the
+`page` segment were ever silently ignored server-side (every page
+echoing the same non-empty batch forever). Added after exactly that
+symptom showed up while live-testing the inspection script by hand — the
+first attempt looked hung with zero output for a long stretch, which
+turned out to just be many real pages (20 fills/page) being walked
+silently with no progress indication at all, not an actual infinite
+loop; the cap plus per-page logging in the (throwaway,
+not-part-of-the-repo) inspection script fixed both the real risk and the
+UX problem of a legitimately-slow operation looking identical to a hang.
 
 **Not attempted at all**: linking a closed lot back to My Trades/Analyse
 Trade's manual "Trade" grouping (`group_into_trades`/`trade_id`) — that

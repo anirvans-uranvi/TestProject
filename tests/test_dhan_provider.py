@@ -353,6 +353,16 @@ class TestGetTradeHistory:
 
         assert provider.get_trade_history(date(2026, 8, 1), date(2026, 8, 25)) == []
 
+    def test_raises_instead_of_looping_forever_if_pagination_never_terminates(self, monkeypatch):
+        # A safety net, not documented Dhan behavior -- guards against the
+        # `page` segment being silently ignored server-side (every page
+        # echoing the same non-empty batch forever).
+        monkeypatch.setattr(httpx, "request", lambda *a, **k: _FakeResponse(200, json_data=[{"exchangeTradeId": "T1"}]))
+        provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
+
+        with pytest.raises(ProviderError):
+            provider.get_trade_history(date(2026, 8, 1), date(2026, 8, 25), max_pages=3)
+
 
 class TestGetLtpBySecurityId:
     def test_flattens_nested_segment_response(self, monkeypatch):

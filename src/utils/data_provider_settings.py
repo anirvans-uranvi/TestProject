@@ -470,9 +470,6 @@ def _render_dhan_trade_history_sync(*, client, user_id: str) -> None:
             except ProviderError as exc:
                 st.error(f"Could not sync trade history from Dhan: {exc}")
                 return
-            except NotImplementedError as exc:
-                st.error(f"Not available yet: {exc}")
-                return
         records = portfolio_service.trade_fills_to_records(user_id, portfolio_name, "Dhan", fills)
         portfolio_repo.upsert_trade_fills(client, user_id, portfolio_name, "Dhan", records)
         fetch_log_repo.log_fetch(
