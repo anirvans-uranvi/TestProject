@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pydantic import ValidationError
 from supabase import Client
 
 from src.config import get_settings
@@ -10,7 +11,24 @@ def get_user_settings(client: Client, user_id: str) -> UserSettings:
     resp = client.table("user_settings").select("*").eq("user_id", user_id).limit(1).execute()
     rows = resp.data or []
     if rows:
-        return UserSettings.model_validate(rows[0])
+        try:
+            return UserSettings.model_validate(rows[0])
+        except ValidationError as exc:
+            # A stored data_provider value the app no longer recognizes --
+            # confirmed live: an account still had 'zerodha' saved after
+            # that broker was removed entirely (src/utils/
+            # data_provider_settings.py's module docstring), which
+            # crashed every single page for that account (require_login()
+            # -> this call, before any page body runs). Degrade to the
+            # safe default instead of hard-failing login; a targeted
+            # migration also cleans up the stored value itself, but this
+            # is what actually unblocks the account without needing that
+            # migration applied first. Only swallows a data_provider
+            # error specifically -- any other validation failure still
+            # raises, same as before.
+            if any(e["loc"] == ("data_provider",) for e in exc.errors()):
+                return UserSettings.model_validate({**rows[0], "data_provider": "yfinance_bhavcopy"})
+            raise
     defaults = get_settings()
     return UserSettings(
         user_id=user_id,

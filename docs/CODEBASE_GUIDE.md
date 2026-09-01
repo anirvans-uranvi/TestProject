@@ -2083,6 +2083,28 @@ specifically for this flow) is left in the schema, permanently unused,
 rather than dropped in a migration. See git history for the full
 narrative and code if it's ever needed as a reference.
 
+**A third real bug, this one caused by the removal itself, found
+live**: an account that still had `user_settings.data_provider =
+'zerodha'` saved from before the removal got a hard
+`pydantic.ValidationError` on **every single page** -- `require_login()`
+calls `settings_repo.get_user_settings()` before any page body runs, and
+`'zerodha'` was dropped from `src/models/user.py`'s `DataProvider`
+Literal type along with everything else. The `user_settings.data_provider`
+CHECK constraint (migration `0028`) was DB-level only, so nothing at the
+database layer caught this -- it surfaced purely as an application-level
+Pydantic validation failure. Fixed on both ends: migration
+`0040_zerodha_data_provider_cleanup.sql` updates any stored `'zerodha'`
+row to `'yfinance_bhavcopy'` and tightens the CHECK constraint to match
+(same drop/recreate pattern as `0033`/`0037`/`0039`); `settings_repo.get_user_settings`
+also now catches this specific `ValidationError` (checking
+`exc.errors()` for a `data_provider`-scoped failure specifically, not a
+blanket `except ValidationError`) and degrades to the same default in
+code, so an account is never blocked on the migration having been
+applied yet -- any other validation failure on that row still raises
+normally. See `tests/test_settings_repo.py` for the covered cases
+(no row at all, a valid stored value, the legacy `'zerodha'` value, and
+confirming an unrelated bad row still raises).
+
 **Holdings split by `company_type` (ETFs & Mutual Funds vs Stocks)** — the
 old single "My Holdings" table became two, `_render_holdings_table` (a
 small helper factored out of what was previously an inline block in
