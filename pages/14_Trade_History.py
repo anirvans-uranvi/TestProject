@@ -1,16 +1,29 @@
-"""Realized P&L (FIFO-matched closed lots) and a raw trade journal, built
-from every trade fill synced via Settings' "Sync Trade History from Dhan"
+"""Realized P&L (FIFO-matched closed lots) and Unrealised P&L (today's
+live P&L on whatever's still currently held/open, plus the trade fills
+that built each one up), built from every trade fill synced via
+Settings' "Sync Trade History from Dhan"
 (src/utils/data_provider_settings.py's _render_dhan_trade_history_sync,
 writing portfolio_trade_fills -- migration 0038). Dhan only for now, same
 as that sync itself.
 
 Unlike every other portfolio page (My Trades/My Holdings/My Positions/
-My CSP/My CC/Analyse Trade), this page's data does NOT come from the
+My CSP/My CC/Analyse Trade), Realized P&L's data does NOT come from the
 Stock & Option Data Refresh / Portfolio Refresh buttons -- those sync
 current-state holdings/positions snapshots, not historical fills -- so
-neither refresh bar is rendered here. See src/services/portfolio_service.py's
-compute_realized_pnl for the FIFO lot-matching this page's Realized P&L
-section is built on.
+neither refresh bar is rendered here. Unrealised P&L, by contrast,
+deliberately DOES reuse My Holdings/My Positions' own already-synced
+holdings/positions + live-LTP data (portfolio_page.py's
+load_holdings/load_positions/load_latest_prices/load_live_broker_prices,
+portfolio_service.compute_portfolio_view/compute_positions_view) rather
+than trying to derive "what's currently held" purely from trade fills --
+see this file's own "trades leading to this holding" section for why
+(some real, currently-held quantity has no matching trade fill at all:
+shares transferred in from another broker never execute on an exchange,
+so Dhan's own /v2/trades never receives them -- confirmed live, and not
+fixable by any change to how fills are parsed).
+
+See src/services/portfolio_service.py's compute_realized_pnl/
+compute_open_lots for the FIFO lot-matching both sections are built on.
 """
 from __future__ import annotations
 
@@ -18,13 +31,23 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from postgrest.exceptions import APIError
+from pydantic import ValidationError
 
 from src.repositories import settings_repo
 from src.services import portfolio_service
 from src.utils.formatting import format_inr
-from src.utils.portfolio_page import ensure_cache_bust, load_trade_fills
+from src.utils.portfolio_page import (
+    ensure_cache_bust,
+    load_holdings,
+    load_latest_prices,
+    load_live_broker_prices,
+    load_positions,
+    load_trade_fills,
+)
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.ui import inject_global_styles, plotly_template, render_disclaimer, render_stat_grid
+
+_EPS = 1e-6  # float-tolerance for "does trade history account for the full current quantity"
 
 st.set_page_config(page_title="Trade History | Nifty 50 Screener", page_icon="\U0001f4d1", layout="wide")
 require_login()  # already injects Tailwind + the light-theme CSS design system
@@ -37,15 +60,16 @@ inject_global_styles(user_settings.theme)  # re-inject with the user's actual th
 st.title("\U0001f4d1 Trade History")
 render_disclaimer()
 st.caption(
-    "Every trade fill Dhan has ever executed for this account. Realized P&L below is FIFO-matched against "
-    "actual closed lots -- unlike every other portfolio page here, which only shows unrealized P&L on "
-    "currently open positions."
+    "Realized P&L is FIFO-matched against actual closed lots from every synced trade fill. Unrealised P&L "
+    "shows today's live P&L on whatever's still currently held/open, using the same data My Holdings/My "
+    "Positions already trust, plus the trade fills that built each one up."
 )
 
 ensure_cache_bust()
+cache_bust = st.session_state["portfolio_cache_bust"]
 
 try:
-    fills = load_trade_fills(client, user_id, st.session_state["portfolio_cache_bust"])
+    fills = load_trade_fills(client, user_id, cache_bust)
 except APIError:
     st.info(
         "Trade history isn't set up yet. Apply migration "
@@ -58,6 +82,10 @@ if not fills:
     if st.button("Go to Settings"):
         st.switch_page("pages/4_Settings.py")
     st.stop()
+
+open_lots_by_symbol: dict[str, list[dict]] = {}
+for lot in portfolio_service.compute_open_lots(fills):
+    open_lots_by_symbol.setdefault(lot["symbol"] or lot["raw_name"], []).append(lot)
 
 st.divider()
 st.subheader("Realized P&L")
@@ -78,6 +106,7 @@ else:
     pnl_rows = [
         {
             "Symbol": lot["symbol"] or "—",
+            "Instrument": lot["raw_name"],
             "Expiry": lot["expiry_date"].strftime("%d-%b-%y") if lot["expiry_date"] else "—",
             "Strike": lot["strike_price"] if lot["strike_price"] is not None else "—",
             "Type": lot["option_type"].value if lot["option_type"] else "—",
@@ -123,52 +152,172 @@ else:
         symbol_rows = sorted(pnl_rows_by_symbol[symbol], key=lambda r: r["Exit"], reverse=True)
         symbol_net = sum(r["Net P&L"] for r in symbol_rows)
         with st.expander(f"{symbol} — {format_inr(symbol_net)} ({len(symbol_rows)} closed lot(s))"):
+            # "Symbol" is redundant here -- it's the expander header itself.
             st.dataframe(
-                pd.DataFrame(symbol_rows),
+                pd.DataFrame(symbol_rows).drop(columns=["Symbol"]),
                 use_container_width=True,
                 hide_index=True,
                 column_config=pnl_column_config,
             )
 
 st.divider()
-st.subheader("Trade Journal")
-all_symbols = sorted({f.symbol for f in fills if f.symbol})
-selected_symbols = st.multiselect("Filter by symbol", all_symbols)
-journal_fills = [f for f in fills if not selected_symbols or f.symbol in selected_symbols]
-journal_column_config = {
-    "Price": st.column_config.NumberColumn(format="₹%.2f"),
-    "Brokerage": st.column_config.NumberColumn(format="₹%.2f"),
-    "Charges": st.column_config.NumberColumn(format="₹%.2f"),
-    "Qty": st.column_config.NumberColumn(format="%g"),
+st.subheader("Unrealised P&L")
+st.caption(
+    "Today's live P&L on whatever's still currently held/open -- from the same holdings/positions data "
+    "My Holdings/My Positions show, not derived from trade history (some currently-held quantity may have "
+    "no matching trade fill at all -- see the note inside a symbol's section below if so)."
+)
+
+try:
+    saved_holdings = load_holdings(client, user_id, cache_bust)
+except (APIError, ValidationError):
+    saved_holdings = []
+try:
+    saved_positions = load_positions(client, user_id, cache_bust)
+except APIError:
+    saved_positions = []
+
+holding_dicts = [
+    {"raw_name": h.raw_name, "symbol": h.symbol, "qty": h.qty, "avg_price": h.avg_price, "investment": h.investment}
+    for h in saved_holdings
+]
+merged_holdings = portfolio_service.merge_holdings(holding_dicts)
+holding_symbols = tuple(sorted({r["symbol"] for r in merged_holdings if r["symbol"]}))
+ltp_by_symbol = {
+    **load_latest_prices(client, holding_symbols, cache_bust),
+    **load_live_broker_prices(client, user_id, holding_symbols, cache_bust),
 }
+holding_rows, _ = portfolio_service.compute_portfolio_view(merged_holdings, ltp_by_symbol)
 
-# Grouped by underlying, same as Realized P&L above -- an unresolved fill
-# (symbol is None) falls back to its raw_name as its own group rather than
-# disappearing or getting lumped into one catch-all "—" bucket.
-fills_by_symbol: dict[str, list] = {}
-for f in journal_fills:
-    fills_by_symbol.setdefault(f.symbol or f.raw_name, []).append(f)
+position_dicts = [
+    {
+        "raw_name": p.raw_name,
+        "symbol": p.symbol,
+        "expiry_date": p.expiry_date,
+        "strike_price": p.strike_price,
+        "option_type": p.option_type,
+        "qty": p.qty,
+        "avg_price": p.avg_price,
+        "ltp": p.ltp,
+    }
+    for p in saved_positions
+]
+position_rows = portfolio_service.compute_positions_view(position_dicts)
 
-for symbol in sorted(fills_by_symbol):
-    symbol_fills = sorted(fills_by_symbol[symbol], key=lambda f: f.traded_at, reverse=True)
-    with st.expander(f"{symbol} ({len(symbol_fills)} fill(s))"):
-        journal_rows = [
-            {
-                "Traded At": f.traded_at,
-                "Expiry": f.expiry_date.strftime("%d-%b-%y") if f.expiry_date else "—",
-                "Strike": f.strike_price if f.strike_price is not None else "—",
-                "Type": f.option_type.value if f.option_type else "—",
-                "Side": f.transaction_type,
-                "Qty": f.qty,
-                "Price": f.price,
-                "Brokerage": f.brokerage,
-                "Charges": f.taxes_and_charges,
-            }
-            for f in symbol_fills
-        ]
-        st.dataframe(
-            pd.DataFrame(journal_rows),
-            use_container_width=True,
-            hide_index=True,
-            column_config=journal_column_config,
+open_rows = [
+    {
+        "Kind": "Holding",
+        "Symbol": r["symbol"] or r["raw_name"],
+        "Expiry": "—",
+        "Strike": "—",
+        "Type": "—",
+        "Qty": r["qty"],
+        "Avg Price": r["avg_price"],
+        "LTP": r["ltp"],
+        "P&L": r["pnl"],
+        "P&L %": r["pnl_pct"],
+    }
+    for r in holding_rows
+] + [
+    {
+        "Kind": "Position",
+        "Symbol": r["symbol"] or r["raw_name"],
+        "Expiry": r["expiry_date"].strftime("%d-%b-%y") if r["expiry_date"] else "—",
+        "Strike": r["strike_price"] if r["strike_price"] is not None else "—",
+        "Type": r["option_type"].value if r["option_type"] else "—",
+        "Qty": r["qty"],
+        "Avg Price": r["avg_price"],
+        "LTP": r["ltp"],
+        "P&L": r["pnl"],
+        "P&L %": r["pnl_pct"],
+    }
+    for r in position_rows
+]
+
+if not open_rows:
+    st.caption("Nothing currently held or open.")
+else:
+    priced_rows = [r for r in open_rows if r["P&L"] is not None]
+    total_unrealised = sum(r["P&L"] for r in priced_rows)
+    stats = [
+        ("Unrealised P&L", format_inr(total_unrealised), f"{len(open_rows)} holding(s)/position(s)"),
+    ]
+    st.markdown(render_stat_grid(stats, user_settings.theme, cols=1), unsafe_allow_html=True)
+    if len(priced_rows) < len(open_rows):
+        st.caption(f"Excludes {len(open_rows) - len(priced_rows)} row(s) with no live price yet.")
+
+    by_symbol = (
+        pd.DataFrame(priced_rows).groupby("Symbol", as_index=False)["P&L"].sum().sort_values("P&L")
+        if priced_rows
+        else pd.DataFrame(columns=["Symbol", "P&L"])
+    )
+    if not by_symbol.empty:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=by_symbol["Symbol"], y=by_symbol["P&L"]))
+        fig.update_layout(
+            template=plotly_template(user_settings.theme),
+            height=320,
+            margin=dict(l=10, r=10, t=30, b=10),
+            title="Unrealised P&L by symbol",
         )
+        st.plotly_chart(fig, use_container_width=True)
+
+    open_column_config = {
+        "Avg Price": st.column_config.NumberColumn(format="₹%.2f"),
+        "LTP": st.column_config.NumberColumn(format="₹%.2f"),
+        "P&L": st.column_config.NumberColumn(format="₹%,.2f"),
+        "P&L %": st.column_config.NumberColumn(format="%+.2f%%"),
+        "Qty": st.column_config.NumberColumn(format="%g"),
+    }
+    lot_column_config = {
+        "Price": st.column_config.NumberColumn(format="₹%.2f"),
+        "Qty": st.column_config.NumberColumn(format="%g"),
+    }
+
+    open_rows_by_symbol: dict[str, list[dict]] = {}
+    for row in open_rows:
+        open_rows_by_symbol.setdefault(row["Symbol"], []).append(row)
+
+    for symbol in sorted(open_rows_by_symbol):
+        symbol_rows = open_rows_by_symbol[symbol]
+        symbol_pnl = sum(r["P&L"] for r in symbol_rows if r["P&L"] is not None)
+        with st.expander(f"{symbol} — {format_inr(symbol_pnl)}"):
+            # "Symbol" is redundant here -- it's the expander header itself.
+            st.dataframe(
+                pd.DataFrame(symbol_rows).drop(columns=["Symbol"]),
+                use_container_width=True,
+                hide_index=True,
+                column_config=open_column_config,
+            )
+
+            st.markdown("**Trades leading to this holding**")
+            symbol_open_lots = sorted(open_lots_by_symbol.get(symbol, []), key=lambda lot: lot["traded_at"])
+            if not symbol_open_lots:
+                st.caption(
+                    "No matching trade fills at all -- likely transferred in from another broker (Dhan's "
+                    "trade history never receives an off-market transfer), or predates the synced date range."
+                )
+            else:
+                actual_qty = sum(r["Qty"] for r in symbol_rows)
+                fills_qty = sum(lot["qty"] for lot in symbol_open_lots)
+                if abs(actual_qty - fills_qty) > _EPS:
+                    st.caption(
+                        f"Trade history accounts for {fills_qty:g} of {actual_qty:g} units -- the difference "
+                        "likely reflects shares transferred from another broker (Dhan's trade history never "
+                        "receives those), or fills outside the synced date range."
+                    )
+                lot_rows = [
+                    {
+                        "Entry": lot["traded_at"],
+                        "Instrument": lot["raw_name"],
+                        "Qty": lot["qty"],
+                        "Price": lot["price"],
+                    }
+                    for lot in symbol_open_lots
+                ]
+                st.dataframe(
+                    pd.DataFrame(lot_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config=lot_column_config,
+                )

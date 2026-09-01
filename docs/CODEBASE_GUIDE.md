@@ -3125,15 +3125,78 @@ integrate with.
 Both of the page's sections render **grouped by underlying symbol**
 (requested after the first version shipped as one flat table each) — one
 `st.expander` per symbol, sorted alphabetically, each holding its own
-mini `st.dataframe` (same `column_config` as before, just scoped to that
-symbol's rows). Realized P&L's per-symbol expander header shows that
-symbol's own net P&L and closed-lot count inline (`f"{symbol} —
-{format_inr(symbol_net)} ({len} closed lot(s))"`); the net-P&L-by-symbol
-bar chart stays above the expanders as a quick visual summary before
-drilling into any one symbol. Trade Journal's symbol multiselect filter
-is applied *before* grouping, same as before. An unresolved fill
-(`symbol is None`) gets its own expander keyed on `raw_name` rather than
-being dropped or lumped into a shared "unknown" bucket.
+mini `st.dataframe`s, `Symbol` dropped from the displayed columns since
+it's already the expander's own header. Realized P&L's expander header
+shows that symbol's own net P&L and closed-lot count inline (`f"{symbol}
+— {format_inr(symbol_net)} ({len} closed lot(s))"`); the net-P&L-by-
+symbol bar chart stays above the expanders as a quick visual summary
+before drilling into any one symbol.
+
+**Unrealised P&L replaced what used to be a flat "Trade Journal" browse
+of every fill** (a second real request after first use of the shipped
+page). Deliberately does **not** derive "what's currently held" from
+trade fills at all — it reuses the exact same
+`load_holdings`/`load_positions` (`src/utils/portfolio_page.py`) +
+`portfolio_service.merge_holdings` +
+`load_latest_prices`/`load_live_broker_prices` +
+`compute_portfolio_view`/`compute_positions_view` calls
+`pages/8_My_Holdings.py`/`pages/9_My_Positions.py` already make, combined
+into one list of rows tagged `Kind: "Holding"`/`"Position"` and grouped
+by symbol the same way Realized P&L is. **Why not derive it from trade
+fills, given the page already has them**: a real, unfixable data-source
+gap (below) means trade-fill-derived quantity can under-count a real
+holding — the *unrealized P&L number itself* has to come from the same
+authoritative holdings/positions data every other portfolio page already
+trusts, regardless of what trade history does or doesn't cover.
+
+Each symbol's expander also renders **"Trades leading to this
+holding"** — `portfolio_service.compute_open_lots(fills)` filtered to
+that symbol, sorted oldest-first (build-up order). This is where the
+trade-fill data still earns its keep for Unrealised P&L: it shows which
+actual fills accumulated into the current position. The section compares
+`sum(open lot quantities)` against the actual current quantity from the
+summary row(s) above (`_EPS = 1e-6` float tolerance) and shows a caption
+when they don't match instead of silently under-reporting.
+
+**A real, unfixable data-source gap, confirmed live**: `GET /v2/trades`
+only returns trades that actually executed on an exchange. Shares
+**transferred in from another broker** (an off-market DP transfer) never
+did — the user's own Dhan account showed several ETF buys in Dhan's
+"Transactions" report that aren't marked "Exchange traded transactions"
+and, correspondingly, never come back from `get_trade_history` at all. No
+change to `dhan_trade_fills_from_api` can fix this — there is nothing to
+parse, since Dhan's trade-history API itself never received these. The
+qty-mismatch caption above is the intended handling: surface the gap
+plainly rather than pretend trade history is complete.
+
+**Instrument column, added to every per-fill/per-lot table on this
+page** (Realized P&L's closed-lot table, Unrealised P&L's "trades leading
+to this holding" table) once grouping-by-symbol made the old flat
+Expiry/Strike/Type columns insufficient to tell rows within one symbol's
+expander apart (a "GOLD" group can span many different strikes/
+expiries). Plain `raw_name` — Dhan's own descriptive string, already
+human-readable for both an option (`"GOLD 31 AUG 135000 PUT"`) and an
+equity/ETF (`"Nippon Nifty 50 ETF (NIFTYBEES)"`) — positioned right after
+that table's own date/time column (`Exit`/`Entry` respectively). Existing
+Expiry/Strike/Type columns stay alongside it, still useful for sorting.
+
+`compute_realized_pnl`/`compute_open_lots` now share a private
+`_fifo_walk(fills) -> (closed_lots, open_lots)` engine rather than
+duplicating the FIFO matching logic — `compute_realized_pnl` returns just
+the closed half (unchanged public behavior, `TestComputeRealizedPnl`
+untouched), `compute_open_lots` returns the leftover fragments never
+matched to a close, one dict per fragment (NOT aggregated — a symbol can
+have several, e.g. two separate still-open buys at different prices),
+each carrying that fragment's own `qty` (FIFO's signed convention),
+`price`, `traded_at`, and `raw_name`. A closed lot's `raw_name` is the
+*closing* fill's own (not the opening one's) — see
+`TestComputeRealizedPnl::test_raw_name_on_a_closed_lot_is_the_closing_fills_own`.
+`TestComputeOpenLots` mirrors `TestComputeRealizedPnl`'s edge cases
+(fully open, partially closed, fully closed via `compute_realized_pnl`
+instead, a flip) plus one cross-check: for any given fill sequence,
+`sum(closed qty) + sum(open qty)` must always equal the total quantity
+involved — nothing should ever be double-counted or dropped between the
+two functions.
 
 ## Auth: a non-obvious quirk
 

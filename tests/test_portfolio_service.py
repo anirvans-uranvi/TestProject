@@ -1498,3 +1498,98 @@ class TestComputeRealizedPnl:
         assert closed[1]["charges"] == pytest.approx(0.20 * 60)
         # Entry charge is spent exactly once in total across both closes.
         assert closed[0]["charges"] + closed[1]["charges"] == pytest.approx(20.0)
+
+    def test_raw_name_on_a_closed_lot_is_the_closing_fills_own(self):
+        # Trade History's Instrument column reads this -- it must be the
+        # fill that actually closed the lot, not the one that opened it.
+        fills = [
+            self._fill(raw_name="OPEN LEG", transaction_type="BUY", qty=100, price=10.0, traded_at=datetime(2026, 8, 1)),
+            self._fill(raw_name="CLOSE LEG", transaction_type="SELL", qty=100, price=12.0, traded_at=datetime(2026, 8, 2)),
+        ]
+        closed = portfolio_service.compute_realized_pnl(fills)
+        assert closed[0]["raw_name"] == "CLOSE LEG"
+
+
+class TestComputeOpenLots:
+    _next_id = 0
+
+    def _fill(self, **overrides) -> PortfolioTradeFill:
+        TestComputeOpenLots._next_id += 1
+        base = dict(
+            user_id="u1",
+            portfolio_name="Portfolio 1",
+            broker="Dhan",
+            exchange_trade_id=f"T{TestComputeOpenLots._next_id}",
+            raw_name="SBIN",
+            symbol="SBIN",
+            expiry_date=None,
+            strike_price=None,
+            option_type=None,
+            transaction_type="BUY",
+            qty=10,
+            price=100.0,
+            traded_at=datetime(2026, 8, 1, 9, 30),
+            brokerage=0.0,
+            taxes_and_charges=0.0,
+        )
+        base.update(overrides)
+        return PortfolioTradeFill(**base)
+
+    def test_a_fully_open_position_comes_back_as_one_lot(self):
+        fills = [self._fill(raw_name="SBIN", transaction_type="BUY", qty=100, price=10.0)]
+        open_lots = portfolio_service.compute_open_lots(fills)
+        assert len(open_lots) == 1
+        assert open_lots[0]["qty"] == 100
+        assert open_lots[0]["price"] == 10.0
+        assert open_lots[0]["raw_name"] == "SBIN"
+
+    def test_a_fully_closed_position_leaves_nothing_open(self):
+        fills = [
+            self._fill(transaction_type="BUY", qty=100, price=10.0, traded_at=datetime(2026, 8, 1)),
+            self._fill(transaction_type="SELL", qty=100, price=12.0, traded_at=datetime(2026, 8, 2)),
+        ]
+        assert portfolio_service.compute_open_lots(fills) == []
+
+    def test_a_partially_closed_position_leaves_only_the_remainder_open(self):
+        fills = [
+            self._fill(transaction_type="BUY", qty=100, price=10.0, traded_at=datetime(2026, 8, 1)),
+            self._fill(transaction_type="SELL", qty=40, price=12.0, traded_at=datetime(2026, 8, 2)),
+        ]
+        open_lots = portfolio_service.compute_open_lots(fills)
+        assert len(open_lots) == 1
+        assert open_lots[0]["qty"] == 60
+        assert open_lots[0]["price"] == 10.0  # still the original entry price, not the sell's
+
+    def test_a_flip_leaves_the_new_direction_open_at_its_own_price(self):
+        fills = [
+            self._fill(transaction_type="BUY", qty=10, price=100.0, traded_at=datetime(2026, 8, 1)),
+            self._fill(transaction_type="SELL", qty=15, price=110.0, traded_at=datetime(2026, 8, 2)),
+        ]
+        open_lots = portfolio_service.compute_open_lots(fills)
+        assert len(open_lots) == 1
+        assert open_lots[0]["qty"] == -5  # short, FIFO's signed convention
+        assert open_lots[0]["price"] == 110.0  # the flip-opening fill's own price, not the original buy's
+
+    def test_multiple_unmatched_opens_all_come_back_as_separate_lots(self):
+        fills = [
+            self._fill(transaction_type="BUY", qty=50, price=10.0, traded_at=datetime(2026, 8, 1)),
+            self._fill(transaction_type="BUY", qty=30, price=11.0, traded_at=datetime(2026, 8, 2)),
+        ]
+        open_lots = portfolio_service.compute_open_lots(fills)
+        assert len(open_lots) == 2
+        assert {lot["qty"] for lot in open_lots} == {50, 30}
+
+    def test_closed_and_open_quantities_together_account_for_every_fill(self):
+        # Whatever isn't in compute_realized_pnl's output for a group must
+        # be exactly what's in compute_open_lots' -- nothing should ever
+        # be double-counted or dropped between the two.
+        fills = [
+            self._fill(transaction_type="BUY", qty=50, price=10.0, traded_at=datetime(2026, 8, 1)),
+            self._fill(transaction_type="BUY", qty=50, price=11.0, traded_at=datetime(2026, 8, 2)),
+            self._fill(transaction_type="SELL", qty=70, price=15.0, traded_at=datetime(2026, 8, 3)),
+        ]
+        closed = portfolio_service.compute_realized_pnl(fills)
+        open_lots = portfolio_service.compute_open_lots(fills)
+        total_closed_qty = sum(lot["qty_closed"] for lot in closed)
+        total_open_qty = sum(lot["qty"] for lot in open_lots)
+        assert total_closed_qty + total_open_qty == pytest.approx(100)

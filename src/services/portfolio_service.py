@@ -422,6 +422,77 @@ def _trade_fill_contract_key(fill: PortfolioTradeFill) -> tuple:
     return (fill.symbol, fill.expiry_date, fill.strike_price, fill.option_type)
 
 
+_FIFO_EPS = 1e-9  # guards against float drift on repeated subtraction, not a real trading tolerance
+
+
+def _fifo_walk(fills: list[PortfolioTradeFill]) -> tuple[list[dict], list[dict]]:
+    """Shared FIFO engine behind compute_realized_pnl/compute_open_lots --
+    see compute_realized_pnl's own docstring for the full matching
+    algorithm (grouping, same-side-opens/opposite-side-closes, flips).
+    Returns (closed_lots, open_lots): closed_lots is exactly what
+    compute_realized_pnl returns; open_lots is every lot fragment still
+    unmatched once each group's fills are exhausted -- one dict per
+    fragment (NOT aggregated), each carrying that fragment's own entry
+    price/time/raw_name and signed qty (positive = long, negative =
+    short) -- compute_open_lots' own return value."""
+    groups: dict[tuple, list[PortfolioTradeFill]] = {}
+    for fill in fills:
+        groups.setdefault(_trade_fill_contract_key(fill), []).append(fill)
+
+    closed_lots: list[dict] = []
+    open_lot_rows: list[dict] = []
+    for (symbol, expiry_date, strike_price, option_type), group_fills in groups.items():
+        ordered = sorted(group_fills, key=lambda f: f.traded_at)
+        open_lots: deque = deque()  # each: [qty_remaining(signed), price, traded_at, charge_per_unit, raw_name]
+        for fill in ordered:
+            charge_per_unit = (fill.taxes_and_charges + fill.brokerage) / fill.qty if fill.qty else 0.0
+            remaining_qty = fill.qty if fill.transaction_type == "BUY" else -fill.qty
+            while abs(remaining_qty) > _FIFO_EPS and open_lots and (open_lots[0][0] > 0) != (remaining_qty > 0):
+                lot = open_lots[0]
+                close_qty = min(abs(lot[0]), abs(remaining_qty))
+                entry_price, entry_time, entry_charge, entry_raw_name = lot[1], lot[2], lot[3], lot[4]
+                is_long_lot = lot[0] > 0
+                gross_pnl = (fill.price - entry_price) * close_qty if is_long_lot else (entry_price - fill.price) * close_qty
+                total_charges = (entry_charge + charge_per_unit) * close_qty
+                closed_lots.append(
+                    {
+                        "symbol": symbol,
+                        "expiry_date": expiry_date,
+                        "strike_price": strike_price,
+                        "option_type": option_type,
+                        "raw_name": fill.raw_name,  # the closing fill's own -- see compute_realized_pnl's docstring
+                        "entry_time": entry_time,
+                        "exit_time": fill.traded_at,
+                        "qty_closed": close_qty,
+                        "entry_price": entry_price,
+                        "exit_price": fill.price,
+                        "gross_pnl": gross_pnl,
+                        "charges": total_charges,
+                        "net_pnl": gross_pnl - total_charges,
+                    }
+                )
+                lot[0] -= close_qty if is_long_lot else -close_qty
+                remaining_qty -= close_qty if remaining_qty > 0 else -close_qty
+                if abs(lot[0]) < _FIFO_EPS:
+                    open_lots.popleft()
+            if abs(remaining_qty) > _FIFO_EPS:
+                open_lots.append([remaining_qty, fill.price, fill.traded_at, charge_per_unit, fill.raw_name])
+        for lot in open_lots:
+            open_lot_rows.append(
+                {
+                    "symbol": symbol,
+                    "expiry_date": expiry_date,
+                    "strike_price": strike_price,
+                    "option_type": option_type,
+                    "raw_name": lot[4],
+                    "qty": lot[0],
+                    "price": lot[1],
+                    "traded_at": lot[2],
+                }
+            )
+    return closed_lots, open_lot_rows
+
+
 def compute_realized_pnl(fills: list[PortfolioTradeFill]) -> list[dict]:
     """FIFO lot-matching over every synced trade fill, grouped by contract
     identity -- (symbol, expiry_date, strike_price, option_type). A plain
@@ -439,57 +510,35 @@ def compute_realized_pnl(fills: list[PortfolioTradeFill]) -> list[dict]:
     fill's quantity exceeds every open lot's remaining quantity (a
     position *flip*, e.g. long 10 fully closed by a sell of 15), the
     excess opens a new lot in the new direction rather than being dropped
-    or raising.
+    or raising. `raw_name` on each closed-lot dict is the *closing*
+    fill's own (Dhan's descriptive string, e.g. "GOLD 31 AUG 135000 PUT")
+    -- for Trade History's Instrument column.
 
     Any quantity never closed by the end of a group's fills isn't emitted
-    at all -- that's exactly what's already visible as a current
-    portfolio_position/portfolio_holding row elsewhere; this function only
-    ever reports on what's actually closed. Charges are pro-rated by qty
-    from both the opening and closing fill's own taxes_and_charges (each
-    per-unit, `fill.taxes_and_charges / fill.qty`, since a fill can be
-    partially consumed across several closes)."""
-    _EPS = 1e-9  # guards against float drift on repeated subtraction, not a real trading tolerance
-    groups: dict[tuple, list[PortfolioTradeFill]] = {}
-    for fill in fills:
-        groups.setdefault(_trade_fill_contract_key(fill), []).append(fill)
+    at all -- see compute_open_lots for that side of the same computation.
+    Charges are pro-rated by qty from both the opening and closing fill's
+    own taxes_and_charges (each per-unit, `fill.taxes_and_charges /
+    fill.qty`, since a fill can be partially consumed across several
+    closes)."""
+    closed, _ = _fifo_walk(fills)
+    return closed
 
-    closed_lots: list[dict] = []
-    for (symbol, expiry_date, strike_price, option_type), group_fills in groups.items():
-        ordered = sorted(group_fills, key=lambda f: f.traded_at)
-        open_lots: deque = deque()  # each: [qty_remaining(signed), price, traded_at, charge_per_unit]
-        for fill in ordered:
-            charge_per_unit = (fill.taxes_and_charges + fill.brokerage) / fill.qty if fill.qty else 0.0
-            remaining_qty = fill.qty if fill.transaction_type == "BUY" else -fill.qty
-            while abs(remaining_qty) > _EPS and open_lots and (open_lots[0][0] > 0) != (remaining_qty > 0):
-                lot = open_lots[0]
-                close_qty = min(abs(lot[0]), abs(remaining_qty))
-                entry_price, entry_time, entry_charge = lot[1], lot[2], lot[3]
-                is_long_lot = lot[0] > 0
-                gross_pnl = (fill.price - entry_price) * close_qty if is_long_lot else (entry_price - fill.price) * close_qty
-                total_charges = (entry_charge + charge_per_unit) * close_qty
-                closed_lots.append(
-                    {
-                        "symbol": symbol,
-                        "expiry_date": expiry_date,
-                        "strike_price": strike_price,
-                        "option_type": option_type,
-                        "entry_time": entry_time,
-                        "exit_time": fill.traded_at,
-                        "qty_closed": close_qty,
-                        "entry_price": entry_price,
-                        "exit_price": fill.price,
-                        "gross_pnl": gross_pnl,
-                        "charges": total_charges,
-                        "net_pnl": gross_pnl - total_charges,
-                    }
-                )
-                lot[0] -= close_qty if is_long_lot else -close_qty
-                remaining_qty -= close_qty if remaining_qty > 0 else -close_qty
-                if abs(lot[0]) < _EPS:
-                    open_lots.popleft()
-            if abs(remaining_qty) > _EPS:
-                open_lots.append([remaining_qty, fill.price, fill.traded_at, charge_per_unit])
-    return closed_lots
+
+def compute_open_lots(fills: list[PortfolioTradeFill]) -> list[dict]:
+    """The FIFO leftover from the same computation compute_realized_pnl
+    runs -- fill fragments never matched to a close, i.e. the actual
+    trades that built up (or are still building up) each symbol's current
+    open position. Feeds Trade History's Unrealised P&L section ("trades
+    leading to this holding"). One row per still-open lot fragment, NOT
+    aggregated -- a symbol can have several (e.g. two separate buys at
+    different prices/times, neither yet sold). `qty` keeps FIFO's signed
+    convention (positive = long/still held to be sold, negative =
+    short/still held to be bought back); `price`/`traded_at`/`raw_name`
+    are that specific fragment's own entry values, not the position's
+    weighted average -- summing/averaging across a symbol's rows here is
+    the caller's job if it wants an aggregate."""
+    _, open_lots = _fifo_walk(fills)
+    return open_lots
 
 
 def zerodha_holdings_from_api(rows: list[dict]) -> list[dict]:

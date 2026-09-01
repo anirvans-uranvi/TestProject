@@ -1503,13 +1503,26 @@ The page itself has two sections, **both grouped by underlying symbol**
   all `None`, which is itself a valid, distinct group). This is the one
   place in the app showing *realized*, not unrealized, P&L -- every other
   portfolio page's P&L is computed against a still-open position's LTP.
-  Any quantity never closed by a group's fills isn't shown here at all;
-  it's exactly what's already visible as a current
-  `portfolio_holding`/`portfolio_position` row elsewhere. A net-P&L-by-
-  symbol bar chart sits above the per-symbol expanders as a quick visual
-  summary.
-- **Trade Journal** -- every synced fill, filterable by symbol, then
-  grouped the same way.
+  A net-P&L-by-symbol bar chart sits above the per-symbol expanders as a
+  quick visual summary.
+- **Unrealised P&L** -- today's live P&L on whatever's still currently
+  held/open, deliberately **not** derived from trade fills at all: it
+  reuses the exact same `load_holdings`/`load_positions` +
+  `compute_portfolio_view`/`compute_positions_view` calls My
+  Holdings/My Positions already trust, so the *quantity and P&L numbers
+  are always correct* even when trade history itself is incomplete (see
+  the note below). Each symbol's expander also shows **"Trades leading
+  to this holding"** -- `portfolio_service.compute_open_lots(fills)`,
+  the FIFO leftover fragments that built up (or are still building up)
+  that position -- and flags a caption when those fills' total quantity
+  doesn't match the actual current quantity.
+
+Every fill still shown per-row (Realized P&L's closed lots, Unrealised
+P&L's "trades leading to this holding") carries an **Instrument** column
+(Dhan's own descriptive `raw_name`, e.g. `"GOLD 31 AUG 135000 PUT"` or
+`"Nippon Nifty 50 ETF (NIFTYBEES)"`) right after that row's own date/time
+column -- needed once everything is grouped by symbol, since a symbol's
+own expander can span several different expiries/strikes/instruments.
 
 Covers stocks, ETFs, futures, and options -- anything Dhan's own
 `/v2/trades` returns. **Mutual funds are explicitly out of scope**: MF
@@ -1517,6 +1530,21 @@ investments settle through a completely different mechanism (allotment-
 based, not a real-time exchange trade), so they don't appear on this
 endpoint at all and would need a separate Dhan API integration this app
 doesn't have.
+
+> [!IMPORTANT]
+> **Some real trades will never appear here, and that's not a bug**:
+> `GET /v2/trades` only ever returns trades that actually executed on an
+> exchange. Shares **transferred in from another broker** (an off-market
+> DP transfer) never did -- confirmed directly against a real account,
+> where Dhan's own "Transactions" report shows several ETF buys that
+> aren't marked "Exchange traded transactions" and, correspondingly,
+> never come back from `/v2/trades` at all. No parser fix can make these
+> appear, because there is nothing to parse -- Dhan's trade-history API
+> never received them. This is exactly why Unrealised P&L computes its
+> quantity/P&L from actual holdings/positions instead of from trade
+> fills, and why its "trades leading to this holding" section can show a
+> smaller quantity than the real position, with a caption explaining the
+> gap rather than silently under-reporting.
 
 **Not attempted here**: linking a closed lot back to My Trades/Analyse
 Trade's manual "Trade" grouping (`group_into_trades`/`trade_id`) -- that
