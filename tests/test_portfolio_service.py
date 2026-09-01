@@ -1252,16 +1252,74 @@ class TestDhanTradeFillsFromApi:
         expected = 0.0079 + 3.95 + 4.1958 + 3.3022 + 0.0  # sebiTax+stt+serviceTax+exchangeTransactionCharges+stampDuty
         assert fill["taxes_and_charges"] == pytest.approx(expected)
 
-    def test_a_single_token_custom_symbol_is_treated_as_a_plain_equity(self):
-        # Not yet confirmed live (every fill seen so far was an option) --
-        # inferred by analogy with dhan_positions_from_api's non-derivative
-        # handling, same as this function's own docstring notes.
-        row = {**self._LIVE_PUT_FILL, "customSymbol": "SBIN", "drvExpiryDate": "0001-01-01", "drvOptionType": None, "drvStrikePrice": None}
-        fill = portfolio_service.dhan_trade_fills_from_api([row])[0]
-        assert fill["symbol"] == "SBIN"
+    # Verbatim (values), confirmed live 2026-08-31 -- a stock/ETF (CNC)
+    # fill's customSymbol turned out to be a free-text DISPLAY name, not a
+    # ticker, unlike an option's (real bug: the first implementation
+    # guessed customSymbol.split()[0] would work here too, based only on
+    # option samples -- it didn't, see dhan_trade_fills_from_api's
+    # docstring).
+    _LIVE_ETF_FILL = {
+        "dhanClientId": "1107705688",
+        "orderId": "2212608281398202",
+        "exchangeOrderId": "1200000071849921",
+        "exchangeTradeId": "0",
+        "transactionType": "BUY",
+        "exchangeSegment": "NSE_EQ",
+        "productType": "CNC",
+        "orderType": None,
+        "customSymbol": "Nippon 8-13 Year G-Sec ETF (LTGILTBEES)",
+        "securityId": "17700",
+        "tradedQuantity": 10000,
+        "tradedPrice": 29.9532,
+        "isin": "INF204KB1882",
+        "instrument": "EQUITY",
+        "sebiTax": 0.2985,
+        "stt": 0.0,
+        "brokerageCharges": 0.0,
+        "serviceTax": 1.7084,
+        "exchangeTransactionCharges": 9.1931,
+        "stampDuty": 44.77,
+        "createTime": "NA",
+        "updateTime": "NA",
+        "exchangeTime": "2026-08-28T15:27:31",
+        "drvExpiryDate": "1970-01-01",
+        "drvOptionType": "NA",
+        "drvStrikePrice": 0.0,
+    }
+
+    def test_a_stock_etf_fills_customsymbol_is_a_display_name_not_a_ticker_by_itself(self):
+        # Splitting on space (correct for an option) gives nonsense here
+        # ("Nippon") -- with no symbol_by_security_id map given, falls
+        # back to the raw display name unresolved rather than guessing.
+        fill = portfolio_service.dhan_trade_fills_from_api([self._LIVE_ETF_FILL])[0]
+        assert fill["symbol"] == "Nippon 8-13 Year G-Sec ETF (LTGILTBEES)"
+        assert fill["raw_name"] == "Nippon 8-13 Year G-Sec ETF (LTGILTBEES)"
+
+    def test_resolves_the_real_ticker_via_security_id_when_the_map_is_given(self):
+        fill = portfolio_service.dhan_trade_fills_from_api(
+            [self._LIVE_ETF_FILL], symbol_by_security_id={"17700": "LTGILTBEES"}
+        )[0]
+        assert fill["symbol"] == "LTGILTBEES"
+
+    def test_1970_01_01_is_also_recognized_as_a_no_expiry_sentinel(self):
+        # Confirmed live: /v2/trades uses "1970-01-01" for "no real expiry"
+        # on a non-derivative fill -- a DIFFERENT sentinel than
+        # /v2/positions' "0001-01-01" (_DHAN_NO_EXPIRY_SENTINEL). Getting
+        # this wrong silently stored a fake expiry_date on every stock/ETF
+        # fill (a real bug this test guards against regressing).
+        fill = portfolio_service.dhan_trade_fills_from_api([self._LIVE_ETF_FILL])[0]
         assert fill["expiry_date"] is None
         assert fill["strike_price"] is None
         assert fill["option_type"] is None
+
+    def test_drv_option_type_na_and_strike_zero_dont_leak_through_as_real_values(self):
+        # drvOptionType comes back the literal string "NA" (not null) and
+        # drvStrikePrice 0.0 (not null) for a non-derivative fill --
+        # both already fall out to None via existing falsy/unmapped
+        # checks, this just pins that down explicitly.
+        fill = portfolio_service.dhan_trade_fills_from_api([self._LIVE_ETF_FILL])[0]
+        assert fill["option_type"] is None
+        assert fill["strike_price"] is None
 
 
 class TestTradeFillsToRecords:

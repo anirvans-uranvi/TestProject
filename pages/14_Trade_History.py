@@ -90,21 +90,16 @@ else:
             "Charges": lot["charges"],
             "Net P&L": lot["net_pnl"],
         }
-        for lot in sorted(closed_lots, key=lambda lot: lot["exit_time"], reverse=True)
+        for lot in closed_lots
     ]
-    st.dataframe(
-        pd.DataFrame(pnl_rows),
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Entry Price": st.column_config.NumberColumn(format="₹%.2f"),
-            "Exit Price": st.column_config.NumberColumn(format="₹%.2f"),
-            "Gross P&L": st.column_config.NumberColumn(format="₹%,.2f"),
-            "Charges": st.column_config.NumberColumn(format="₹%,.2f"),
-            "Net P&L": st.column_config.NumberColumn(format="₹%,.2f"),
-            "Qty": st.column_config.NumberColumn(format="%g"),
-        },
-    )
+    pnl_column_config = {
+        "Entry Price": st.column_config.NumberColumn(format="₹%.2f"),
+        "Exit Price": st.column_config.NumberColumn(format="₹%.2f"),
+        "Gross P&L": st.column_config.NumberColumn(format="₹%,.2f"),
+        "Charges": st.column_config.NumberColumn(format="₹%,.2f"),
+        "Net P&L": st.column_config.NumberColumn(format="₹%,.2f"),
+        "Qty": st.column_config.NumberColumn(format="%g"),
+    }
 
     by_symbol = (
         pd.DataFrame(pnl_rows).groupby("Symbol", as_index=False)["Net P&L"].sum().sort_values("Net P&L")
@@ -119,34 +114,61 @@ else:
     )
     st.plotly_chart(fig, use_container_width=True)
 
+    # Grouped by underlying -- one expander per symbol, rows within it
+    # still newest-exit-first, same as the previous flat table's ordering.
+    pnl_rows_by_symbol: dict[str, list[dict]] = {}
+    for row in pnl_rows:
+        pnl_rows_by_symbol.setdefault(row["Symbol"], []).append(row)
+    for symbol in sorted(pnl_rows_by_symbol):
+        symbol_rows = sorted(pnl_rows_by_symbol[symbol], key=lambda r: r["Exit"], reverse=True)
+        symbol_net = sum(r["Net P&L"] for r in symbol_rows)
+        with st.expander(f"{symbol} — {format_inr(symbol_net)} ({len(symbol_rows)} closed lot(s))"):
+            st.dataframe(
+                pd.DataFrame(symbol_rows),
+                use_container_width=True,
+                hide_index=True,
+                column_config=pnl_column_config,
+            )
+
 st.divider()
 st.subheader("Trade Journal")
 all_symbols = sorted({f.symbol for f in fills if f.symbol})
 selected_symbols = st.multiselect("Filter by symbol", all_symbols)
 journal_fills = [f for f in fills if not selected_symbols or f.symbol in selected_symbols]
-journal_rows = [
-    {
-        "Traded At": f.traded_at,
-        "Symbol": f.symbol or f.raw_name,
-        "Expiry": f.expiry_date.strftime("%d-%b-%y") if f.expiry_date else "—",
-        "Strike": f.strike_price if f.strike_price is not None else "—",
-        "Type": f.option_type.value if f.option_type else "—",
-        "Side": f.transaction_type,
-        "Qty": f.qty,
-        "Price": f.price,
-        "Brokerage": f.brokerage,
-        "Charges": f.taxes_and_charges,
-    }
-    for f in sorted(journal_fills, key=lambda f: f.traded_at, reverse=True)
-]
-st.dataframe(
-    pd.DataFrame(journal_rows),
-    use_container_width=True,
-    hide_index=True,
-    column_config={
-        "Price": st.column_config.NumberColumn(format="₹%.2f"),
-        "Brokerage": st.column_config.NumberColumn(format="₹%.2f"),
-        "Charges": st.column_config.NumberColumn(format="₹%.2f"),
-        "Qty": st.column_config.NumberColumn(format="%g"),
-    },
-)
+journal_column_config = {
+    "Price": st.column_config.NumberColumn(format="₹%.2f"),
+    "Brokerage": st.column_config.NumberColumn(format="₹%.2f"),
+    "Charges": st.column_config.NumberColumn(format="₹%.2f"),
+    "Qty": st.column_config.NumberColumn(format="%g"),
+}
+
+# Grouped by underlying, same as Realized P&L above -- an unresolved fill
+# (symbol is None) falls back to its raw_name as its own group rather than
+# disappearing or getting lumped into one catch-all "—" bucket.
+fills_by_symbol: dict[str, list] = {}
+for f in journal_fills:
+    fills_by_symbol.setdefault(f.symbol or f.raw_name, []).append(f)
+
+for symbol in sorted(fills_by_symbol):
+    symbol_fills = sorted(fills_by_symbol[symbol], key=lambda f: f.traded_at, reverse=True)
+    with st.expander(f"{symbol} ({len(symbol_fills)} fill(s))"):
+        journal_rows = [
+            {
+                "Traded At": f.traded_at,
+                "Expiry": f.expiry_date.strftime("%d-%b-%y") if f.expiry_date else "—",
+                "Strike": f.strike_price if f.strike_price is not None else "—",
+                "Type": f.option_type.value if f.option_type else "—",
+                "Side": f.transaction_type,
+                "Qty": f.qty,
+                "Price": f.price,
+                "Brokerage": f.brokerage,
+                "Charges": f.taxes_and_charges,
+            }
+            for f in symbol_fills
+        ]
+        st.dataframe(
+            pd.DataFrame(journal_rows),
+            use_container_width=True,
+            hide_index=True,
+            column_config=journal_column_config,
+        )

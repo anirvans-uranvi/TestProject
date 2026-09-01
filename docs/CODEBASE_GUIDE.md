@@ -3028,11 +3028,54 @@ the same way `dhan_positions_from_api` does (same
 a *different* format from positions/holdings' hyphen-joined
 `tradingSymbol` (space-separated and human-readable, e.g. `"GOLD 31 AUG
 135000 PUT"` rather than a `"GOLD-31AUG-135000-PUT"`-style string), so
-`_dhan_underlying_symbol` does NOT apply here — the underlying is simply
-`customSymbol.split()[0]`. A plain equity/ETF fill's single-token
-`customSymbol` (e.g. `"SBIN"`) falls out of that same logic for free,
-though this branch is inferred by analogy rather than confirmed live —
-every fill seen in the real inspection was an option.
+`_dhan_underlying_symbol` does NOT apply here — for a **derivative** fill
+the underlying is simply `customSymbol.split()[0]`.
+
+**A second round of live testing (2026-08-31) found the equity/ETF branch
+guessed above was wrong** — the first inspection only ever saw options,
+so a plain equity/ETF fill's handling was "inferred by analogy," flagged
+explicitly as unconfirmed in both the function's docstring and this
+guide. It turned out `customSymbol` for a `productType == "CNC"` fill
+(stock/ETF/fund) is a free-text *display name*, not a ticker at all:
+`"Coal India"`, `"Oil & Natural Gas Corporation"`, `"Nippon Nifty 50 ETF
+(NIFTYBEES)"` — and inconsistently formatted (some funds carry no ticker
+in parentheses at all, e.g. `"LIC Nifty 10 Year G-Sec ETF"`).
+`customSymbol.split()[0]` on these gives nonsense (`"Coal"`, `"Oil"`,
+`"Nippon"`) — a real, confirmed-live bug that had already written wrong
+`symbol` values into `portfolio_trade_fills` for every one of this
+account's 321 CNC rows before it was caught. Fixed by adding a
+`symbol_by_security_id: dict[str, str] | None` parameter to
+`dhan_trade_fills_from_api` — for a non-derivative fill, the real ticker
+is resolved via `securityId` against `dhan_equity_instruments`' own
+`trading_symbol` (built by the caller, `_render_dhan_trade_history_sync`,
+from `dhan_instrument_repo.get_equity_instruments(client)` — the same
+table "Refresh Instrument Master - Dhan" populates), falling back to the
+raw, unresolved display name only if that lookup misses (e.g. the
+instrument master hasn't been refreshed) — same "still saved and shown,
+just unresolved" convention as every other `*_from_api` function.
+
+The same round also found `/v2/trades` uses a **different "no real
+expiry" sentinel than `/v2/positions`**: `"1970-01-01"`
+(`_DHAN_TRADE_NO_EXPIRY_SENTINEL`), not `"0001-01-01"`
+(`_DHAN_NO_EXPIRY_SENTINEL`, positions' own convention). Missing this
+meant every stock/ETF/fund fill's `is_derivative` check evaluated `True`
+(since `"1970-01-01" != "0001-01-01"`), silently storing a fake
+`expiry_date` of 1970-01-01 on every one of them. Both sentinels are now
+checked. Also confirmed harmless without any special-casing needed:
+`drvOptionType` comes back the literal string `"NA"` (not null) and
+`drvStrikePrice` `0.0` (not null) on a non-derivative fill — both already
+fall through to `None` via the existing falsy-value/unmapped-dict-key
+checks.
+
+**If the equity/ETF display-name bug is ever hit again on an account that
+already synced before this fix landed**: the wrong `symbol`/`expiry_date`
+values are stuck in already-stored rows — `upsert_trade_fills`' upsert
+only overwrites a row when a sync's date range covers it again, and the
+incremental (post-first-sync) flow only ever fetches *forward* from the
+latest stored date. The fix for already-bad data is a fresh full
+backfill: clear `portfolio_trade_fills` (e.g. `delete from
+portfolio_trade_fills where broker = 'Dhan';`) and re-run "Sync Trade
+History from Dhan" from the first-sync date-picker flow.
 
 `portfolio_service.compute_realized_pnl` is the analytical core — a
 pure, thoroughly-tested FIFO lot-matcher (see
@@ -3073,7 +3116,24 @@ Trade's manual "Trade" grouping (`group_into_trades`/`trade_id`) — that
 grouping only ever sees currently-open holdings/positions rows, with no
 notion of a closed position, so Realized P&L groups by raw contract
 identity instead, independent of any Trade Type label. Revisit only if
-that turns out to be insufficient in practice.
+that turns out to be insufficient in practice. **Also explicitly out of
+scope**: mutual funds. MF investments settle through allotment, not a
+real-time exchange trade, so they never appear on `/v2/trades` at all —
+covering them would need a completely separate Dhan API this app doesn't
+integrate with.
+
+Both of the page's sections render **grouped by underlying symbol**
+(requested after the first version shipped as one flat table each) — one
+`st.expander` per symbol, sorted alphabetically, each holding its own
+mini `st.dataframe` (same `column_config` as before, just scoped to that
+symbol's rows). Realized P&L's per-symbol expander header shows that
+symbol's own net P&L and closed-lot count inline (`f"{symbol} —
+{format_inr(symbol_net)} ({len} closed lot(s))"`); the net-P&L-by-symbol
+bar chart stays above the expanders as a quick visual summary before
+drilling into any one symbol. Trade Journal's symbol multiselect filter
+is applied *before* grouping, same as before. An unresolved fill
+(`symbol is None`) gets its own expander keyed on `raw_name` rather than
+being dropped or lumped into a shared "unknown" bucket.
 
 ## Auth: a non-obvious quirk
 

@@ -1494,7 +1494,9 @@ happen to include it again (`portfolio_repo.upsert_trade_fills`, keyed on
 `exchange_trade_id` -- **not** Dhan's own same-named API field, see the
 note below).
 
-The page itself has two sections:
+The page itself has two sections, **both grouped by underlying symbol**
+(one `st.expander` per symbol, alphabetical, each with its own mini-table
+-- not one giant flat table mixing every symbol together):
 - **Realized P&L** -- `portfolio_service.compute_realized_pnl` FIFO-matches
   every fill into closed lots, grouped by contract identity (symbol,
   expiry, strike, option type -- a plain equity fill's latter three are
@@ -1503,8 +1505,18 @@ The page itself has two sections:
   portfolio page's P&L is computed against a still-open position's LTP.
   Any quantity never closed by a group's fills isn't shown here at all;
   it's exactly what's already visible as a current
-  `portfolio_holding`/`portfolio_position` row elsewhere.
-- **Trade Journal** -- every synced fill, flat, filterable by symbol.
+  `portfolio_holding`/`portfolio_position` row elsewhere. A net-P&L-by-
+  symbol bar chart sits above the per-symbol expanders as a quick visual
+  summary.
+- **Trade Journal** -- every synced fill, filterable by symbol, then
+  grouped the same way.
+
+Covers stocks, ETFs, futures, and options -- anything Dhan's own
+`/v2/trades` returns. **Mutual funds are explicitly out of scope**: MF
+investments settle through a completely different mechanism (allotment-
+based, not a real-time exchange trade), so they don't appear on this
+endpoint at all and would need a separate Dhan API integration this app
+doesn't have.
 
 **Not attempted here**: linking a closed lot back to My Trades/Analyse
 Trade's manual "Trade" grouping (`group_into_trades`/`trade_id`) -- that
@@ -1528,7 +1540,24 @@ raw contract identity instead, independent of any Trade Type label.
 > as `/v2/positions`), but `customSymbol` is a different, space-separated
 > format from positions/holdings' hyphen-joined `tradingSymbol` (e.g.
 > `"GOLD 31 AUG 135000 PUT"`, not `"GOLD-31AUG-135000-PUT"`) -- the
-> underlying is simply its first token.
+> underlying is simply its first token for a **derivative** fill.
+>
+> **A second round of live testing (2026-08-31) found `customSymbol` is a
+> completely different, unreliable format for a stock/ETF/fund fill**
+> (`productType == "CNC"`): it's a free-text *display name* -- `"Coal
+> India"`, `"Oil & Natural Gas Corporation"`, `"Nippon Nifty 50 ETF
+> (NIFTYBEES)"` -- not a ticker at all, and inconsistently formatted (some
+> funds have no ticker in parentheses at all). Splitting on the first
+> space (correct for a derivative) gave nonsense (`"Coal"`, `"Oil"`,
+> `"Nippon"`) for these. Fixed by resolving the real ticker via
+> `securityId` against `dhan_equity_instruments` -- the same equity
+> instrument master "Refresh Instrument Master - Dhan" already populates
+> -- falling back to the raw display name, unresolved, only if that
+> lookup misses. The same round also found `/v2/trades` uses a
+> **different "no real expiry" placeholder than `/v2/positions`**:
+> `"1970-01-01"`, not `"0001-01-01"` -- getting this wrong had silently
+> stored a fake expiry date on every stock/ETF/fund fill. Both sentinels
+> are now checked.
 
 ## Docker
 

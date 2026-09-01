@@ -287,24 +287,50 @@ def _dedupe_raw_names(positions: list[dict]) -> None:
         seen.add(candidate)
 
 
-def dhan_trade_fills_from_api(rows: list[dict]) -> list[dict]:
+_DHAN_TRADE_NO_EXPIRY_SENTINEL = "1970-01-01"  # /v2/trades' own "no real
+# expiry" placeholder -- confirmed live NOT the same value /v2/positions
+# uses (_DHAN_NO_EXPIRY_SENTINEL, "0001-01-01"); both are checked below
+# since apparently each endpoint has its own convention.
+
+
+def dhan_trade_fills_from_api(rows: list[dict], symbol_by_security_id: dict[str, str] | None = None) -> list[dict]:
     """Translates GET /v2/trades rows (dhan_provider.get_trade_history)
     into this app's own trade-fill-dict shape, for trade_fills_to_records.
 
-    Confirmed live against a real account (2026-08-27): /v2/trades DOES
-    carry structured drvExpiryDate/drvStrikePrice/drvOptionType fields
-    directly, same as /v2/positions -- so contract detail is read the same
-    way dhan_positions_from_api does (same _DHAN_NO_EXPIRY_SENTINEL/
-    _DHAN_OPTION_TYPES). `customSymbol` is NOT the same format as
-    positions/holdings' hyphen-joined `tradingSymbol` though -- it's
-    space-separated and human-readable (e.g. "GOLD 31 AUG 135000 PUT",
-    "NIFTY 01 SEP 25000 CALL"), so _dhan_underlying_symbol (built for the
-    hyphen format) does NOT apply here. The underlying is simply the first
-    space-separated token -- true for a derivative's multi-token string,
-    and equally true for a plain equity/ETF fill's single-token symbol
-    (unconfirmed live -- inferred by analogy with how tradingSymbol works
-    for a non-derivative row elsewhere in this module -- since every fill
-    seen live so far was an option).
+    Confirmed live against a real account (2026-08-27, then again
+    2026-08-31 for a CNC/equity fill specifically): /v2/trades DOES carry
+    structured drvExpiryDate/drvStrikePrice/drvOptionType fields directly,
+    same as /v2/positions -- so contract detail is read the same way
+    dhan_positions_from_api does (_DHAN_OPTION_TYPES; drvOptionType comes
+    back the literal string "NA", and drvStrikePrice 0.0, for a
+    non-derivative fill -- both already fall through to None via the
+    existing falsy/unmapped-key checks with no special-casing needed).
+
+    `customSymbol`'s format turned out to depend entirely on what's being
+    traded, confirmed live from two separate real samples:
+    - A derivative (option/future) fill's customSymbol IS a real ticker
+      as its first space-separated token (e.g. "GOLD 31 AUG 135000 PUT"
+      -> "GOLD", "NIFTY 01 SEP 25000 CALL" -> "NIFTY") -- NOT the hyphen-
+      joined format `_dhan_underlying_symbol` was built for, so that
+      function doesn't apply here, but the plain `.split()[0]` is correct
+      and reliable for this case.
+    - A non-derivative (equity/ETF/fund, productType "CNC") fill's
+      customSymbol is instead a free-text DISPLAY name -- "Coal India",
+      "Oil & Natural Gas Corporation", "Nippon Nifty 50 ETF (NIFTYBEES)"
+      -- not a ticker at all, and inconsistently formatted (some funds
+      have no ticker in parentheses at all, e.g. "LIC Nifty 10 Year
+      G-Sec ETF"). `.split()[0]` on these gives nonsense ("Coal", "Oil",
+      "Nippon" respectively) -- a real bug caught by testing against a
+      second live sample after the first (option-only) sample's
+      unconfirmed equity-branch guess turned out wrong. `securityId` ->
+      dhan_equity_instruments' own trading_symbol (`symbol_by_security_id`,
+      built by the caller from dhan_instrument_repo.get_equity_instruments
+      -- the same instrument master "Refresh Instrument Master - Dhan"
+      already populates) is the reliable resolution instead. Falls back to
+      the raw customSymbol display name, unresolved, when the security_id
+      isn't in the map (e.g. instrument master not yet refreshed) -- same
+      "still saved and shown, just unresolved" convention as every other
+      *_from_api function here.
 
     **A real bug in Dhan's own API found here**: `exchangeTradeId` --
     documented as the exchange's unique-per-fill trade identifier, and
@@ -316,26 +342,34 @@ def dhan_trade_fills_from_api(rows: list[dict]) -> list[dict]:
     the same `exchange_trade_id` column -- stable across re-syncs of the
     same fill (all inputs are immutable once a trade has settled), so
     upsert_trade_fills' dedup still works correctly."""
+    symbol_by_security_id = symbol_by_security_id or {}
     fills = []
     for row in rows:
         custom_symbol = str(row.get("customSymbol") or "").strip()
+        security_id = str(row.get("securityId") or "")
         expiry_raw = row.get("drvExpiryDate")
         expiry_str = str(expiry_raw)[:10] if expiry_raw else None
-        is_derivative = bool(expiry_str and expiry_str != _DHAN_NO_EXPIRY_SENTINEL)
+        is_derivative = bool(
+            expiry_str and expiry_str not in (_DHAN_NO_EXPIRY_SENTINEL, _DHAN_TRADE_NO_EXPIRY_SENTINEL)
+        )
         option_type_raw = str(row.get("drvOptionType") or "").strip().upper()
         strike_raw = row.get("drvStrikePrice")
         order_id = str(row.get("orderId") or "")
         exchange_time = row.get("exchangeTime")
         traded_qty = row.get("tradedQuantity")
         traded_price = row.get("tradedPrice")
+        if is_derivative:
+            symbol = custom_symbol.split()[0] if custom_symbol else None
+        else:
+            symbol = symbol_by_security_id.get(security_id) or (custom_symbol or None)
         fills.append(
             {
                 # See docstring: Dhan's own exchangeTradeId is always "0" on
                 # this endpoint, so a synthetic composite stands in for it.
                 "exchange_trade_id": f"{order_id}:{row.get('exchangeOrderId')}:{exchange_time}:{traded_qty}:{traded_price}",
                 "order_id": order_id or None,
-                "raw_name": custom_symbol or str(row.get("securityId") or ""),
-                "symbol": custom_symbol.split()[0] if custom_symbol else None,
+                "raw_name": custom_symbol or security_id,
+                "symbol": symbol,
                 "expiry_date": date.fromisoformat(expiry_str) if is_derivative else None,
                 "strike_price": float(strike_raw) if strike_raw else None,
                 "option_type": _DHAN_OPTION_TYPES.get(option_type_raw),

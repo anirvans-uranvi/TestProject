@@ -31,7 +31,7 @@ from src.models.enums import FetchStatus, FetchType
 from src.models.fetch_log import ProviderFetchLog
 from src.models.portfolio import BrokerConnection
 from src.models.user import UserSettings
-from src.repositories import fetch_log_repo, fo_repo, portfolio_repo, settings_repo
+from src.repositories import dhan_instrument_repo, fetch_log_repo, fo_repo, portfolio_repo, settings_repo
 from src.services import portfolio_service
 from src.utils.portfolio_page import ensure_cache_bust
 from src.utils.timezones import format_ist, now_ist, to_ist
@@ -460,7 +460,21 @@ def _render_dhan_trade_history_sync(*, client, user_id: str) -> None:
         with st.spinner(f"Fetching trades from {from_date} to {to_date_value}..."):
             try:
                 raw_rows = provider.get_trade_history(from_date, to_date_value)
-                fills = portfolio_service.dhan_trade_fills_from_api(raw_rows)
+                # A stock/ETF/fund fill's own customSymbol is a free-text
+                # display name, not a ticker (see dhan_trade_fills_from_api's
+                # docstring) -- resolved instead via the same equity
+                # instrument master "Refresh Instrument Master - Dhan"
+                # already populates. Degrades to no resolution (the parser's
+                # own raw-display-name fallback) rather than failing the
+                # whole sync if that table isn't set up yet.
+                try:
+                    symbol_by_security_id = {
+                        r["security_id"]: r["trading_symbol"]
+                        for r in dhan_instrument_repo.get_equity_instruments(client)
+                    }
+                except APIError:
+                    symbol_by_security_id = {}
+                fills = portfolio_service.dhan_trade_fills_from_api(raw_rows, symbol_by_security_id)
             except DhanAuthError:
                 st.error(
                     "Your Dhan access token was rejected -- it's likely expired (Dhan tokens last ~24 hours). "
