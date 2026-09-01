@@ -119,7 +119,7 @@ df = pd.DataFrame([r.model_dump() for r in rows])
 
 # Prefer a live broker quote over the shared, possibly-stale
 # daily_screener_snapshots value -- only when this account's Data
-# Provider setting (Settings page) is Dhan/Zerodha, and only for
+# Provider setting (Settings page) is Dhan, and only for
 # whichever symbols "Market Data Refresh" actually cached a live price
 # for (user_live_prices, migration 0030); every other symbol keeps its
 # snapshot value. `live_prices` is also consulted below to skip the

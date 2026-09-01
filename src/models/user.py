@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict
 
 from src.models.enums import Theme
 
-DataProvider = Literal["dhan", "zerodha", "yfinance_bhavcopy"]
+DataProvider = Literal["dhan", "yfinance_bhavcopy"]
 
 
 class UserSettings(BaseModel):
@@ -22,9 +22,11 @@ class UserSettings(BaseModel):
     """Which live source prices this account's stock LTP everywhere it's
     shown (Dashboard, Stock Detail, and the portfolio pages' own broker-
     live overrides). Fundamentals (PEG/dividend) and the full F&O chain
-    are NOT provider-branched -- neither Dhan nor Zerodha's API exposes
-    that data, so those stay yfinance/NSE+BSE-bhavcopy-sourced regardless
-    of this setting (see migration 0028)."""
+    are NOT provider-branched -- Dhan's API doesn't expose that data, so
+    those stay yfinance/NSE+BSE-bhavcopy-sourced regardless of this
+    setting (see migration 0028). Zerodha used to be a third option here
+    until it was removed entirely -- see
+    src/utils/data_provider_settings.py's module docstring for why."""
     updated_at: datetime | None = None
 
 

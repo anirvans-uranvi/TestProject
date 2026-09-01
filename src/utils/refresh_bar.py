@@ -5,11 +5,11 @@ of what a page actually needed:
 - **Fundamental Data Refresh** / **Bhavcopy Refresh** (NSE + BSE) --
   Settings only, `render_fundamental_and_bhavcopy_refresh`.
 - **Stock Data Refresh** (YFinance/Bhavcopy accounts) / **Stock & Option
-  Data Refresh** (Dhan/Zerodha accounts) -- every page except Settings,
+  Data Refresh** (Dhan accounts) -- every page except Settings,
   `render_stock_refresh_button` (shows exactly one of the two, by Data
   Provider setting).
 - **Portfolio Refresh** -- My Trades/My Holdings/My Positions/My CSP
-  only, Dhan/Zerodha accounts only, `render_portfolio_refresh_button`.
+  only, Dhan accounts only, `render_portfolio_refresh_button`.
 
 A click always calls `st.cache_data.clear()` -- the *entire* app-wide
 cache, not just the current page's -- before `st.rerun()`-ing, so every
@@ -18,10 +18,13 @@ which page the click happened on. Each button fetches independently (no
 shared cooldown/thread pool across buttons); "Bhavcopy Refresh" still
 fires its NSE + BSE legs concurrently via a `ThreadPoolExecutor`, since
 that's one button covering two independent exchanges.
+
+Zerodha was a second supported broker here (its own single-button live-
+LTP refresh, `load_live_zerodha_prices`) until it was removed entirely --
+see `src/utils/data_provider_settings.py`'s module docstring for why.
 """
 from __future__ import annotations
 
-import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
@@ -33,12 +36,11 @@ from src.models.enums import CompanyType
 from src.repositories import companies_repo, fetch_log_repo, fo_repo, portfolio_repo, snapshot_repo
 from src.services import edge_refresh
 from src.utils.data_provider_settings import sync_broker_portfolio
-from src.utils.portfolio_page import load_live_zerodha_prices
 from src.utils.timezones import format_ist
 
 _NSE_FO_PROVIDER = "fo_edge_nse"
 _BSE_FO_PROVIDER = "fo_edge_bse"
-_BROKER_BY_PROVIDER = {"dhan": "Dhan", "zerodha": "Zerodha"}
+_BROKER_BY_PROVIDER = {"dhan": "Dhan"}
 
 
 def _last_fetch_caption(client, label: str, fetch_type: str | list[str], provider_name: str | None = None) -> str:
@@ -163,12 +165,10 @@ def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
     symbols -- the same union Stock Detail/Options already use to widen
     their pickers) from its connected broker, and caches the result in
     user_live_prices for Dashboard/Stock Detail to read as an override.
-    Only invoked when this account's Data Provider setting is Dhan/
-    Zerodha -- see render_stock_refresh_button. For Dhan specifically,
-    also widens the equity/ETF universe with every tracked ETF and
-    refetches live LTP for every F&O contract _dhan_fo_universe returns
-    (migration 0032) -- Zerodha has no F&O instrument resolver yet, so
-    its branch is unchanged (a single call, no separate F&O leg).
+    Only invoked when this account's Data Provider setting is Dhan --
+    see render_stock_refresh_button. Also widens the equity/ETF universe
+    with every tracked ETF and refetches live LTP for every F&O contract
+    _dhan_fo_universe returns (migration 0032).
 
     The Dhan equity and F&O legs (_refresh_dhan_equity_leg/
     _refresh_dhan_fo_leg) run **sequentially**, not concurrently --
@@ -202,28 +202,17 @@ def _refresh_user_live_prices(client, user_id: str, broker: str) -> dict:
         }
     symbols = tuple(sorted(equity_etf_symbols))
 
-    if broker == "Dhan":
-        equity_result = _refresh_dhan_equity_leg(client, user_id, connection, symbols)
-        fo_result = _refresh_dhan_fo_leg(client, user_id, connection)
-        if equity_result.get("error"):
-            # Matches the pre-parallelization behavior: an equity-leg
-            # failure (most commonly an expired token, which would also
-            # doom the F&O leg) reports just that error, not a partial
-            # F&O result alongside it.
-            return {"error": equity_result["error"]}
-        prices = equity_result["prices"]
-        fo_quoted, fo_total = fo_result["fo_quoted"], fo_result["fo_total"]
-        fo_error, fo_missing = fo_result["fo_error"], fo_result["fo_missing"]
-    else:
-        # A unique cache_bust per click -- this is a user-initiated
-        # "fetch fresh now" action, not something that should reuse
-        # load_live_zerodha_prices' own 60s @st.cache_data TTL from an
-        # earlier, possibly-stale call.
-        prices = load_live_zerodha_prices(
-            connection.client_id, connection.api_secret, connection.access_token, symbols, time.time()
-        )
-        snapshot_repo.upsert_user_live_prices(client, user_id, prices)
-        fo_quoted, fo_total, fo_error, fo_missing = 0, 0, None, []
+    equity_result = _refresh_dhan_equity_leg(client, user_id, connection, symbols)
+    fo_result = _refresh_dhan_fo_leg(client, user_id, connection)
+    if equity_result.get("error"):
+        # Matches the pre-parallelization behavior: an equity-leg
+        # failure (most commonly an expired token, which would also
+        # doom the F&O leg) reports just that error, not a partial
+        # F&O result alongside it.
+        return {"error": equity_result["error"]}
+    prices = equity_result["prices"]
+    fo_quoted, fo_total = fo_result["fo_quoted"], fo_result["fo_total"]
+    fo_error, fo_missing = fo_result["fo_error"], fo_result["fo_missing"]
 
     return {
         "broker": broker,
@@ -366,10 +355,9 @@ def _dhan_equity_etf_universe(client, user_id: str) -> tuple[str, ...]:
     """Every symbol a Dhan account's stock-side live-price refresh should
     quote -- Nifty50 constituents, this account's own portfolio symbols,
     and every tracked ETF -- the same union `_refresh_user_live_prices`
-    builds for its own Dhan branch. Duplicated rather than shared with
-    that function so the combined refresh's own code path (also used by
-    Zerodha) never has to change to support the standalone "Stock Data
-    Refresh from Dhan" button below."""
+    builds. Duplicated rather than shared with that function so the
+    combined refresh's own code path never has to change to support the
+    standalone "Stock Data Refresh from Dhan" button below."""
     symbols = (
         {c.symbol for c in companies_repo.list_current_constituents(client)}
         | set(portfolio_repo.list_portfolio_symbols(client, user_id))
@@ -447,13 +435,12 @@ def _render_dhan_option_only_summary() -> None:
 
 def _render_dhan_stock_option_refresh_buttons(client, user_id: str) -> None:
     """The Dhan-provider case of render_stock_refresh_button -- unlike
-    Zerodha/YFinance (a single combined button each), Dhan gets three:
-    the original combined refresh (relabeled "... from Dhan" to
-    disambiguate from the other two) plus two new ones isolating just its
-    equity/ETF leg or just its F&O leg, each reusing
-    _refresh_dhan_equity_leg/_refresh_dhan_fo_leg directly rather than
-    going through the combined _refresh_user_live_prices (which always
-    runs both and is also Zerodha's own code path -- kept untouched)."""
+    YFinance (a single combined button), Dhan gets three: the original
+    combined refresh (relabeled "... from Dhan" to disambiguate from the
+    other two) plus two new ones isolating just its equity/ETF leg or
+    just its F&O leg, each reusing _refresh_dhan_equity_leg/
+    _refresh_dhan_fo_leg directly rather than going through the combined
+    _refresh_user_live_prices (which always runs both)."""
     st.caption("Stock LTP source: live Dhan quotes (Data Provider setting, in Settings).")
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -497,21 +484,14 @@ def render_fundamental_and_bhavcopy_refresh(client) -> None:
 
 def render_stock_refresh_button(client, user_id: str, data_provider: str) -> None:
     """Every page except Settings: shows exactly one of Stock Data
-    Refresh (YFinance/Bhavcopy accounts -- price + screener recompute),
-    Stock & Option Data Refresh (Zerodha accounts -- live broker LTP, no
-    separate F&O leg -- see _refresh_user_live_prices), or, for Dhan
-    specifically, three buttons -- the same combined refresh (relabeled
-    "... from Dhan") plus two new ones isolating just its equity or just
-    its F&O leg (see _render_dhan_stock_option_refresh_buttons) -- by
-    this account's Data Provider setting (Settings page)."""
+    Refresh (YFinance/Bhavcopy accounts -- price + screener recompute) or,
+    for Dhan, three buttons -- the combined refresh (relabeled "... from
+    Dhan") plus two new ones isolating just its equity or just its F&O
+    leg (see _render_dhan_stock_option_refresh_buttons) -- by this
+    account's Data Provider setting (Settings page)."""
     broker = _BROKER_BY_PROVIDER.get(data_provider)
     if broker == "Dhan":
         _render_dhan_stock_option_refresh_buttons(client, user_id)
-    elif broker:
-        st.caption(f"Stock LTP source: live {broker} quotes (Data Provider setting, in Settings).")
-        if st.button("Stock & Option Data Refresh", key="refresh_bar_broker_btn"):
-            _run_live_prices_refresh(client, user_id, broker)
-        _render_live_prices_summary()
     else:
         st.caption(_last_fetch_caption(client, "Last stock refresh", ["intraday_price", "price", "all"]))
         if st.button("Stock Data Refresh", key="refresh_bar_stock_btn"):
@@ -521,7 +501,7 @@ def render_stock_refresh_button(client, user_id: str, data_provider: str) -> Non
 
 def render_portfolio_refresh_button(client, user_id: str, data_provider: str) -> None:
     """My Trades/My Holdings/My Positions/My CSP only: Portfolio Refresh,
-    visible only for a Dhan/Zerodha-provider account -- re-syncs
+    visible only for a Dhan-provider account -- re-syncs
     holdings/positions from that broker via
     data_provider_settings.sync_broker_portfolio (the same sync Settings'
     "Save & Sync"/"Update credentials" forms trigger). Renders nothing

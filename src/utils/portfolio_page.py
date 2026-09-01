@@ -23,7 +23,6 @@ import streamlit as st
 
 from src.data_providers.base import ProviderError
 from src.data_providers.dhan_provider import DhanAuthError, DhanProvider
-from src.data_providers.zerodha_provider import ZerodhaAuthError, ZerodhaProvider
 from src.repositories import companies_repo, fo_repo, portfolio_repo, snapshot_repo
 from src.services import portfolio_service
 
@@ -76,9 +75,8 @@ def _apply_live_fo_prices(client, user_id: str, positions: list) -> list:
     per-symbol. Also clears `ltp_as_of` on a live hit -- a live price is
     never "stale", same rule the equity override already follows on
     Dashboard/Stock Detail. Doesn't need to branch on the account's Data
-    Provider setting: only Dhan writes F&O rows here today (Zerodha has
-    no F&O instrument resolver yet), so a lookup simply returns nothing
-    for every contract when it hasn't."""
+    Provider setting: only Dhan writes F&O rows here, so a lookup simply
+    returns nothing for every contract when it hasn't."""
     keys = [key for p in positions if (key := _fo_contract_key(p)) is not None]
     if not keys:
         return positions
@@ -157,66 +155,34 @@ def load_live_dhan_prices(
     return {symbol: quote.latest_price for symbol, quote in quotes.items()}
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def load_live_zerodha_prices(
-    api_key: str, api_secret: str, access_token: str, symbols: tuple[str, ...], _cache_bust: int
-) -> dict[str, float]:
-    """Live NSE equity LTPs straight from Kite Connect's /quote/ltp
-    (ZerodhaProvider.get_ltp), keyed by symbol -- Zerodha's counterpart to
-    load_live_dhan_prices above. Only meaningful for an account with
-    Zerodha connected whose Kite session hasn't expired yet (Settings'
-    "Data Provider" section); reuses the already-saved
-    api_key/api_secret/access_token, no separate app-wide credentials.
-    Returns {} on any provider error (expired daily session,
-    an unrecognized symbol, network) -- see load_live_broker_prices below
-    for how the caller falls back when this comes back empty."""
-    if not symbols:
-        return {}
-    try:
-        return ZerodhaProvider(api_key=api_key, api_secret=api_secret, access_token=access_token).get_ltp(list(symbols))
-    except (ZerodhaAuthError, ProviderError):
-        return {}
-
-
 def load_live_broker_prices(_client, user_id: str, symbols: tuple[str, ...], cache_bust: int) -> dict[str, float]:
-    """Live equity LTPs from whichever broker(s) this account has
-    actually connected (Dhan and/or Zerodha -- Settings' "Data Provider"
-    section, src/utils/data_provider_settings.py) -- fresher than
-    load_latest_prices' daily_screener_snapshots value, which only
-    reflects whatever provider/timing the last "Market Data Refresh"
-    click used for a yfinance_bhavcopy account. Account-wide since
-    migration 0029 (broker_connections no longer keyed by
+    """Live equity LTPs from this account's connected Dhan broker
+    (Settings' "Data Provider" section, src/utils/data_provider_settings.py)
+    -- fresher than load_latest_prices' daily_screener_snapshots value,
+    which only reflects whatever provider/timing the last "Market Data
+    Refresh" click used for a yfinance_bhavcopy account. Account-wide
+    since migration 0029 (broker_connections no longer keyed by
     portfolio_name), so this no longer takes a portfolio_name -- one
-    connected Dhan/Zerodha account covers every portfolio this account
-    has. Checks both broker connections and merges their live quotes; if
-    both are connected and both quote the same symbol, Zerodha's value
-    wins simply because it's applied last -- an arbitrary tie-break,
-    since either is equally "live". A symbol neither broker can quote (or
-    no broker connected at all, or a connected broker whose
-    session/token has expired) is simply absent from the result, leaving
-    the caller's daily_screener_snapshots value as the fallback for it --
-    not a special case here, just an empty/partial dict. Not itself
-    `@st.cache_data`-wrapped (the two loaders it calls already are) so
-    that a fresh get_broker_connection lookup always sees the latest
-    saved connection state (e.g. right after a Portfolio Refresh bumps
-    portfolio_cache_bust)."""
+    connected Dhan account covers every portfolio this account has. A
+    symbol Dhan can't quote (or no broker connected at all, or a
+    connected broker whose token has expired) is simply absent from the
+    result, leaving the caller's daily_screener_snapshots value as the
+    fallback for it -- not a special case here, just an empty/partial
+    dict. Not itself `@st.cache_data`-wrapped (load_live_dhan_prices
+    already is) so that a fresh get_broker_connection lookup always sees
+    the latest saved connection state (e.g. right after a Portfolio
+    Refresh bumps portfolio_cache_bust).
+
+    A second broker (Zerodha) used to be checked and merged in here too
+    (its value winning on a symbol both quoted, an arbitrary tie-break)
+    until it was removed entirely -- see
+    src/utils/data_provider_settings.py's module docstring for why."""
     live: dict[str, float] = {}
     dhan_connection = portfolio_repo.get_broker_connection(_client, user_id, "Dhan")
     if dhan_connection is not None and dhan_connection.access_token:
         live.update(
             load_live_dhan_prices(
                 dhan_connection.client_id, dhan_connection.access_token, symbols, cache_bust, _client
-            )
-        )
-    zerodha_connection = portfolio_repo.get_broker_connection(_client, user_id, "Zerodha")
-    if zerodha_connection is not None and zerodha_connection.access_token and zerodha_connection.api_secret:
-        live.update(
-            load_live_zerodha_prices(
-                zerodha_connection.client_id,
-                zerodha_connection.api_secret,
-                zerodha_connection.access_token,
-                symbols,
-                cache_bust,
             )
         )
     return live

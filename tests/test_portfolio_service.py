@@ -1,10 +1,11 @@
-"""Tests for portfolio_service: broker API response translation
-(Dhan/Zerodha live sync), instrument-string decoding, cross-broker
-merging, and valuation math. CSV parsing was dropped once a live broker
-sync (Settings' "Data Provider" section) became the only way to
-populate holdings/positions -- see git history for the removed
+"""Tests for portfolio_service: broker API response translation (Dhan
+live sync), instrument-string decoding, cross-broker merging, and
+valuation math. CSV parsing was dropped once a live broker sync
+(Settings' "Data Provider" section) became the only way to populate
+holdings/positions -- see git history for the removed
 parse_zerodha_csv/parse_dhan_csv/parse_zerodha_positions_csv/
-parse_dhan_positions_csv tests."""
+parse_dhan_positions_csv tests, and for Zerodha's own live-sync
+parsing/tests entirely (removed along with the broker itself)."""
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -114,50 +115,6 @@ class TestLooksLikeEtfName:
         assert portfolio_service.looks_like_etf_name("Vedanta Aluminium Metal Limited") is False
 
 
-class TestParseZerodhaOptionInstrument:
-    def test_decodes_weekly_index_option(self):
-        decoded = portfolio_service.parse_zerodha_option_instrument("NIFTY2681123000PE")
-        assert decoded == {
-            "symbol": "NIFTY",
-            "expiry_date": date(2026, 8, 11),
-            "strike_price": 23000.0,
-            "option_type": OptionType.PE,
-        }
-
-    def test_decodes_december_month_letter_code(self):
-        # 'D' (not a digit) stands in for December in Zerodha's weekly
-        # tradingsymbol -- year 26, month D, day 06, strike 63000, CE.
-        decoded = portfolio_service.parse_zerodha_option_instrument("BANKNIFTY26D0663000CE")
-        assert decoded["option_type"] == OptionType.CE
-        assert decoded["expiry_date"] == date(2026, 12, 6)
-
-    def test_decodes_monthly_option(self):
-        # Confirmed live against a real Zerodha-synced portfolio -- both
-        # index (NIFTY) and stock underlyings use this exact shape for
-        # their monthly contracts, no day-of-month in the symbol itself
-        # (implicit: NSE monthly F&O always expires the last Thursday).
-        decoded = portfolio_service.parse_zerodha_option_instrument("NIFTY26AUG23100PE")
-        assert decoded == {
-            "symbol": "NIFTY",
-            "expiry_date": date(2026, 8, 27),  # last Thursday of August 2026
-            "strike_price": 23100.0,
-            "option_type": OptionType.PE,
-        }
-
-    def test_decodes_monthly_stock_option(self):
-        decoded = portfolio_service.parse_zerodha_option_instrument("SBIN25AUG970PE")
-        assert decoded == {
-            "symbol": "SBIN",
-            "expiry_date": date(2025, 8, 28),  # last Thursday of August 2025
-            "strike_price": 970.0,
-            "option_type": OptionType.PE,
-        }
-
-    def test_returns_none_for_unrecognized_format(self):
-        assert portfolio_service.parse_zerodha_option_instrument("NOTANOPTION") is None
-        assert portfolio_service.parse_zerodha_option_instrument("NIFTY26XYZ23100PE") is None
-
-
 class TestComputePositionsView:
     def test_pnl_is_direction_correct_for_short_and_long(self):
         # Real sample rows: a short (qty<0) and a long (qty>0) position,
@@ -183,42 +140,42 @@ class TestComputePositionsView:
 class TestAssignTradeIds:
     def test_default_trade_id_is_the_underlying_symbol(self):
         positions = [
-            {"raw_name": "NIFTY 11 AUG 24200 CALL", "broker": "Zerodha", "symbol": "NIFTY"},
-            {"raw_name": "ONGC 25 AUG 230 PUT", "broker": "Zerodha", "symbol": "ONGC"},
+            {"raw_name": "NIFTY 11 AUG 24200 CALL", "broker": "OtherBroker", "symbol": "NIFTY"},
+            {"raw_name": "ONGC 25 AUG 230 PUT", "broker": "OtherBroker", "symbol": "ONGC"},
         ]
         result = portfolio_service.assign_trade_ids(positions, overrides={})
         assert {p["trade_id"] for p in result} == {"NIFTY", "ONGC"}
 
     def test_undecoded_leg_with_no_symbol_falls_back_to_raw_name(self):
-        positions = [{"raw_name": "WEIRD FORMAT 123", "broker": "Zerodha", "symbol": None}]
+        positions = [{"raw_name": "WEIRD FORMAT 123", "broker": "OtherBroker", "symbol": None}]
         result = portfolio_service.assign_trade_ids(positions, overrides={})
         assert result[0]["trade_id"] == "WEIRD FORMAT 123"
 
     def test_override_wins_over_the_default_per_symbol_grouping(self):
-        positions = [{"raw_name": "NIFTY 11 AUG 24200 CALL", "broker": "Zerodha", "symbol": "NIFTY"}]
-        overrides = {("Zerodha", "NIFTY 11 AUG 24200 CALL"): "My Custom Trade"}
+        positions = [{"raw_name": "NIFTY 11 AUG 24200 CALL", "broker": "OtherBroker", "symbol": "NIFTY"}]
+        overrides = {("OtherBroker", "NIFTY 11 AUG 24200 CALL"): "My Custom Trade"}
         result = portfolio_service.assign_trade_ids(positions, overrides)
         assert result[0]["trade_id"] == "My Custom Trade"
 
     def test_override_can_merge_two_different_underlyings_into_one_trade(self):
         positions = [
-            {"raw_name": "NIFTY LEG", "broker": "Zerodha", "symbol": "NIFTY"},
-            {"raw_name": "BANKNIFTY LEG", "broker": "Zerodha", "symbol": "BANKNIFTY"},
+            {"raw_name": "NIFTY LEG", "broker": "OtherBroker", "symbol": "NIFTY"},
+            {"raw_name": "BANKNIFTY LEG", "broker": "OtherBroker", "symbol": "BANKNIFTY"},
         ]
-        overrides = {("Zerodha", "NIFTY LEG"): "Pairs Trade", ("Zerodha", "BANKNIFTY LEG"): "Pairs Trade"}
+        overrides = {("OtherBroker", "NIFTY LEG"): "Pairs Trade", ("OtherBroker", "BANKNIFTY LEG"): "Pairs Trade"}
         result = portfolio_service.assign_trade_ids(positions, overrides)
         assert {p["trade_id"] for p in result} == {"Pairs Trade"}
 
     def test_override_is_scoped_by_broker_not_just_raw_name(self):
         positions = [
-            {"raw_name": "SAME NAME", "broker": "Zerodha", "symbol": "X"},
+            {"raw_name": "SAME NAME", "broker": "OtherBroker", "symbol": "X"},
             {"raw_name": "SAME NAME", "broker": "Dhan", "symbol": "X"},
         ]
-        overrides = {("Zerodha", "SAME NAME"): "Only Zerodha's Trade"}
+        overrides = {("OtherBroker", "SAME NAME"): "Only OtherBroker's Trade"}
         result = portfolio_service.assign_trade_ids(positions, overrides)
-        zerodha_leg = next(p for p in result if p["broker"] == "Zerodha")
+        other_broker_leg = next(p for p in result if p["broker"] == "OtherBroker")
         dhan_leg = next(p for p in result if p["broker"] == "Dhan")
-        assert zerodha_leg["trade_id"] == "Only Zerodha's Trade"
+        assert other_broker_leg["trade_id"] == "Only OtherBroker's Trade"
         assert dhan_leg["trade_id"] == "X"
 
 
@@ -567,7 +524,7 @@ class TestGroupIntoTrades:
     def test_trade_type_mismatch_false_when_no_meta_row_exists(self):
         # A brand-new/never-touched trade is never flagged, regardless of
         # what its legs look like.
-        legs = [self._leg(raw_name="X", broker="Zerodha", symbol="X", leg_type="Position", pnl=None, option_type=OptionType.PE, qty=-75)]
+        legs = [self._leg(raw_name="X", broker="OtherBroker", symbol="X", leg_type="Position", pnl=None, option_type=OptionType.PE, qty=-75)]
         trades = portfolio_service.group_into_trades(legs, overrides={}, trade_meta={}, company_type_by_symbol={})
         assert trades[0]["trade_type_mismatch"] is False
 
@@ -575,15 +532,15 @@ class TestGroupIntoTrades:
         # Saved as CSP, but the legs now look like a Covered Call (a
         # holding plus a short call) -- a genuine disagreement, flagged.
         legs = [
-            self._leg(raw_name="X", broker="Zerodha", symbol="X", leg_type="Holding", pnl=None, qty=100),
-            self._leg(raw_name="X CE", broker="Zerodha", symbol="X", leg_type="Position", pnl=None, option_type=OptionType.CE, qty=-50),
+            self._leg(raw_name="X", broker="OtherBroker", symbol="X", leg_type="Holding", pnl=None, qty=100),
+            self._leg(raw_name="X CE", broker="OtherBroker", symbol="X", leg_type="Position", pnl=None, option_type=OptionType.CE, qty=-50),
         ]
         trade_meta = {"X": {"trade_type": "CSP"}}
         trades = portfolio_service.group_into_trades(legs, overrides={}, trade_meta=trade_meta, company_type_by_symbol={})
         assert trades[0]["trade_type_mismatch"] is True
 
     def test_trade_type_mismatch_false_when_detection_agrees(self):
-        legs = [self._leg(raw_name="X", broker="Zerodha", symbol="X", leg_type="Position", pnl=None, option_type=OptionType.PE, qty=-75)]
+        legs = [self._leg(raw_name="X", broker="OtherBroker", symbol="X", leg_type="Position", pnl=None, option_type=OptionType.PE, qty=-75)]
         trade_meta = {"X": {"trade_type": "csp"}}  # saved lowercase -- still matches case-insensitively
         trades = portfolio_service.group_into_trades(legs, overrides={}, trade_meta=trade_meta, company_type_by_symbol={})
         assert trades[0]["trade_type_mismatch"] is False
@@ -594,15 +551,15 @@ class TestGroupIntoTrades:
         # classify_trade_type returns None, which must NOT count as a
         # mismatch (a custom label like "Earnings Play" shouldn't be
         # flagged just because it isn't a recognized strategy).
-        legs = [self._leg(raw_name="X", broker="Zerodha", symbol="X", leg_type="Holding", pnl=None, qty=100)]
+        legs = [self._leg(raw_name="X", broker="OtherBroker", symbol="X", leg_type="Holding", pnl=None, qty=100)]
         trade_meta = {"X": {"trade_type": "Earnings Play"}}
         trades = portfolio_service.group_into_trades(legs, overrides={}, trade_meta=trade_meta, company_type_by_symbol={})
         assert trades[0]["trade_type_mismatch"] is False
 
     def test_groups_by_default_underlying_and_sums_pnl(self):
         legs = [
-            self._leg(raw_name="RELIANCE", broker="Zerodha", symbol="RELIANCE", leg_type="Holding", pnl=1000.0),
-            self._leg(raw_name="RELIANCE 25AUG3000CE", broker="Zerodha", symbol="RELIANCE", leg_type="Position", pnl=-200.0),
+            self._leg(raw_name="RELIANCE", broker="OtherBroker", symbol="RELIANCE", leg_type="Holding", pnl=1000.0),
+            self._leg(raw_name="RELIANCE 25AUG3000CE", broker="OtherBroker", symbol="RELIANCE", leg_type="Position", pnl=-200.0),
         ]
         trades = portfolio_service.group_into_trades(legs, overrides={}, trade_meta={}, company_type_by_symbol={})
         assert len(trades) == 1
@@ -615,7 +572,7 @@ class TestGroupIntoTrades:
         assert trade["trade_type"] == "Trade"
 
     def test_unanimous_index_bucket(self):
-        legs = [self._leg(raw_name="NIFTY", broker="Zerodha", symbol="NIFTY", leg_type="Holding", pnl=None)]
+        legs = [self._leg(raw_name="NIFTY", broker="OtherBroker", symbol="NIFTY", leg_type="Holding", pnl=None)]
         trades = portfolio_service.group_into_trades(
             legs, overrides={}, trade_meta={}, company_type_by_symbol={"NIFTY": CompanyType.INDEX}
         )
@@ -626,7 +583,7 @@ class TestGroupIntoTrades:
         # An ETF holding used to land in "Index Trades" purely because of
         # its company_type, then "Stock Trades" after an incomplete fix --
         # it belongs in Other Trades by default.
-        legs = [self._leg(raw_name="NIFTYBEES", broker="Zerodha", symbol="NIFTYBEES", leg_type="Holding", pnl=None)]
+        legs = [self._leg(raw_name="NIFTYBEES", broker="OtherBroker", symbol="NIFTYBEES", leg_type="Holding", pnl=None)]
         trades = portfolio_service.group_into_trades(
             legs, overrides={}, trade_meta={}, company_type_by_symbol={"NIFTYBEES": CompanyType.ETF}
         )
@@ -634,10 +591,10 @@ class TestGroupIntoTrades:
 
     def test_mixed_bucket_legs_fall_to_other(self):
         legs = [
-            self._leg(raw_name="RELIANCE", broker="Zerodha", symbol="RELIANCE", leg_type="Holding", pnl=100.0),
-            self._leg(raw_name="NIFTY", broker="Zerodha", symbol="NIFTY", leg_type="Holding", pnl=50.0),
+            self._leg(raw_name="RELIANCE", broker="OtherBroker", symbol="RELIANCE", leg_type="Holding", pnl=100.0),
+            self._leg(raw_name="NIFTY", broker="OtherBroker", symbol="NIFTY", leg_type="Holding", pnl=50.0),
         ]
-        overrides = {("Zerodha", "RELIANCE"): "Mixed Trade", ("Zerodha", "NIFTY"): "Mixed Trade"}
+        overrides = {("OtherBroker", "RELIANCE"): "Mixed Trade", ("OtherBroker", "NIFTY"): "Mixed Trade"}
         trades = portfolio_service.group_into_trades(
             legs, overrides=overrides, trade_meta={}, company_type_by_symbol={"NIFTY": CompanyType.INDEX}
         )
@@ -648,7 +605,7 @@ class TestGroupIntoTrades:
         # The manual escape hatch for an ETF the user deliberately wants
         # shown alongside genuine Index Trades (see
         # supabase/migrations/0024_portfolio_trade_meta_bucket_override.sql).
-        legs = [self._leg(raw_name="NIFTYBEES", broker="Zerodha", symbol="NIFTYBEES", leg_type="Holding", pnl=None)]
+        legs = [self._leg(raw_name="NIFTYBEES", broker="OtherBroker", symbol="NIFTYBEES", leg_type="Holding", pnl=None)]
         trade_meta = {"NIFTYBEES": {"bucket_override": "index"}}
         trades = portfolio_service.group_into_trades(
             legs, overrides={}, trade_meta=trade_meta, company_type_by_symbol={"NIFTYBEES": CompanyType.ETF}
@@ -656,7 +613,7 @@ class TestGroupIntoTrades:
         assert trades[0]["bucket"] == "index"
 
     def test_no_bucket_override_falls_back_to_computed_default(self):
-        legs = [self._leg(raw_name="NIFTYBEES", broker="Zerodha", symbol="NIFTYBEES", leg_type="Holding", pnl=None)]
+        legs = [self._leg(raw_name="NIFTYBEES", broker="OtherBroker", symbol="NIFTYBEES", leg_type="Holding", pnl=None)]
         trade_meta = {"NIFTYBEES": {"bucket_override": None}}
         trades = portfolio_service.group_into_trades(
             legs, overrides={}, trade_meta=trade_meta, company_type_by_symbol={"NIFTYBEES": CompanyType.ETF}
@@ -664,22 +621,22 @@ class TestGroupIntoTrades:
         assert trades[0]["bucket"] == "other"
 
     def test_no_resolved_symbol_is_other_bucket(self):
-        legs = [self._leg(raw_name="WEIRD FORMAT 123", broker="Zerodha", symbol=None, leg_type="Position", pnl=None)]
+        legs = [self._leg(raw_name="WEIRD FORMAT 123", broker="OtherBroker", symbol=None, leg_type="Position", pnl=None)]
         trades = portfolio_service.group_into_trades(legs, overrides={}, trade_meta={}, company_type_by_symbol={})
         assert trades[0]["bucket"] == "other"
         assert trades[0]["underlying_label"] == "WEIRD FORMAT 123"
 
     def test_default_label_joins_multiple_underlyings_when_merged(self):
         legs = [
-            self._leg(raw_name="NIFTY LEG", broker="Zerodha", symbol="NIFTY", leg_type="Position", pnl=None),
-            self._leg(raw_name="BANKNIFTY LEG", broker="Zerodha", symbol="BANKNIFTY", leg_type="Position", pnl=None),
+            self._leg(raw_name="NIFTY LEG", broker="OtherBroker", symbol="NIFTY", leg_type="Position", pnl=None),
+            self._leg(raw_name="BANKNIFTY LEG", broker="OtherBroker", symbol="BANKNIFTY", leg_type="Position", pnl=None),
         ]
-        overrides = {("Zerodha", "NIFTY LEG"): "Pairs Trade", ("Zerodha", "BANKNIFTY LEG"): "Pairs Trade"}
+        overrides = {("OtherBroker", "NIFTY LEG"): "Pairs Trade", ("OtherBroker", "BANKNIFTY LEG"): "Pairs Trade"}
         trades = portfolio_service.group_into_trades(legs, overrides, trade_meta={}, company_type_by_symbol={})
         assert trades[0]["underlying_label"] == "BANKNIFTY + NIFTY"
 
     def test_trade_meta_override_wins_for_underlying_label_and_trade_type(self):
-        legs = [self._leg(raw_name="TATAMTRDVR", broker="Zerodha", symbol="TATAMTRDVR", leg_type="Holding", pnl=None)]
+        legs = [self._leg(raw_name="TATAMTRDVR", broker="OtherBroker", symbol="TATAMTRDVR", leg_type="Holding", pnl=None)]
         trade_meta = {"TATAMTRDVR": {"underlying_label": "Tata Motors Passenger Vehicle", "trade_type": "Long Term Hold"}}
         trades = portfolio_service.group_into_trades(
             legs, overrides={}, trade_meta=trade_meta, company_type_by_symbol={}
@@ -688,7 +645,7 @@ class TestGroupIntoTrades:
         assert trades[0]["trade_type"] == "Long Term Hold"
 
     def test_blank_meta_override_falls_back_to_default(self):
-        legs = [self._leg(raw_name="RELIANCE", broker="Zerodha", symbol="RELIANCE", leg_type="Holding", pnl=None)]
+        legs = [self._leg(raw_name="RELIANCE", broker="OtherBroker", symbol="RELIANCE", leg_type="Holding", pnl=None)]
         trade_meta = {"RELIANCE": {"underlying_label": "", "trade_type": ""}}
         trades = portfolio_service.group_into_trades(
             legs, overrides={}, trade_meta=trade_meta, company_type_by_symbol={}
@@ -740,11 +697,11 @@ class TestPositionsToRecords:
 class TestHoldingsToRecords:
     def test_builds_portfolio_holding_models(self):
         holdings = [{"raw_name": "SBIN", "symbol": "SBIN", "qty": 10, "avg_price": 900, "investment": 9000}]
-        records = portfolio_service.holdings_to_records("u1", "Portfolio 1", "Zerodha", holdings)
+        records = portfolio_service.holdings_to_records("u1", "Portfolio 1", "OtherBroker", holdings)
         assert len(records) == 1
         assert records[0].user_id == "u1"
         assert records[0].portfolio_name == "Portfolio 1"
-        assert records[0].broker == "Zerodha"
+        assert records[0].broker == "OtherBroker"
         assert records[0].symbol == "SBIN"
 
 
@@ -990,119 +947,6 @@ class TestDhanPositionsFromApi:
         positions = portfolio_service.dhan_positions_from_api([row, dict(row)], {})
         raw_names = {p["raw_name"] for p in positions}
         assert len(raw_names) == 2
-
-
-class TestZerodhaHoldingsFromApi:
-    def test_translates_holdings_endpoint_rows(self):
-        rows = [{"tradingsymbol": "sbin", "exchange": "NSE", "quantity": 10, "average_price": 900.0, "last_price": 1021.1}]
-        holdings = portfolio_service.zerodha_holdings_from_api(rows)
-        assert holdings == [
-            {"raw_name": "SBIN", "symbol": "SBIN", "qty": 10.0, "avg_price": 900.0, "investment": 9000.0}
-        ]
-
-    def test_skips_rows_with_zero_or_missing_quantity(self):
-        rows = [
-            {"tradingsymbol": "SOLDOFF", "quantity": 0, "average_price": 100.0},
-            {"tradingsymbol": "", "quantity": 5, "average_price": 100.0},
-        ]
-        assert portfolio_service.zerodha_holdings_from_api(rows) == []
-
-    def test_a_fully_pledged_holding_is_not_dropped(self):
-        # Real bug this guards against: a holding pledged entirely as
-        # margin comes back quantity=0 (Kite's own web UI shows "Qty. 0"
-        # too) even though it's still fully owned -- confirmed live
-        # against a real account. The pledged quantity is reported
-        # separately (collateral_quantity here), and average_price is
-        # computed against the *total* owned quantity, not just the free
-        # portion -- these exact figures (GILT5YBEES) are from that real
-        # account: avg 64.30 * 7500 = 4,82,250.00, matching Kite's own
-        # displayed "Invested" to the rupee.
-        rows = [
-            {
-                "tradingsymbol": "GILT5YBEES",
-                "quantity": 0,
-                "t1_quantity": 0,
-                "collateral_quantity": 7500,
-                "average_price": 64.30,
-                "last_price": 66.26,
-            }
-        ]
-        holdings = portfolio_service.zerodha_holdings_from_api(rows)
-        assert holdings == [
-            {"raw_name": "GILT5YBEES", "symbol": "GILT5YBEES", "qty": 7500.0, "avg_price": 64.30, "investment": 482250.0}
-        ]
-
-    def test_partially_pledged_holding_sums_free_and_pledged_quantity(self):
-        rows = [{"tradingsymbol": "PARTIAL", "quantity": 100, "t1_quantity": 0, "collateral_quantity": 400, "average_price": 10.0}]
-        holdings = portfolio_service.zerodha_holdings_from_api(rows)
-        assert holdings[0]["qty"] == 500.0
-        assert holdings[0]["investment"] == 5000.0
-
-
-class TestZerodhaPositionsFromApi:
-    def test_translates_short_weekly_index_option_using_ltp_from_the_row(self):
-        # tradingsymbol is Zerodha's own weekly-option format -- the exact
-        # same string shape parse_zerodha_option_instrument already
-        # decodes for the CSV positions export, so it's reused as-is here.
-        rows = [
-            {
-                "tradingsymbol": "NIFTY2681123000PE",
-                "quantity": -75,
-                "average_price": 10.15,
-                "last_price": 1.1,
-            }
-        ]
-        positions = portfolio_service.zerodha_positions_from_api(rows)
-        assert len(positions) == 1
-        p = positions[0]
-        assert p["raw_name"] == "NIFTY2681123000PE"
-        assert p["symbol"] == "NIFTY"
-        assert p["expiry_date"] == date(2026, 8, 11)
-        assert p["strike_price"] == 23000.0
-        assert p["option_type"] == OptionType.PE
-        assert p["qty"] == -75.0
-        assert p["avg_price"] == 10.15
-        assert p["ltp"] == 1.1
-
-    def test_decodes_monthly_option_format(self):
-        # A real bug this guards against: NIFTY's monthly contracts
-        # ("NIFTY26AUG23100PE" -- no day-of-month in the symbol) used to
-        # fail to decode entirely, so My Trades showed the raw instrument
-        # string as the "underlying" and sorted it into Other Trades
-        # instead of Index Trades -- confirmed live.
-        rows = [{"tradingsymbol": "NIFTY26AUG23100PE", "quantity": -75, "average_price": 10.15, "last_price": 12.0}]
-        positions = portfolio_service.zerodha_positions_from_api(rows)
-        assert positions[0]["symbol"] == "NIFTY"
-        assert positions[0]["expiry_date"] == date(2026, 8, 27)
-        assert positions[0]["strike_price"] == 23100.0
-        assert positions[0]["option_type"] == OptionType.PE
-
-    def test_undecoded_futures_format_keeps_raw_name_with_no_contract_detail(self):
-        rows = [{"tradingsymbol": "NIFTY26AUGFUT", "quantity": 1, "average_price": 5.0, "last_price": 4.5}]
-        positions = portfolio_service.zerodha_positions_from_api(rows)
-        assert positions[0]["symbol"] is None
-        assert positions[0]["expiry_date"] is None
-        assert positions[0]["raw_name"] == "NIFTY26AUGFUT"
-
-    def test_missing_last_price_leaves_ltp_none(self):
-        rows = [{"tradingsymbol": "NIFTY2681123000PE", "quantity": -75, "average_price": 10.15}]
-        assert portfolio_service.zerodha_positions_from_api(rows)[0]["ltp"] is None
-
-    def test_skips_closed_positions_with_zero_quantity(self):
-        rows = [{"tradingsymbol": "CLOSED", "quantity": 0, "average_price": 1.0}]
-        assert portfolio_service.zerodha_positions_from_api(rows) == []
-
-    def test_same_trading_symbol_under_two_products_gets_disambiguated(self):
-        # Same fix/reasoning as dhan_positions_from_api's identical
-        # regression test -- Kite can hold one tradingsymbol under more
-        # than one margin product (CNC/MIS/NRML) at once, which would
-        # otherwise collide on portfolio_positions' primary key.
-        rows = [
-            {"tradingsymbol": "RELIANCE", "product": "MIS", "quantity": 10, "average_price": 2900.0},
-            {"tradingsymbol": "RELIANCE", "product": "CNC", "quantity": 5, "average_price": 2800.0},
-        ]
-        positions = portfolio_service.zerodha_positions_from_api(rows)
-        assert {p["raw_name"] for p in positions} == {"RELIANCE (MIS)", "RELIANCE (CNC)"}
 
 
 class TestApplyFallbackOptionLtp:

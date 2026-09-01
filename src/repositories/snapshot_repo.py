@@ -82,7 +82,7 @@ def get_latest_returns_and_pe(client: Client, symbols: list[str]) -> dict[str, d
 def get_user_live_prices(client: Client, user_id: str, symbols: list[str]) -> dict[str, float]:
     """This account's own cached live LTPs (user_live_prices, migration
     0030) for the given symbols -- written by the "Market Data Refresh"
-    button only when the account's Data Provider setting is Dhan/Zerodha
+    button only when the account's Data Provider setting is Dhan
     (src/utils/refresh_bar.py). Callers merge this over get_latest_prices'
     daily_screener_snapshots value (`{**shared, **live}`) so a symbol this
     account hasn't live-priced yet still falls back to the shared value --
@@ -135,11 +135,9 @@ def get_user_live_fo_prices(client: Client, user_id: str, contracts: list[FOCont
     migration 0032) for the given contracts -- the futures/options
     counterpart of get_user_live_prices above. Written by "Market Data
     Refresh" only for a Dhan-provider account (src/utils/refresh_bar.py,
-    src/data_providers/dhan_provider.py's get_fo_quotes) -- Zerodha has no
-    F&O instrument resolver yet, so a Zerodha-provider account simply
-    never has rows here. Callers merge this over whatever EOD/broker-sync
-    LTP they already have, same {**shared, **live} pattern
-    get_user_live_prices' own callers use."""
+    src/data_providers/dhan_provider.py's get_fo_quotes). Callers merge
+    this over whatever EOD/broker-sync LTP they already have, same
+    {**shared, **live} pattern get_user_live_prices' own callers use."""
     if not contracts:
         return {}
     symbols = sorted({c[0] for c in contracts})

@@ -1,6 +1,6 @@
 """Tests for src.utils.refresh_bar's _refresh_user_live_prices -- the
 "Market Data Refresh" button's per-user live-quote branch, only run when
-the account's Data Provider setting is Dhan/Zerodha. The rest of
+the account's Data Provider setting is Dhan. The rest of
 refresh_bar.py is Streamlit UI glue (buttons, captions, spinners) in the
 same "not unit tested, only this cache/repo-touching helper is" spirit as
 every other page-local formatter in this codebase."""
@@ -171,27 +171,6 @@ class TestRefreshUserLivePrices:
         assert "error" in result
         assert "network error" in result["error"]
 
-    def test_zerodha_does_not_widen_with_etfs(self, monkeypatch):
-        # Confirms the ETF/F&O widening is Dhan-only -- Zerodha has no F&O
-        # instrument resolver yet (see _dhan_fo_universe's docstring).
-        connection = BrokerConnection(
-            user_id="u1", broker="Zerodha", client_id="KEY1", api_secret="SECRET1", access_token="TOKEN1"
-        )
-        monkeypatch.setattr(refresh_bar.portfolio_repo, "get_broker_connection", lambda client, user_id, broker: connection)
-        _patch_universe(monkeypatch, constituents=("SBIN",), portfolio_symbols=(), etfs=("NIFTYBEES",))
-
-        captured = {}
-        monkeypatch.setattr(
-            refresh_bar,
-            "load_live_zerodha_prices",
-            lambda api_key, api_secret, access_token, symbols, cache_bust: captured.setdefault("symbols", symbols) or {},
-        )
-        monkeypatch.setattr(refresh_bar.snapshot_repo, "upsert_user_live_prices", lambda *a, **k: None)
-
-        refresh_bar._refresh_user_live_prices(client=object(), user_id="u1", broker="Zerodha")
-
-        assert set(captured["symbols"]) == {"SBIN"}
-
     def test_dhan_fo_universe_combines_positions_and_dashboard_metrics(self, monkeypatch):
         connection = BrokerConnection(user_id="u1", broker="Dhan", client_id="CID1", access_token="TOKEN1")
         monkeypatch.setattr(refresh_bar.portfolio_repo, "get_broker_connection", lambda client, user_id, broker: connection)
@@ -271,27 +250,6 @@ class TestRefreshUserLivePrices:
         assert result["fo_quoted"] == 0
         assert result["fo_total"] == 1
         assert result["fo_error"] == "401"  # surfaced, not silently swallowed
-
-    def test_zerodha_uses_the_zerodha_loader_with_api_secret(self, monkeypatch):
-        connection = BrokerConnection(
-            user_id="u1", broker="Zerodha", client_id="KEY1", api_secret="SECRET1", access_token="TOKEN1"
-        )
-        monkeypatch.setattr(refresh_bar.portfolio_repo, "get_broker_connection", lambda client, user_id, broker: connection)
-        _patch_universe(monkeypatch, constituents=("SBIN",), portfolio_symbols=())
-
-        captured = {}
-
-        def fake_load_live_zerodha_prices(api_key, api_secret, access_token, symbols, cache_bust):
-            captured.update(api_key=api_key, api_secret=api_secret, access_token=access_token)
-            return {"SBIN": 811.9}
-
-        monkeypatch.setattr(refresh_bar, "load_live_zerodha_prices", fake_load_live_zerodha_prices)
-        monkeypatch.setattr(refresh_bar.snapshot_repo, "upsert_user_live_prices", lambda *a, **k: None)
-
-        result = refresh_bar._refresh_user_live_prices(client=object(), user_id="u1", broker="Zerodha")
-
-        assert captured == {"api_key": "KEY1", "api_secret": "SECRET1", "access_token": "TOKEN1"}
-        assert result == {"broker": "Zerodha", "quoted": 1, "total": 1, "fo_quoted": 0, "fo_total": 0, "fo_error": None, "fo_missing": []}
 
     def test_no_symbols_quoted_still_upserts_the_empty_dict(self, monkeypatch):
         # upsert_user_live_prices itself no-ops on an empty dict (see

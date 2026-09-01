@@ -71,7 +71,7 @@ row = recompute_with_user_thresholds(row, user_settings)
 # Prefer a live broker quote over the shared, possibly-stale
 # daily_screener_snapshots value -- same preference the Dashboard and
 # the portfolio pages already give it -- only when this account's Data
-# Provider setting is Dhan/Zerodha and "Market Data Refresh" has
+# Provider setting is Dhan and "Market Data Refresh" has
 # actually cached a live price for this symbol (user_live_prices,
 # migration 0030); otherwise `row.latest_price` is left as-is.
 if user_settings.data_provider != "yfinance_bhavcopy":

@@ -38,10 +38,11 @@ pages = {
     ],
     "Settings": [
         # url_path pinned explicitly (not left to Streamlit's
-        # filename-derived default) so the URL to register as this app's
-        # Kite Connect "Redirect URL" (Zerodha's "Connect Zerodha
-        # account" flow, now Settings' "Data Provider" section) stays
-        # stable even if this file is ever renamed.
+        # filename-derived default) so this page's URL stays stable even
+        # if this file is ever renamed -- originally needed as a stable
+        # Kite Connect "Redirect URL" for Zerodha's OAuth login, which no
+        # longer exists (Zerodha was removed entirely), but there's no
+        # reason to unpin it now either.
         st.Page("pages/4_Settings.py", title="Settings", url_path="Settings"),
     ],
 }

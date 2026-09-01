@@ -8,12 +8,12 @@ from src.models.enums import OptionType
 
 
 class PortfolioHolding(BaseModel):
-    """One saved row from a live Dhan/Zerodha sync (see
-    portfolio_service.py's dhan_holdings_from_api/zerodha_holdings_from_api
-    -- CSV upload was dropped once Settings' "Data Provider" section made
-    a live broker sync the only way to populate this table). `symbol` is
-    None when the instrument couldn't be resolved to a known symbol --
-    the row is still saved and shown, just with an N/A valuation."""
+    """One saved row from a live Dhan sync (see
+    portfolio_service.py's dhan_holdings_from_api -- CSV upload was
+    dropped once Settings' "Data Provider" section made a live broker
+    sync the only way to populate this table). `symbol` is None when the
+    instrument couldn't be resolved to a known symbol -- the row is still
+    saved and shown, just with an N/A valuation."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -29,17 +29,15 @@ class PortfolioHolding(BaseModel):
 
 
 class PortfolioPosition(BaseModel):
-    """One saved row from a live Dhan/Zerodha F&O positions sync (see
-    portfolio_service.py's dhan_positions_from_api/zerodha_positions_from_api,
-    and parse_zerodha_option_instrument for how Zerodha's tradingsymbol
-    gets decoded). `qty` keeps its broker-reported sign -- negative is
-    short, positive is long -- since option P&L direction depends on it.
-    `symbol`/`expiry_date`/`strike_price`/`option_type` are None when the
-    instrument string couldn't be decoded; the row is still saved and
-    shown, just with no contract detail. `ltp_as_of` is None for a live
-    LTP (Zerodha's own `last_price`, or a successful Dhan Market Quote
-    call) -- set only when `ltp` came from this app's own end-of-day F&O
-    data instead
+    """One saved row from a live Dhan F&O positions sync (see
+    portfolio_service.py's dhan_positions_from_api). `qty` keeps its
+    broker-reported sign -- negative is short, positive is long -- since
+    option P&L direction depends on it. `symbol`/`expiry_date`/
+    `strike_price`/`option_type` are None when the instrument string
+    couldn't be decoded; the row is still saved and shown, just with no
+    contract detail. `ltp_as_of` is None for a live LTP (a successful
+    Dhan Market Quote call) -- set only when `ltp` came from this app's
+    own end-of-day F&O data instead
     (`portfolio_service.apply_fallback_option_ltp`, e.g. a Dhan sync whose
     Market Quote call 401'd -- see migration `0026`), so the UI can show
     "(as of <date>)" next to a stale fallback LTP."""
@@ -145,29 +143,26 @@ class BrokerConnection(BaseModel):
     """Saved API credentials letting this account pull holdings/positions
     (and, when this is the account's selected Data Provider -- see
     src.models.user.UserSettings.data_provider -- live stock LTP too)
-    directly from a broker's API (see src/data_providers/dhan_provider.py/
-    zerodha_provider.py and Settings' "Data Provider" section) instead of
-    a CSV upload. One row per (user_id, broker) -- account-wide, not
-    scoped to an individual named portfolio (migration
+    directly from a broker's API (see src/data_providers/dhan_provider.py
+    and Settings' "Data Provider" section) instead of a CSV upload. One
+    row per (user_id, broker) -- account-wide, not scoped to an
+    individual named portfolio (migration
     0029_broker_connections_account_wide.sql collapsed this from the
     original per-portfolio design; sync now always targets
     portfolio_repo.get_or_default_portfolio_name's one resolved
-    portfolio). `client_id` holds Dhan's actual client ID for a Dhan row,
-    or Zerodha's `api_key` for a Zerodha row -- both are "this
-    connection's primary identifying credential", so one column serves
-    both brokers. `access_token` is stored as given -- see
+    portfolio). `client_id` holds Dhan's actual client ID. `access_token`
+    is stored as given -- see
     supabase/migrations/0017_broker_connections.sql's docstring for the
-    plaintext/RLS-only trade-off this implies -- and is `None` for a
-    Zerodha row that has saved its api_key/api_secret but not yet
-    completed the Kite Connect login redirect (see
-    supabase/migrations/0022_broker_connections_api_secret.sql).
-    `api_secret` is Zerodha-only (Dhan's flow needs no third credential);
-    always `None` for a Dhan row. `token_saved_at` is set only when
-    credentials are saved/updated (not on every sync), so the UI can warn
-    once it's old enough that Dhan's 24-hour token is likely expired --
-    for Zerodha, whose token instead expires at a fixed daily time (~6am
-    IST) rather than a rolling window, the UI checks against that fixed
-    time instead."""
+    plaintext/RLS-only trade-off this implies. `token_saved_at` is set
+    only when credentials are saved/updated (not on every sync), so the
+    UI can warn once it's old enough that Dhan's 24-hour token is likely
+    expired.
+
+    `api_secret` was Zerodha-only (Dhan's flow needs no third credential)
+    -- always `None` now that Zerodha has been removed entirely (see
+    src/utils/data_provider_settings.py's module docstring). Left in the
+    schema unused rather than dropped in a migration; don't repurpose it
+    for anything Dhan-related, it's dead weight, not a spare column."""
 
     model_config = ConfigDict(from_attributes=True)
 

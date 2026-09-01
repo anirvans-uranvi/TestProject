@@ -117,23 +117,23 @@ class TestReplaceBrokerHoldings:
     def test_deletes_only_the_target_portfolio_and_brokers_rows(self):
         client = _FakeClient()
         client.store["portfolio_holdings"] = [
-            _row("Portfolio 1", "Zerodha", "OLD"),
+            _row("Portfolio 1", "OtherBroker", "OLD"),
             _row("Portfolio 1", "Dhan", "KEEP_OTHER_BROKER"),
-            _row("Portfolio 2", "Zerodha", "KEEP_OTHER_PORTFOLIO"),
+            _row("Portfolio 2", "OtherBroker", "KEEP_OTHER_PORTFOLIO"),
         ]
         holdings = [
             PortfolioHolding(
-                user_id="u1", portfolio_name="Portfolio 1", broker="Zerodha",
+                user_id="u1", portfolio_name="Portfolio 1", broker="OtherBroker",
                 raw_name="SBIN", symbol="SBIN", qty=10, avg_price=900, investment=9000,
             ),
         ]
 
-        portfolio_repo.replace_broker_holdings(client, "u1", "Portfolio 1", "Zerodha", holdings)
+        portfolio_repo.replace_broker_holdings(client, "u1", "Portfolio 1", "OtherBroker", holdings)
 
         assert (
             "delete",
             "portfolio_holdings",
-            {"user_id": "u1", "portfolio_name": "Portfolio 1", "broker": "Zerodha"},
+            {"user_id": "u1", "portfolio_name": "Portfolio 1", "broker": "OtherBroker"},
         ) in client.calls
         remaining = client.store["portfolio_holdings"]
         assert not any(r["raw_name"] == "OLD" for r in remaining)
@@ -146,7 +146,7 @@ class TestReplaceBrokerHoldings:
         # rows match (user_id, portfolio_name, broker), so the delete is
         # a no-op and only the insert has any effect.
         client = _FakeClient()
-        client.store["portfolio_holdings"] = [_row("Portfolio 1", "Zerodha", "EXISTING")]
+        client.store["portfolio_holdings"] = [_row("Portfolio 1", "OtherBroker", "EXISTING")]
         holdings = [
             PortfolioHolding(
                 user_id="u1", portfolio_name="Brand New Portfolio", broker="Dhan",
@@ -162,9 +162,9 @@ class TestReplaceBrokerHoldings:
 
     def test_empty_holdings_deletes_existing_rows_and_inserts_nothing(self):
         client = _FakeClient()
-        client.store["portfolio_holdings"] = [_row("Portfolio 1", "Zerodha", "OLD")]
+        client.store["portfolio_holdings"] = [_row("Portfolio 1", "OtherBroker", "OLD")]
 
-        portfolio_repo.replace_broker_holdings(client, "u1", "Portfolio 1", "Zerodha", [])
+        portfolio_repo.replace_broker_holdings(client, "u1", "Portfolio 1", "OtherBroker", [])
 
         assert client.store["portfolio_holdings"] == []
         assert not any(call[0] == "insert" for call in client.calls)
@@ -173,12 +173,12 @@ class TestReplaceBrokerHoldings:
         client = _FakeClient()
         holdings = [
             PortfolioHolding(
-                user_id="u1", portfolio_name="Portfolio 1", broker="Zerodha",
+                user_id="u1", portfolio_name="Portfolio 1", broker="OtherBroker",
                 raw_name="SBIN", symbol="SBIN", qty=10, avg_price=900, investment=9000,
             ),
         ]
 
-        portfolio_repo.replace_broker_holdings(client, "u1", "Portfolio 1", "Zerodha", holdings)
+        portfolio_repo.replace_broker_holdings(client, "u1", "Portfolio 1", "OtherBroker", holdings)
 
         insert_calls = [c for c in client.calls if c[0] == "insert"]
         assert len(insert_calls) == 1
@@ -206,9 +206,9 @@ class TestDeletePortfolio:
     def test_deletes_every_broker_within_the_named_portfolio_only(self):
         client = _FakeClient()
         client.store["portfolio_holdings"] = [
-            _row("Portfolio 1", "Zerodha", "SBIN"),
+            _row("Portfolio 1", "OtherBroker", "SBIN"),
             _row("Portfolio 1", "Dhan", "COALINDIA"),
-            _row("Portfolio 2", "Zerodha", "KEEP"),
+            _row("Portfolio 2", "OtherBroker", "KEEP"),
         ]
 
         portfolio_repo.delete_portfolio(client, "u1", "Portfolio 1")
@@ -225,10 +225,10 @@ class TestDeletePortfolio:
 
     def test_also_deletes_positions_within_the_named_portfolio_only(self):
         client = _FakeClient()
-        client.store["portfolio_holdings"] = [_row("Portfolio 1", "Zerodha", "SBIN")]
+        client.store["portfolio_holdings"] = [_row("Portfolio 1", "OtherBroker", "SBIN")]
         client.store["portfolio_positions"] = [
-            _position_row("Portfolio 1", "Zerodha", "NIFTY2681123000PE"),
-            _position_row("Portfolio 2", "Zerodha", "KEEP"),
+            _position_row("Portfolio 1", "OtherBroker", "NIFTY2681123000PE"),
+            _position_row("Portfolio 2", "OtherBroker", "KEEP"),
         ]
 
         portfolio_repo.delete_portfolio(client, "u1", "Portfolio 1")
@@ -255,10 +255,10 @@ class TestDeletePortfolio:
 
     def test_also_deletes_trade_groups_within_the_named_portfolio_only(self):
         client = _FakeClient()
-        client.store["portfolio_holdings"] = [_row("Portfolio 1", "Zerodha", "SBIN")]
+        client.store["portfolio_holdings"] = [_row("Portfolio 1", "OtherBroker", "SBIN")]
         client.store["portfolio_trade_groups"] = [
-            _trade_group_row("Portfolio 1", "Zerodha", "NIFTY2681123000PE", "NIFTY"),
-            _trade_group_row("Portfolio 2", "Zerodha", "KEEP", "NIFTY"),
+            _trade_group_row("Portfolio 1", "OtherBroker", "NIFTY2681123000PE", "NIFTY"),
+            _trade_group_row("Portfolio 2", "OtherBroker", "KEEP", "NIFTY"),
         ]
 
         portfolio_repo.delete_portfolio(client, "u1", "Portfolio 1")
@@ -269,7 +269,7 @@ class TestDeletePortfolio:
 
     def test_also_deletes_trade_meta_within_the_named_portfolio_only(self):
         client = _FakeClient()
-        client.store["portfolio_holdings"] = [_row("Portfolio 1", "Zerodha", "SBIN")]
+        client.store["portfolio_holdings"] = [_row("Portfolio 1", "OtherBroker", "SBIN")]
         client.store["portfolio_trade_meta"] = [
             _trade_meta_row("Portfolio 1", "SBIN"),
             _trade_meta_row("Portfolio 2", "KEEP"),
@@ -283,10 +283,10 @@ class TestDeletePortfolio:
 
     def test_also_deletes_position_meta_within_the_named_portfolio_only(self):
         client = _FakeClient()
-        client.store["portfolio_holdings"] = [_row("Portfolio 1", "Zerodha", "SBIN")]
+        client.store["portfolio_holdings"] = [_row("Portfolio 1", "OtherBroker", "SBIN")]
         client.store["portfolio_position_meta"] = [
-            _position_meta_row("Portfolio 1", "Zerodha", "SBIN"),
-            _position_meta_row("Portfolio 2", "Zerodha", "KEEP"),
+            _position_meta_row("Portfolio 1", "OtherBroker", "SBIN"),
+            _position_meta_row("Portfolio 2", "OtherBroker", "KEEP"),
         ]
 
         portfolio_repo.delete_portfolio(client, "u1", "Portfolio 1")
@@ -298,8 +298,8 @@ class TestDeletePortfolio:
     def test_does_not_touch_other_users_portfolio_of_the_same_name(self):
         client = _FakeClient()
         client.store["portfolio_holdings"] = [
-            _row("Portfolio 1", "Zerodha", "MINE"),
-            {**_row("Portfolio 1", "Zerodha", "OTHER_USER"), "user_id": "u2"},
+            _row("Portfolio 1", "OtherBroker", "MINE"),
+            {**_row("Portfolio 1", "OtherBroker", "OTHER_USER"), "user_id": "u2"},
         ]
 
         portfolio_repo.delete_portfolio(client, "u1", "Portfolio 1")
@@ -313,7 +313,7 @@ class TestListHoldings:
     def test_returns_only_the_requested_users_rows_as_models(self):
         client = _FakeClient()
         client.store["portfolio_holdings"] = [
-            _row("Portfolio 1", "Zerodha", "SBIN", symbol="SBIN"),
+            _row("Portfolio 1", "OtherBroker", "SBIN", symbol="SBIN"),
             {**_row("Portfolio 1", "Dhan", "OTHER", symbol="OTHER"), "user_id": "u2"},
         ]
 
@@ -326,7 +326,7 @@ class TestListHoldings:
     def test_holdings_across_multiple_portfolios_all_come_back(self):
         client = _FakeClient()
         client.store["portfolio_holdings"] = [
-            _row("Portfolio 1", "Zerodha", "SBIN"),
+            _row("Portfolio 1", "OtherBroker", "SBIN"),
             _row("Portfolio 2", "Dhan", "COALINDIA"),
         ]
 
@@ -339,9 +339,9 @@ class TestListPortfolioSymbols:
     def test_returns_distinct_resolved_symbols_for_the_requested_user_only(self):
         client = _FakeClient()
         client.store["portfolio_holdings"] = [
-            _row("Portfolio 1", "Zerodha", "SBIN", symbol="SBIN"),
+            _row("Portfolio 1", "OtherBroker", "SBIN", symbol="SBIN"),
             _row("Portfolio 2", "Dhan", "Hindustan Zinc", symbol="HINDZINC"),
-            {**_row("Portfolio 1", "Zerodha", "OTHER", symbol="OTHER"), "user_id": "u2"},
+            {**_row("Portfolio 1", "OtherBroker", "OTHER", symbol="OTHER"), "user_id": "u2"},
         ]
 
         result = portfolio_repo.list_portfolio_symbols(client, "u1")
@@ -351,7 +351,7 @@ class TestListPortfolioSymbols:
     def test_same_symbol_across_brokers_or_portfolios_is_not_duplicated(self):
         client = _FakeClient()
         client.store["portfolio_holdings"] = [
-            _row("Portfolio 1", "Zerodha", "SBIN", symbol="SBIN"),
+            _row("Portfolio 1", "OtherBroker", "SBIN", symbol="SBIN"),
             _row("Portfolio 2", "Dhan", "SBIN", symbol="SBIN"),
         ]
 
@@ -374,24 +374,24 @@ class TestReplaceBrokerPositions:
     def test_deletes_only_the_target_portfolio_and_brokers_rows(self):
         client = _FakeClient()
         client.store["portfolio_positions"] = [
-            _position_row("Portfolio 1", "Zerodha", "OLD"),
+            _position_row("Portfolio 1", "OtherBroker", "OLD"),
             _position_row("Portfolio 1", "Dhan", "KEEP_OTHER_BROKER"),
-            _position_row("Portfolio 2", "Zerodha", "KEEP_OTHER_PORTFOLIO"),
+            _position_row("Portfolio 2", "OtherBroker", "KEEP_OTHER_PORTFOLIO"),
         ]
         positions = [
             PortfolioPosition(
-                user_id="u1", portfolio_name="Portfolio 1", broker="Zerodha",
+                user_id="u1", portfolio_name="Portfolio 1", broker="OtherBroker",
                 raw_name="NIFTY2681123000PE", symbol="NIFTY", expiry_date=date(2026, 8, 11),
                 strike_price=23000, option_type=OptionType.PE, qty=-780, avg_price=10.15, ltp=1.1,
             ),
         ]
 
-        portfolio_repo.replace_broker_positions(client, "u1", "Portfolio 1", "Zerodha", positions)
+        portfolio_repo.replace_broker_positions(client, "u1", "Portfolio 1", "OtherBroker", positions)
 
         assert (
             "delete",
             "portfolio_positions",
-            {"user_id": "u1", "portfolio_name": "Portfolio 1", "broker": "Zerodha"},
+            {"user_id": "u1", "portfolio_name": "Portfolio 1", "broker": "OtherBroker"},
         ) in client.calls
         remaining = client.store["portfolio_positions"]
         assert not any(r["raw_name"] == "OLD" for r in remaining)
@@ -401,9 +401,9 @@ class TestReplaceBrokerPositions:
 
     def test_empty_positions_deletes_existing_rows_and_inserts_nothing(self):
         client = _FakeClient()
-        client.store["portfolio_positions"] = [_position_row("Portfolio 1", "Zerodha", "OLD")]
+        client.store["portfolio_positions"] = [_position_row("Portfolio 1", "OtherBroker", "OLD")]
 
-        portfolio_repo.replace_broker_positions(client, "u1", "Portfolio 1", "Zerodha", [])
+        portfolio_repo.replace_broker_positions(client, "u1", "Portfolio 1", "OtherBroker", [])
 
         assert client.store["portfolio_positions"] == []
         assert not any(call[0] == "insert" for call in client.calls)
@@ -412,13 +412,13 @@ class TestReplaceBrokerPositions:
         client = _FakeClient()
         positions = [
             PortfolioPosition(
-                user_id="u1", portfolio_name="Portfolio 1", broker="Zerodha",
+                user_id="u1", portfolio_name="Portfolio 1", broker="OtherBroker",
                 raw_name="NIFTY2681123000PE", symbol="NIFTY", expiry_date=date(2026, 8, 11),
                 strike_price=23000, option_type=OptionType.PE, qty=-780, avg_price=10.15, ltp=1.1,
             ),
         ]
 
-        portfolio_repo.replace_broker_positions(client, "u1", "Portfolio 1", "Zerodha", positions)
+        portfolio_repo.replace_broker_positions(client, "u1", "Portfolio 1", "OtherBroker", positions)
 
         insert_calls = [c for c in client.calls if c[0] == "insert"]
         assert len(insert_calls) == 1
@@ -429,7 +429,7 @@ class TestListPositions:
     def test_returns_only_the_requested_users_rows_as_models(self):
         client = _FakeClient()
         client.store["portfolio_positions"] = [
-            _position_row("Portfolio 1", "Zerodha", "NIFTY2681123000PE", symbol="NIFTY"),
+            _position_row("Portfolio 1", "OtherBroker", "NIFTY2681123000PE", symbol="NIFTY"),
             {**_position_row("Portfolio 1", "Dhan", "OTHER", symbol="OTHER"), "user_id": "u2"},
         ]
 
@@ -442,7 +442,7 @@ class TestListPositions:
     def test_positions_across_multiple_portfolios_all_come_back(self):
         client = _FakeClient()
         client.store["portfolio_positions"] = [
-            _position_row("Portfolio 1", "Zerodha", "A"),
+            _position_row("Portfolio 1", "OtherBroker", "A"),
             _position_row("Portfolio 2", "Dhan", "B"),
         ]
 
@@ -548,8 +548,8 @@ class TestTradeGroups:
     def test_list_returns_only_the_requested_users_rows_as_models(self):
         client = _FakeClient()
         client.store["portfolio_trade_groups"] = [
-            _trade_group_row("Portfolio 1", "Zerodha", "NIFTY2681123000PE", "NIFTY Spread"),
-            {**_trade_group_row("Portfolio 1", "Zerodha", "OTHER", "X"), "user_id": "u2"},
+            _trade_group_row("Portfolio 1", "OtherBroker", "NIFTY2681123000PE", "NIFTY Spread"),
+            {**_trade_group_row("Portfolio 1", "OtherBroker", "OTHER", "X"), "user_id": "u2"},
         ]
 
         result = portfolio_repo.list_trade_groups(client, "u1")
@@ -562,7 +562,7 @@ class TestTradeGroups:
         client = _FakeClient()
 
         portfolio_repo.set_trade_group(
-            client, "u1", "Portfolio 1", [("Zerodha", "LEG_A"), ("Zerodha", "LEG_B")], "Combined Trade"
+            client, "u1", "Portfolio 1", [("OtherBroker", "LEG_A"), ("OtherBroker", "LEG_B")], "Combined Trade"
         )
 
         rows = client.store["portfolio_trade_groups"]
@@ -572,9 +572,9 @@ class TestTradeGroups:
 
     def test_set_trade_group_reassigns_an_already_grouped_leg(self):
         client = _FakeClient()
-        client.store["portfolio_trade_groups"] = [_trade_group_row("Portfolio 1", "Zerodha", "LEG_A", "Old Trade")]
+        client.store["portfolio_trade_groups"] = [_trade_group_row("Portfolio 1", "OtherBroker", "LEG_A", "Old Trade")]
 
-        portfolio_repo.set_trade_group(client, "u1", "Portfolio 1", [("Zerodha", "LEG_A")], "New Trade")
+        portfolio_repo.set_trade_group(client, "u1", "Portfolio 1", [("OtherBroker", "LEG_A")], "New Trade")
 
         rows = client.store["portfolio_trade_groups"]
         assert len(rows) == 1
@@ -590,16 +590,16 @@ class TestTradeGroups:
     def test_clear_trade_group_overrides_removes_only_the_targeted_legs(self):
         client = _FakeClient()
         client.store["portfolio_trade_groups"] = [
-            _trade_group_row("Portfolio 1", "Zerodha", "LEG_A", "Combined Trade"),
-            _trade_group_row("Portfolio 1", "Zerodha", "LEG_B", "Combined Trade"),
+            _trade_group_row("Portfolio 1", "OtherBroker", "LEG_A", "Combined Trade"),
+            _trade_group_row("Portfolio 1", "OtherBroker", "LEG_B", "Combined Trade"),
             _trade_group_row("Portfolio 1", "Dhan", "LEG_A", "Unrelated Trade"),
         ]
 
-        portfolio_repo.clear_trade_group_overrides(client, "u1", "Portfolio 1", [("Zerodha", "LEG_A")])
+        portfolio_repo.clear_trade_group_overrides(client, "u1", "Portfolio 1", [("OtherBroker", "LEG_A")])
 
         remaining = client.store["portfolio_trade_groups"]
         assert len(remaining) == 2
-        assert not any(r["broker"] == "Zerodha" and r["raw_name"] == "LEG_A" for r in remaining)
+        assert not any(r["broker"] == "OtherBroker" and r["raw_name"] == "LEG_A" for r in remaining)
         assert any(r["broker"] == "Dhan" and r["raw_name"] == "LEG_A" for r in remaining)
 
 
@@ -680,8 +680,8 @@ class TestPositionMeta:
     def test_list_returns_only_the_requested_users_rows_as_models(self):
         client = _FakeClient()
         client.store["portfolio_position_meta"] = [
-            _position_meta_row("Portfolio 1", "Zerodha", "NIFTY26AUG23100PE", trade_date="2026-08-01", stop_loss=-3375.0),
-            {**_position_meta_row("Portfolio 1", "Zerodha", "OTHER"), "user_id": "u2"},
+            _position_meta_row("Portfolio 1", "OtherBroker", "NIFTY26AUG23100PE", trade_date="2026-08-01", stop_loss=-3375.0),
+            {**_position_meta_row("Portfolio 1", "OtherBroker", "OTHER"), "user_id": "u2"},
         ]
 
         result = portfolio_repo.list_position_meta(client, "u1")
@@ -694,7 +694,7 @@ class TestPositionMeta:
     def test_set_position_trade_date_upserts_a_new_row(self):
         client = _FakeClient()
 
-        portfolio_repo.set_position_trade_date(client, "u1", "Portfolio 1", "Zerodha", "NIFTY26AUG23100PE", date(2026, 8, 1))
+        portfolio_repo.set_position_trade_date(client, "u1", "Portfolio 1", "OtherBroker", "NIFTY26AUG23100PE", date(2026, 8, 1))
 
         rows = client.store["portfolio_position_meta"]
         assert len(rows) == 1
@@ -703,7 +703,7 @@ class TestPositionMeta:
     def test_set_position_trade_date_none_clears_it(self):
         client = _FakeClient()
 
-        portfolio_repo.set_position_trade_date(client, "u1", "Portfolio 1", "Zerodha", "NIFTY26AUG23100PE", None)
+        portfolio_repo.set_position_trade_date(client, "u1", "Portfolio 1", "OtherBroker", "NIFTY26AUG23100PE", None)
 
         rows = client.store["portfolio_position_meta"]
         assert rows[0]["trade_date"] is None
@@ -711,7 +711,7 @@ class TestPositionMeta:
     def test_set_position_stop_loss_upserts_a_new_row(self):
         client = _FakeClient()
 
-        portfolio_repo.set_position_stop_loss(client, "u1", "Portfolio 1", "Zerodha", "NIFTY26AUG23100PE", -3375.0)
+        portfolio_repo.set_position_stop_loss(client, "u1", "Portfolio 1", "OtherBroker", "NIFTY26AUG23100PE", -3375.0)
 
         rows = client.store["portfolio_position_meta"]
         assert len(rows) == 1
@@ -720,10 +720,10 @@ class TestPositionMeta:
     def test_set_position_stop_loss_overwrites_the_existing_value_for_the_same_leg(self):
         client = _FakeClient()
         client.store["portfolio_position_meta"] = [
-            _position_meta_row("Portfolio 1", "Zerodha", "NIFTY26AUG23100PE", stop_loss=-3375.0)
+            _position_meta_row("Portfolio 1", "OtherBroker", "NIFTY26AUG23100PE", stop_loss=-3375.0)
         ]
 
-        portfolio_repo.set_position_stop_loss(client, "u1", "Portfolio 1", "Zerodha", "NIFTY26AUG23100PE", 0.0)
+        portfolio_repo.set_position_stop_loss(client, "u1", "Portfolio 1", "OtherBroker", "NIFTY26AUG23100PE", 0.0)
 
         rows = client.store["portfolio_position_meta"]
         assert len(rows) == 1
@@ -796,7 +796,7 @@ class TestLatestTradeFillDate:
         client.store["portfolio_trade_fills"] = [
             _fill_row("Portfolio 1", "Dhan", "T1", traded_at="2026-08-01T09:30:00"),
             _fill_row("Portfolio 2", "Dhan", "T2", traded_at="2026-08-20T09:30:00"),
-            _fill_row("Portfolio 1", "Zerodha", "T3", traded_at="2026-08-25T09:30:00"),
+            _fill_row("Portfolio 1", "OtherBroker", "T3", traded_at="2026-08-25T09:30:00"),
         ]
 
         assert portfolio_repo.latest_trade_fill_date(client, "u1", "Portfolio 1", "Dhan") == date(2026, 8, 1)

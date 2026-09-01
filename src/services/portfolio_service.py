@@ -2,7 +2,7 @@
 feature's pages (7_My_Trades.py, 8_My_Holdings.py, 9_My_Positions.py,
 10_Analyse_Trade.py, 11_My_CSP.py, 12_My_CC.py, 13_My_Other_Trades.py) --
 holdings/positions come from a live
-Dhan/Zerodha sync (Settings' "Data Provider" section,
+Dhan sync (Settings' "Data Provider" section,
 src/utils/data_provider_settings.py) only; CSV upload was dropped
 entirely once that became the account's one live data source. Holdings
 and positions are plain dicts throughout (not a dataclass) -- same
@@ -14,103 +14,12 @@ strike_price (float | None), option_type (OptionType | None), qty
 """
 from __future__ import annotations
 
-import calendar
-import re
 from collections import Counter, deque
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 from src.models.company import Company
 from src.models.enums import CompanyType, OptionType
 from src.models.portfolio import PortfolioHolding, PortfolioPosition, PortfolioTradeFill
-
-
-_MONTH_ABBR = {
-    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
-    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
-}
-_WEEKLY_MONTH_CHARS = {str(m): m for m in range(1, 10)} | {"O": 10, "N": 11, "D": 12}
-
-# Zerodha's own NSE-derived tradingsymbol for a *weekly* option contract --
-# only indices (NIFTY, BANKNIFTY, SENSEX, ...) currently have weekly
-# expiries -- encodes the full expiry inline: 2-digit year, then a single
-# month character (1-9, or O/N/D for Oct/Nov/Dec), then 2-digit day.
-# e.g. "NIFTY2681123000PE" = NIFTY, 2026, month 8 (Aug), day 11, strike
-# 23000, PE.
-_ZERODHA_WEEKLY_OPTION_RE = re.compile(
-    r"^(?P<symbol>[A-Z]+)(?P<yy>\d{2})(?P<month>[1-9OND])(?P<dd>\d{2})"
-    r"(?P<strike>\d+(?:\.\d+)?)(?P<type>CE|PE)$"
-)
-
-# Zerodha's *monthly* contract format -- 2-digit year, 3-letter month
-# abbreviation, no day at all (the day is implicit: NSE monthly F&O always
-# expires the last Thursday of that month). e.g. "NIFTY26AUG23100PE" =
-# NIFTY, 2026, August, strike 23100, PE -- confirmed live against a real
-# Zerodha-synced portfolio (previously only a guessed, unconfirmed shape,
-# "SBIN25AUG970PE"-style, deliberately left unparsed; a real sample showed
-# it's exactly that shape, for indices as well as stocks). Tried *after*
-# the weekly regex above since the two are mutually exclusive by
-# construction (weekly's month group is a single [1-9OND] character, never
-# 3 letters) -- order doesn't actually matter for correctness, just checked
-# in this order.
-_ZERODHA_MONTHLY_OPTION_RE = re.compile(
-    r"^(?P<symbol>[A-Z]+)(?P<yy>\d{2})(?P<mmm>[A-Z]{3})(?P<strike>\d+(?:\.\d+)?)(?P<type>CE|PE)$"
-)
-
-
-def _last_thursday(year: int, month: int) -> date:
-    """NSE monthly F&O contracts expire on the last Thursday of the month
-    -- same convention src/data_providers/mock_provider.py's synthetic
-    option-chain generator already uses. Doesn't account for an exchange
-    holiday landing on that day (which shifts the real expiry a day or
-    more earlier) -- good enough for display/grouping purposes, same
-    "not guaranteed to the exact day" trade-off already accepted
-    elsewhere in this app, not something to rely on for anything that
-    needs the precise contract date."""
-    last_day = calendar.monthrange(year, month)[1]
-    d = date(year, month, last_day)
-    while d.weekday() != 3:  # 3 == Thursday
-        d -= timedelta(days=1)
-    return d
-
-
-def parse_zerodha_option_instrument(instrument: str) -> dict | None:
-    """Decodes a Zerodha F&O tradingsymbol into its underlying/expiry/
-    strike/type -- tries the weekly format first, then the monthly one
-    (see the two regexes above). Returns None for anything matching
-    neither (futures, or malformed input) -- callers keep the row with
-    symbol=None rather than dropping it."""
-    text = instrument.strip().upper()
-
-    m = _ZERODHA_WEEKLY_OPTION_RE.match(text)
-    if m:
-        year = 2000 + int(m.group("yy"))
-        month = _WEEKLY_MONTH_CHARS[m.group("month")]
-        day = int(m.group("dd"))
-        try:
-            expiry_date = date(year, month, day)
-        except ValueError:
-            return None
-        return {
-            "symbol": m.group("symbol"),
-            "expiry_date": expiry_date,
-            "strike_price": float(m.group("strike")),
-            "option_type": OptionType(m.group("type")),
-        }
-
-    m = _ZERODHA_MONTHLY_OPTION_RE.match(text)
-    if m:
-        month = _MONTH_ABBR.get(m.group("mmm"))
-        if month is None:
-            return None
-        year = 2000 + int(m.group("yy"))
-        return {
-            "symbol": m.group("symbol"),
-            "expiry_date": _last_thursday(year, month),
-            "strike_price": float(m.group("strike")),
-            "option_type": OptionType(m.group("type")),
-        }
-
-    return None
 
 
 def dhan_holdings_from_api(rows: list[dict]) -> list[dict]:
@@ -193,9 +102,9 @@ _DHAN_NO_EXPIRY_SENTINEL = "0001-01-01"
 
 def dhan_positions_from_api(rows: list[dict], ltp_by_security_id: dict[str, float]) -> list[dict]:
     """Translates GET /v2/positions rows into this app's own position-dict
-    shape. Unlike Zerodha, expiry/strike/type come
-    straight from Dhan's own drvExpiryDate/drvStrikePrice/drvOptionType --
-    no regex instrument-name decoding needed. `netQty` is already signed
+    shape. expiry/strike/type come straight from Dhan's own
+    drvExpiryDate/drvStrikePrice/drvOptionType -- no regex
+    instrument-name decoding needed. `netQty` is already signed
     (positive long, negative short), matching this app's convention. `ltp`
     comes from a separate Market Quote call (dhan_provider.get_ltp_by_security_id)
     since the positions payload itself carries no live price. Skips closed
@@ -541,97 +450,6 @@ def compute_open_lots(fills: list[PortfolioTradeFill]) -> list[dict]:
     return open_lots
 
 
-def zerodha_holdings_from_api(rows: list[dict]) -> list[dict]:
-    """Translates GET /portfolio/holdings rows (src/data_providers/
-    zerodha_provider.py's get_holdings()) into this app's own holding-dict
-    shape, so holdings_to_records/merge_holdings/compute_portfolio_view
-    are reused unchanged regardless of source. `tradingsymbol` is already
-    the exact NSE trading symbol, so it's trusted directly, no fuzzy name
-    matching needed. Skips rows with no quantity (a holding fully sold
-    off today).
-
-    **A real bug this fixed**: Kite's own `quantity` field is the *free*
-    (non-pledged) quantity only -- confirmed live against a real account
-    with several holdings pledged as margin (GILT5YBEES, LIQUIDCASE,
-    LTGILTCASE, NIFTYBEES): each came back `quantity: 0` (matching Kite's
-    own web UI, which shows "Qty. 0" plus a separate "P: <pledged qty>"
-    badge for these), even though they're still fully owned, still have a
-    real `average_price`, and still show real Invested/Cur. val/P&L in
-    Kite's own UI. Treating `quantity` alone as "the" quantity silently
-    dropped every fully-pledged holding entirely (`qty == 0` -> skipped).
-    Summing `quantity + t1_quantity + collateral_quantity` reconstructs
-    the true total owned quantity -- verified against the same live
-    account: `average_price * (this sum)` matches Kite's own displayed
-    "Invested" amount exactly for a fully-pledged holding (e.g.
-    GILT5YBEES: avg 64.30 * 7500 = 4,82,250.00, matching to the rupee)."""
-    holdings = []
-    for row in rows:
-        qty = (row.get("quantity") or 0) + (row.get("t1_quantity") or 0) + (row.get("collateral_quantity") or 0)
-        symbol = str(row.get("tradingsymbol") or "").strip().upper()
-        if not qty or not symbol:
-            continue
-        avg_price = float(row.get("average_price") or 0)
-        holdings.append(
-            {
-                "raw_name": symbol,
-                "symbol": symbol,
-                "qty": float(qty),
-                "avg_price": avg_price,
-                "investment": float(qty) * avg_price,
-            }
-        )
-    return holdings
-
-
-def zerodha_positions_from_api(rows: list[dict]) -> list[dict]:
-    """Translates GET /portfolio/positions (`net`) rows into this app's
-    own position-dict shape. Kite Connect's own `tradingsymbol` decodes
-    directly via parse_zerodha_option_instrument above (the exact same
-    format that function was originally built to parse from a CSV
-    positions export's `Instrument` column, before CSV upload was
-    dropped) -- no separate regex needed here, unlike Dhan, whose
-    positions payload carries expiry/strike/type as separate structured
-    fields instead. `quantity` is already signed (positive long,
-    negative short), matching this app's convention. `last_price` comes
-    straight from the row -- unlike Dhan, whose positions response omits
-    LTP without a separate "Data APIs" subscription, Kite's response
-    already includes it, so no fallback-LTP step is needed for this
-    broker. Skips closed (quantity == 0) rows -- Kite still lists those
-    for the trading day.
-
-    Kite can hold the same tradingsymbol under more than one margin
-    `product` (CNC/MIS/NRML) at once, and both rows would otherwise share
-    one raw_name -- see dhan_positions_from_api's docstring (and
-    _dedupe_raw_names, reused here) for why that breaks
-    portfolio_positions' primary key and why the fix must be exhaustive,
-    not just a `product` suffix."""
-    positions = []
-    for row in rows:
-        qty = row.get("quantity") or 0
-        if not qty:
-            continue
-        raw_name = str(row.get("tradingsymbol") or "").strip()
-        product = str(row.get("product") or "").strip()
-        avg_price = float(row.get("average_price") or 0)
-        ltp = row.get("last_price")
-        decoded = parse_zerodha_option_instrument(raw_name) or {}
-        positions.append(
-            {
-                "raw_name": raw_name,
-                "_dedupe_tiebreakers": [product],
-                "symbol": decoded.get("symbol"),
-                "expiry_date": decoded.get("expiry_date"),
-                "strike_price": decoded.get("strike_price"),
-                "option_type": decoded.get("option_type"),
-                "qty": float(qty),
-                "avg_price": avg_price,
-                "ltp": float(ltp) if ltp is not None else None,
-            }
-        )
-    _dedupe_raw_names(positions)
-    return positions
-
-
 def apply_fallback_option_ltp(
     positions: list[dict], option_chains: dict[tuple[str, date], list[dict]]
 ) -> list[dict]:
@@ -918,8 +736,7 @@ def classify_position_bucket(
     isn't a decoded option contract -- an undecoded F&O row, a futures
     position, or a stock/ETF bought/sold as a position rather than a
     holding -- since `option_type` and `symbol` are only ever set together
-    (parse_zerodha_option_instrument/dhan_positions_from_api/
-    zerodha_positions_from_api all take both fields from the same
+    (dhan_positions_from_api takes both fields from the same
     decode-or-nothing result). A decoded option's
     underlying then splits "stock" vs "index" the same way
     classify_underlying_bucket does for My Trades (company_type Index
@@ -1017,10 +834,9 @@ def group_into_trades(
 
 def compute_positions_view(positions: list[dict]) -> list[dict]:
     """Adds pnl/pnl_pct to each position, recomputed from qty/avg_price/
-    ltp rather than trusted from the file (the two sample broker exports
-    disagree on what their own "P&L %"/"Chg." columns even mean -- Dhan's
-    is direction-aware, Zerodha's is a raw price change -- so neither is
-    trustworthy as-is). pnl = (ltp - avg_price) * qty, which is direction-
+    ltp rather than trusted from Dhan's own response (its raw P&L-ish
+    fields aren't reliably direction-aware, so recomputing here is
+    trustworthy regardless). pnl = (ltp - avg_price) * qty, which is direction-
     correct for both long (positive qty) and short (negative qty)
     positions. pnl_pct is against the premium notional (avg_price *
     |qty|), not stock notional -- there's no equivalent of a holding's
@@ -1042,8 +858,8 @@ def positions_to_records(
     """Converts parsed position dicts into PortfolioPosition rows ready
     for portfolio_repo.replace_broker_positions. `ltp_as_of` is read via
     `.get()`, not `[...]` -- only apply_fallback_option_ltp's output ever
-    carries that key; every other position-parsing path (CSV, Zerodha
-    API) never sets it at all, meaning "this LTP is live/as-given"."""
+    carries that key; every other position-parsing path never sets it at
+    all, meaning "this LTP is live/as-given"."""
     return [
         PortfolioPosition(
             user_id=user_id,
@@ -1178,9 +994,9 @@ def looks_like_etf_name(name: str) -> bool:
     """Classifies a symbol as an ETF/fund from its *real* display name --
     e.g. yfinance's `longName`/`shortName`, not `companies.name` for a
     portfolio-only symbol, which is often just the raw ticker itself with
-    no real name attached (Zerodha's own `tradingsymbol` is the exact NSE
-    symbol, so `raw_name == symbol` for every Zerodha-sourced holding --
-    see zerodha_holdings_from_api above).
+    no real name attached (Dhan's own `tradingSymbol` is the exact NSE
+    symbol, so `raw_name == symbol` for every Dhan-sourced holding --
+    see dhan_holdings_from_api above).
 
     Deliberately NOT based on yfinance's own `quoteType` field: checked
     live against every ETF/fund this app currently tracks (NIFTYBEES,

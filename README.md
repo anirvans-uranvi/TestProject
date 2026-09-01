@@ -40,7 +40,7 @@ pages/                  Streamlit multipage app (each still its own script,
   2_Stock_Detail.py       Price/volume/dividend charts, scorecard, per-stock alerts -- sidebar label "Equity",
                               nested under "Market"
   4_Settings.py            Per-user thresholds, alert CRUD + notification history, notification channels,
-                              Data Provider (Dhan/Zerodha/YFinance+Bhavcopy) + broker sync, sign out
+                              Data Provider (Dhan/YFinance+Bhavcopy) + broker sync, sign out
   5_Options.py              F&O: futures term structure, 5% CSP / 5% CC breakdown -- nested under "Market"
   7_My_Trades.py              Holdings + positions grouped by underlying into Stock/Index/Other Trades --
                               sidebar label "All Trades", nested under the "My Trades" sidebar section
@@ -427,9 +427,8 @@ regardless of which page triggered the refresh.
 | **Fundamental Data Refresh** | Settings ("Data Refresh" section) | always | `render_fundamental_and_bhavcopy_refresh` |
 | **Bhavcopy Refresh** (NSE + BSE) | Settings, same section | always | `render_fundamental_and_bhavcopy_refresh` |
 | **Stock Data Refresh** | every page except Settings | Data Provider = YFinance/Bhavcopy | `render_stock_refresh_button` |
-| **Stock & Option Data Refresh** | every page except Settings | Data Provider = Zerodha | `render_stock_refresh_button` |
 | **Stock & Option Data Refresh from Dhan** / **Stock Data Refresh from Dhan** / **Option Data Refresh from Dhan** | every page except Settings | Data Provider = Dhan | `render_stock_refresh_button` → `_render_dhan_stock_option_refresh_buttons` |
-| **Portfolio Refresh** | My Trades, My Holdings, My Positions, My CSP, My CC, My Other Trades | Data Provider = Dhan/Zerodha | `render_portfolio_refresh_button` |
+| **Portfolio Refresh** | My Trades, My Holdings, My Positions, My CSP, My CC, My Other Trades | Data Provider = Dhan | `render_portfolio_refresh_button` |
 | **Refresh Instrument Master - Dhan** | Settings ("Data Provider" section) | Data Provider = Dhan | `_render_dhan_instrument_master_refresh` |
 
 - **Fundamental Data Refresh** -- a fresh Yahoo Finance fundamentals
@@ -444,13 +443,6 @@ regardless of which page triggered the refresh.
 - **Bhavcopy Refresh** -- NSE + BSE F&O, fired concurrently (2-worker
   `ThreadPoolExecutor`) via `supabase/functions/fo-refresh/` -- one Edge
   Function, parameterized by a POST body `{"exchange": "NSE" | "BSE"}`.
-- **Stock & Option Data Refresh** -- refetches this account's connected
-  broker's live quote across the full watched-symbol universe (Nifty50
-  constituents + this account's own portfolio symbols) and caches it in
-  `user_live_prices` (migration `0030`) for Dashboard/Stock Detail to
-  read as an override (`src/utils/refresh_bar.py::_refresh_user_live_prices`).
-  Zerodha has no F&O instrument-lookup mechanism in this codebase, so a
-  Zerodha-provider account only ever sees this one equity-only button.
 
   **Dhan gets three buttons instead of one** (`_render_dhan_stock_option_refresh_buttons`),
   side by side:
@@ -559,7 +551,7 @@ regardless of which page triggered the refresh.
   one hardcoded list.
 - **Portfolio Refresh** -- re-syncs holdings/positions from the
   connected broker (`src/utils/data_provider_settings.py::sync_broker_portfolio`,
-  wrapping the same `_sync_dhan`/`_sync_zerodha` Settings' "Save & Sync"/
+  wrapping the same `_sync_dhan` Settings' "Save & Sync"/
   "Update credentials" forms use -- Settings itself no longer has a
   standalone "Sync now" button).
 
@@ -896,28 +888,30 @@ There's no upload page anymore -- CSV import was dropped entirely once a
 live broker sync became viable as the account's one data source. Instead,
 Settings has a **"Data Provider"** section
 (`src/utils/data_provider_settings.py`) with one dropdown:
-**Dhan**, **Zerodha**, or **YFinance + NSE/BSE Bhavcopy** (the default).
-This choice is **account-wide**, not per-portfolio -- a `broker_connections`
+**Dhan** or **YFinance + NSE/BSE Bhavcopy** (the default). (Zerodha was a
+third option here until it was removed entirely -- see
+[Removed: Zerodha](#removed-zerodha) below.) This choice is
+**account-wide**, not per-portfolio -- a `broker_connections`
 row is now keyed `(user_id, broker)` (migration
 `0029_broker_connections_account_wide.sql`, collapsed from the original
 per-portfolio design), and it governs two things at once:
 
 1. **Stock LTP everywhere it's shown** (Dashboard, Stock Detail, and the
-   portfolio pages below) -- Dhan/Zerodha means a live broker quote,
+   portfolio pages below) -- Dhan means a live broker quote,
    cached per-account in `user_live_prices` (migration `0030`) by the
    **Stock & Option Data Refresh** button (see [On-demand refresh](#on-demand-refresh-the-refresh-bar)
    below) and read as an override over the shared, possibly-stale
    `daily_screener_snapshots` value. **Fundamentals (PEG, dividend
    yield) and the full F&O options chain (every strike/expiry on the
-   Options page) are never provider-branched** -- neither Dhan nor
-   Zerodha's API exposes that data, so those always stay yfinance/NSE+BSE-
+   Options page) are never provider-branched** -- Dhan's API doesn't
+   expose that data, so those always stay yfinance/NSE+BSE-
    bhavcopy-sourced regardless of this setting. **Dhan only** (migration
    `0032`), Stock & Option Data Refresh separately live-prices the
    *specific* F&O contracts that actually matter to this account: every
    futures/option position it holds, and the Dashboard's own cached 5%
    CSP/5% CC legs -- see [On-demand refresh](#on-demand-refresh-the-refresh-bar)
    below.
-2. **Where your holdings/positions come from.** Picking Dhan or Zerodha
+2. **Where your holdings/positions come from.** Picking Dhan
    reveals a credential form and a "Sync now" button right there in
    Settings; picking the default shows nothing further to connect.
    Sync always targets **one portfolio per account**
@@ -967,50 +961,20 @@ only ever reads whatever this button last fetched, however old (see
 [On-demand refresh](#on-demand-refresh-the-refresh-bar) above for why
 that was deliberately decoupled).
 
-**Zerodha** (`src/data_providers/zerodha_provider.py`) works through a
-genuinely different mechanism -- Kite Connect is a paid, app-based
-platform, not a self-service token page:
+#### Removed: Zerodha
 
-1. **One-time setup, on Zerodha's own site**: register a Kite Connect app
-   at developers.kite.trade (**₹2,000+GST/month subscription, billed by
-   Zerodha, separate from this project**), which gives you an **API Key**
-   and **API Secret**. Set that app's **Redirect URL** to this app's
-   Settings page -- `{your app's base URL}/Settings` (the exact
-   `/Settings` path is pinned in `app.py`). **If you had Zerodha connected
-   before this change, update the Redirect URL** -- it used to point at
-   `/My_Broker`, which no longer exists.
-2. In Settings, pick "Zerodha", enter that API Key + API Secret once
-   ("Save").
-3. Click **"Log in to Zerodha"** -- opens Zerodha's own login page in a
-   **new browser tab** (standard OAuth-style redirect; this app never
-   sees your password or TOTP). After logging in, it redirects back to
-   Settings with a one-time `request_token`, which completes the login
-   and immediately syncs -- no extra confirmation click, since (unlike
-   the old per-portfolio design) there's no portfolio to pick anymore.
-4. From then on, "Sync now" pulls holdings + positions straight from
-   Kite Connect (`GET /portfolio/holdings`, `GET /portfolio/positions`),
-   translated via `portfolio_service.zerodha_holdings_from_api`/
-   `zerodha_positions_from_api`. Zerodha's own `tradingsymbol` for an
-   F&O position is in the exact same format
-   `parse_zerodha_option_instrument` was originally built to decode from
-   a CSV positions export's `Instrument` column, so that decoder is
-   reused as-is (weekly index options: e.g. `NIFTY2681123000PE`; monthly:
-   e.g. `NIFTY26AUG23100PE`/`SBIN25AUG970PE`, expiry computed as that
-   month's last Thursday -- doesn't account for an exchange holiday
-   shifting that day earlier). Kite's responses also include `last_price`
-   directly, so unlike Dhan there's no separate LTP call or fallback step
-   needed.
-
-**Kite Connect's session expires at a fixed daily time (~6am IST the next
-day), not on a rolling 24-hour window like Dhan's** -- there's no way
-around logging in again through step 3 every trading day you want to
-sync. Settings detects this (comparing the saved session's start time
-against the most recent 6am IST boundary, not a simple hours-old check)
-and shows "Log in to Zerodha" again instead of "Sync now" once that
-boundary has passed. **Security trade-off, same model as Dhan's:** the
-API Secret and access token are stored as entered, protected only by
-`broker_connections`' RLS policy. "Disconnect" removes the saved
-credentials only; previously synced holdings/positions are left as-is.
+Zerodha (Kite Connect OAuth login, `src/data_providers/zerodha_provider.py`,
+holdings/positions sync, live LTP, its own weekly/monthly F&O
+tradingsymbol decoder) was supported here too, until the account's own
+Zerodha session drifted too far out of sync to be worth maintaining and
+it was removed entirely -- code, tests, and this account's
+Zerodha-synced database rows all deleted, not just disconnected. If
+you're looking for that flow (Kite Connect app registration, the OAuth
+redirect handling, the "tokens expire daily at ~6am IST" session-freshness
+check), it's gone on purpose; check git history if it's ever needed as a
+reference. `broker_connections.api_secret` (Zerodha-only, Dhan's flow
+needs no third credential) is left in the schema unused rather than
+dropped in a migration.
 
 Both holdings and positions are saved per-user (`portfolio_holdings`,
 migrations `0012`/`0014`; `portfolio_positions`, migration `0016`; manual
@@ -1079,10 +1043,9 @@ not just stock options. BSE is index-options-only, though (see the F&O
 data refresh section above) -- a *stock* option position always falls
 back to NSE's own chain, never BSE's. Index *futures* remain out of scope
 on both exchanges. P&L/P&L% are still recomputed from qty/avg price/LTP
-rather than trusted from the broker's own P&L figure, since Zerodha's and
-Dhan's own P&L% columns turned out to mean different things (Dhan's is
-direction-aware, Zerodha's is a raw price change) -- see
-`portfolio_service.compute_positions_view`. A position whose instrument
+rather than trusted from Dhan's own P&L-ish figure, which isn't reliably
+direction-aware -- see `portfolio_service.compute_positions_view`. A
+position whose instrument
 string doesn't decode is still saved and shown here -- in the Others
 table, with no expiry/strike/type.
 
@@ -1382,8 +1345,8 @@ and are silently skipped. Columns, left to right:
   that far before the position loses money past the premium collected),
   positive means it's already fallen through breakeven.
 - **LTP Underlying** -- the underlying stock's own current price. If this
-  account has a connected broker (Dhan and/or Zerodha, Settings' "Data
-  Provider" section) -- a live quote straight from that broker is used;
+  account has a connected Dhan broker (Settings' "Data
+  Provider" section) -- a live quote straight from Dhan is used;
   otherwise (or for any symbol no connected broker returns a live quote
   for, e.g. an expired token) falls back to `daily_screener_snapshots` --
   the same source My Holdings' Current Value already reads, only as

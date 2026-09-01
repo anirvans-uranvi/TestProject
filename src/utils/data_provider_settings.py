@@ -1,10 +1,17 @@
 """Settings' "Data Provider" section (pages/4_Settings.py) -- lets an
-account pick Dhan / Zerodha / YFinance+Bhavcopy as the live source for its
+account pick Dhan / YFinance+Bhavcopy as the live source for its
 own stock LTP everywhere it's shown (Dashboard, Stock Detail, and the
 portfolio pages' own broker-live overrides -- see
-src/utils/portfolio_page.py's load_live_broker_prices), and, for Dhan/
-Zerodha, connects the account-wide broker credential this app also uses to
+src/utils/portfolio_page.py's load_live_broker_prices), and, for Dhan,
+connects the account-wide broker credential this app also uses to
 sync holdings/positions.
+
+Zerodha was supported here too (Kite Connect OAuth login, holdings/
+positions sync, live LTP) until it was removed entirely -- the
+account's own Zerodha session had drifted too far out of sync to be
+worth maintaining. If you're looking for that flow, it's gone on
+purpose; see git history for `_sync_zerodha`/`_render_zerodha_connect_section`/
+`_render_zerodha_redirect_handler` if it's ever needed as a reference.
 
 Replaces pages/6_My_Broker.py's per-portfolio "Connect ... account" flow
 (migration 0029 collapsed broker_connections to one row per (user_id,
@@ -26,7 +33,6 @@ from postgrest.exceptions import APIError
 
 from src.data_providers.base import ProviderError
 from src.data_providers.dhan_provider import DhanAuthError, DhanProvider, refresh_dhan_instrument_master
-from src.data_providers.zerodha_provider import ZerodhaAuthError, ZerodhaProvider
 from src.models.enums import FetchStatus, FetchType
 from src.models.fetch_log import ProviderFetchLog
 from src.models.portfolio import BrokerConnection
@@ -34,9 +40,9 @@ from src.models.user import UserSettings
 from src.repositories import dhan_instrument_repo, fetch_log_repo, fo_repo, portfolio_repo, settings_repo
 from src.services import portfolio_service
 from src.utils.portfolio_page import ensure_cache_bust
-from src.utils.timezones import format_ist, now_ist, to_ist
+from src.utils.timezones import format_ist
 
-_PROVIDER_LABELS = {"yfinance_bhavcopy": "YFinance + NSE/BSE Bhavcopy", "dhan": "Dhan", "zerodha": "Zerodha"}
+_PROVIDER_LABELS = {"yfinance_bhavcopy": "YFinance + NSE/BSE Bhavcopy", "dhan": "Dhan"}
 
 
 def _bump_cache_bust() -> None:
@@ -56,21 +62,6 @@ def _relative_age(hours: float) -> str:
     if hours < 48:
         return f"{int(hours)} hour(s) ago"
     return f"{int(hours / 24)} day(s) ago"
-
-
-def _zerodha_token_is_fresh(token_saved_at: datetime | None) -> bool:
-    """Kite Connect access tokens expire at a fixed daily time (~6am
-    IST), not on a rolling window like Dhan's -- so "is this token still
-    good" means "was it saved after the most recent 6am IST boundary",
-    not "is it less than N hours old". Approximates that boundary as the
-    most recent 6am IST at or before now."""
-    if token_saved_at is None:
-        return False
-    now = now_ist()
-    boundary = now.replace(hour=6, minute=0, second=0, microsecond=0)
-    if now < boundary:
-        boundary -= timedelta(days=1)
-    return to_ist(token_saved_at) >= boundary
 
 
 def _fetch_fallback_option_chains(client, positions: list[dict]) -> dict[tuple[str, object], list[dict]]:
@@ -118,8 +109,9 @@ def _auto_classify_new_trades(*, client, user_id: str, portfolio_name: str) -> N
 
     Re-reads the full current holdings+positions for this portfolio
     (every broker, not just the one just synced) so a strategy spanning
-    two brokers on the same underlying -- e.g. a stock held via Zerodha
-    with a call written via Dhan -- still groups and classifies as one
+    two brokers on the same underlying -- e.g. a stock held via one
+    broker with a call written via another -- still groups and
+    classifies as one
     Covered Call. Deliberately builds its own lightweight leg dicts
     rather than reusing build_trade_legs (My Trades/Analyse Trade's own
     loader) -- that also fetches live prices, which classify_trade_type
@@ -215,58 +207,13 @@ def _sync_dhan(*, client, user_id: str, connection: BrokerConnection) -> None:
     st.rerun()
 
 
-def _sync_zerodha(*, client, user_id: str, connection: BrokerConnection) -> None:
-    """Pulls holdings + positions straight from Zerodha's Kite Connect
-    API into this account's one resolved portfolio. Unlike Dhan, no
-    fallback-LTP step is needed -- Kite's responses already include
-    last_price directly. Called both from Settings' "Log in to Zerodha"
-    redirect handler and from sync_broker_portfolio (the Portfolio
-    Refresh button on My Trades/My Holdings/My Positions/My CSP)."""
-    if not connection.access_token or not connection.api_secret:
-        st.error('Not logged in yet -- click "Log in to Zerodha" below first.')
-        return
-    started_at = datetime.now(timezone.utc)
-    portfolio_name = portfolio_repo.get_or_default_portfolio_name(client, user_id)
-    provider = ZerodhaProvider(
-        api_key=connection.client_id, api_secret=connection.api_secret, access_token=connection.access_token
-    )
-    try:
-        holding_rows = provider.get_holdings()
-        position_rows = provider.get_positions()
-    except ZerodhaAuthError:
-        st.error(
-            "Your Zerodha session has expired -- Kite Connect tokens expire daily (around 6am IST), "
-            "not on a rolling window like Dhan's. Click \"Log in to Zerodha\" below to start a new session."
-        )
-        return
-    except ProviderError as exc:
-        st.error(f"Could not sync from Zerodha: {exc}")
-        return
-
-    holdings = portfolio_service.zerodha_holdings_from_api(holding_rows)
-    positions = portfolio_service.zerodha_positions_from_api(position_rows)
-    holding_records = portfolio_service.holdings_to_records(user_id, portfolio_name, "Zerodha", holdings)
-    position_records = portfolio_service.positions_to_records(user_id, portfolio_name, "Zerodha", positions)
-    portfolio_repo.replace_broker_holdings(client, user_id, portfolio_name, "Zerodha", holding_records)
-    portfolio_repo.replace_broker_positions(client, user_id, portfolio_name, "Zerodha", position_records)
-    _default_new_position_trade_dates(client=client, user_id=user_id, portfolio_name=portfolio_name, broker="Zerodha", positions=positions)
-    _auto_classify_new_trades(client=client, user_id=user_id, portfolio_name=portfolio_name)
-    _log_portfolio_sync(client, "Zerodha", started_at)
-    _bump_cache_bust()
-    st.success(
-        f"Synced {len(holding_records)} holding(s) and {len(position_records)} position(s) "
-        f"from Zerodha to \"{portfolio_name}\"."
-    )
-    st.rerun()
-
-
 def _log_portfolio_sync(client, broker: str, started_at: datetime) -> None:
     """Logs a provider_fetch_log row for a completed broker portfolio
     sync -- the same table/pattern every other refresh button already
     writes to, so "Last portfolio refresh" (render_portfolio_refresh_button
     in src/utils/refresh_bar.py) has something to read. `provider_name` is
-    the lowercased broker, matching the Data Provider setting's own values
-    ("dhan"/"zerodha")."""
+    the lowercased broker, matching the Data Provider setting's own value
+    ("dhan")."""
     fetch_log_repo.log_fetch(
         client,
         ProviderFetchLog(
@@ -286,19 +233,16 @@ def sync_broker_portfolio(*, client, user_id: str, data_provider: str) -> None:
     runs the same sync Settings' "Save & Sync"/"Update credentials" forms
     trigger. Shows an error directing back to Settings if the account has
     no (or an incomplete) broker connection yet, rather than crashing --
-    a data_provider of "dhan"/"zerodha" doesn't guarantee credentials were
-    ever actually saved."""
-    broker = {"dhan": "Dhan", "zerodha": "Zerodha"}.get(data_provider)
+    a data_provider of "dhan" doesn't guarantee credentials were ever
+    actually saved."""
+    broker = {"dhan": "Dhan"}.get(data_provider)
     if broker is None:
         return
     connection = portfolio_repo.get_broker_connection(client, user_id, broker)
     if connection is None:
         st.error(f"No connected {broker} account yet -- connect one in Settings' Data Provider section.")
         return
-    if broker == "Dhan":
-        _sync_dhan(client=client, user_id=user_id, connection=connection)
-    else:
-        _sync_zerodha(client=client, user_id=user_id, connection=connection)
+    _sync_dhan(client=client, user_id=user_id, connection=connection)
 
 
 def _render_dhan_connect_section(*, client, user_id: str) -> None:
@@ -501,152 +445,18 @@ def _render_dhan_trade_history_sync(*, client, user_id: str) -> None:
         st.rerun()
 
 
-def _render_zerodha_connect_section(*, client, user_id: str) -> None:
-    try:
-        connection = portfolio_repo.get_broker_connection(client, user_id, "Zerodha")
-    except APIError:
-        st.info(
-            "Connecting a Zerodha account isn't set up yet. Apply migrations "
-            "`supabase/migrations/0022_broker_connections_api_secret.sql` through "
-            "`supabase/migrations/0029_broker_connections_account_wide.sql` "
-            "(in order) in the Supabase SQL editor, then reload this page."
-        )
-        return
-
-    if connection is None or not connection.api_secret:
-        st.caption(
-            "Register a Kite Connect app at developers.kite.trade (paid subscription required) and set its "
-            "Redirect URL to this Settings page's own URL. This app only ever reads your Holdings/Positions "
-            "with the resulting session -- it never places or modifies orders -- but the API Secret/access "
-            "token are stored as entered, protected the same way as everything else here (row-level "
-            "security), not separately encrypted."
-        )
-        with st.form("zerodha_connect_form"):
-            new_api_key = st.text_input("Kite Connect API Key")
-            new_api_secret = st.text_input("Kite Connect API Secret", type="password")
-            submitted = st.form_submit_button("Save")
-        if submitted:
-            if not new_api_key.strip() or not new_api_secret.strip():
-                st.error("Both API Key and API Secret are required.")
-                return
-            new_connection = BrokerConnection(
-                user_id=user_id, broker="Zerodha", client_id=new_api_key.strip(), api_secret=new_api_secret.strip()
-            )
-            portfolio_repo.upsert_broker_connection(client, new_connection)
-            _bump_cache_bust()
-            st.rerun()
-        return
-
-    if connection.access_token and _zerodha_token_is_fresh(connection.token_saved_at):
-        masked_key = f"...{connection.client_id[-4:]}" if len(connection.client_id) > 4 else connection.client_id
-        st.caption(
-            f"Connected -- API Key {masked_key}, session started {_relative_age(_hours_since(connection.token_saved_at))}."
-        )
-        st.caption('Use the "Portfolio Refresh" button on My Trades/My Holdings/My Positions/My CSP to re-sync.')
-        if st.button("Disconnect", key="zerodha_disconnect"):
-            portfolio_repo.delete_broker_connection(client, user_id, "Zerodha")
-            _bump_cache_bust()
-            st.success("Disconnected. Previously synced holdings/positions are unaffected.")
-            st.rerun()
-    else:
-        if connection.access_token is not None:
-            st.warning(
-                "Your Zerodha session has likely expired -- Kite Connect tokens expire daily "
-                "(around 6am IST). Log in again below."
-            )
-        provider = ZerodhaProvider(api_key=connection.client_id, api_secret=connection.api_secret)
-        st.link_button("Log in to Zerodha", provider.login_url())
-        st.caption("Opens in a new tab. If that tab asks you to sign in here first, do so -- the connection will still complete.")
-
-    with st.expander("Update API Key / Secret"):
-        st.caption(
-            "Changing these doesn't clear an existing session -- \"Portfolio Refresh\" will simply fail and "
-            "prompt a fresh login if it's no longer valid under the new credentials."
-        )
-        with st.form("zerodha_update_form"):
-            updated_api_key = st.text_input("Kite Connect API Key", value=connection.client_id)
-            updated_api_secret = st.text_input(
-                "Kite Connect API Secret", type="password", placeholder="Leave blank to keep the current secret"
-            )
-            update_submitted = st.form_submit_button("Save")
-        if update_submitted:
-            if not updated_api_key.strip():
-                st.error("API Key is required.")
-                return
-            updated_connection = BrokerConnection(
-                user_id=user_id,
-                broker="Zerodha",
-                client_id=updated_api_key.strip(),
-                api_secret=updated_api_secret.strip() or connection.api_secret,
-            )
-            portfolio_repo.upsert_broker_connection(client, updated_connection)
-            _bump_cache_bust()
-            st.rerun()
-
-
-def _render_zerodha_redirect_handler(*, client, user_id: str) -> None:
-    """Kite Connect always redirects back to this Kite Connect app's own
-    configured Redirect URL with `request_token` in the query string on a
-    successful login -- **that Redirect URL must be updated to point at
-    this Settings page** (it used to point at My Broker) on
-    developers.kite.trade, a manual step outside this codebase. Unlike
-    the old per-portfolio flow, there's no portfolio picker needed here
-    anymore -- the account has exactly one Zerodha connection
-    (account-wide since migration 0029), so landing here with a
-    request_token unambiguously completes *that* connection's login and
-    immediately syncs, no extra confirmation click required."""
-    if st.query_params.get("status") == "error":
-        st.error("Zerodha login was cancelled or failed -- click \"Log in to Zerodha\" again to retry.")
-        st.query_params.clear()
-        return
-    if "request_token" not in st.query_params:
-        return
-
-    request_token = st.query_params["request_token"]
-    st.query_params.clear()
-    pending_connection = portfolio_repo.get_broker_connection(client, user_id, "Zerodha")
-    if pending_connection is None or not pending_connection.api_secret:
-        st.error(
-            'No saved Zerodha API Key/Secret found -- enter them under "Zerodha" below, then click '
-            '"Log in to Zerodha" again.'
-        )
-        return
-
-    provider = ZerodhaProvider(api_key=pending_connection.client_id, api_secret=pending_connection.api_secret)
-    try:
-        access_token = provider.generate_session(request_token)
-    except ProviderError as exc:
-        st.error(f"Could not complete Zerodha login: {exc}")
-        return
-
-    updated_connection = BrokerConnection(
-        user_id=user_id,
-        broker="Zerodha",
-        client_id=pending_connection.client_id,
-        api_secret=pending_connection.api_secret,
-        access_token=access_token,
-        token_saved_at=datetime.now(timezone.utc),
-    )
-    portfolio_repo.upsert_broker_connection(client, updated_connection)
-    _bump_cache_bust()
-    _sync_zerodha(client=client, user_id=user_id, connection=updated_connection)
-
-
 def render_data_provider_section(*, client, user_id: str, current: UserSettings) -> None:
     """Settings' "Data Provider" section -- the single entry point
-    pages/4_Settings.py calls. Handles a returning Zerodha login redirect
-    first (if any), then the provider picker, then whichever
+    pages/4_Settings.py calls. Renders the provider picker, then whichever
     connect/sync UI (if any) that choice needs."""
     ensure_cache_bust()
-    _render_zerodha_redirect_handler(client=client, user_id=user_id)
 
     st.divider()
     st.subheader("Data Provider")
     st.caption(
         "Which live source prices your stock LTP everywhere it's shown (Dashboard, Stock Detail, and your "
         "portfolio pages). Fundamentals (PEG, Dividend Yield) and the full options chain always come from "
-        "YFinance / NSE+BSE Bhavcopy regardless of this choice -- neither Dhan nor Zerodha's API exposes "
-        "that data."
+        "YFinance / NSE+BSE Bhavcopy regardless of this choice -- Dhan's API doesn't expose that data."
     )
     keys = list(_PROVIDER_LABELS.keys())
     selected_label = st.selectbox(
@@ -663,8 +473,6 @@ def render_data_provider_section(*, client, user_id: str, current: UserSettings)
         _render_dhan_instrument_master_refresh(client=client)
         st.divider()
         _render_dhan_trade_history_sync(client=client, user_id=user_id)
-    elif selected == "zerodha":
-        _render_zerodha_connect_section(client=client, user_id=user_id)
     else:
         st.caption(
             "Covered by the daily scheduled refresh (8pm IST) and the \"Market Data Refresh\" button above -- "

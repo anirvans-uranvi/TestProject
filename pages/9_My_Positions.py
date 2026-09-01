@@ -191,7 +191,7 @@ def _render_positions_tab(portfolio_name: str, positions_for_portfolio: list) ->
 portfolio_names = sorted({h.portfolio_name for h in saved_holdings} | {p.portfolio_name for p in saved_positions})
 
 if not portfolio_names:
-    st.info("No portfolios yet -- go to Settings > Data Provider to connect a Dhan or Zerodha account.")
+    st.info("No portfolios yet -- go to Settings > Data Provider to connect a Dhan account.")
 else:
     tabs = st.tabs(portfolio_names)
     for name, tab in zip(portfolio_names, tabs):

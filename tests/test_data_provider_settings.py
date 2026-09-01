@@ -2,7 +2,7 @@
 _auto_classify_new_trades is the only function here worth unit testing
 directly -- everything else in this module renders Streamlit widgets
 (forms, buttons) with no existing test harness in this codebase; see
-_sync_dhan/_sync_zerodha's own lack of coverage. portfolio_repo.* calls
+_sync_dhan's own lack of coverage. portfolio_repo.* calls
 are monkeypatched directly (this module imports the package, not
 individual functions) rather than built against a real/fake Supabase
 client -- same style tests/test_dhan_provider.py's DB-cache tests use.
@@ -97,13 +97,13 @@ class TestAutoClassifyNewTrades:
         assert calls == []
 
     def test_covered_call_spanning_two_brokers_still_classifies_as_one_trade(self, monkeypatch):
-        # The holding came in via Zerodha, the short call via Dhan -- both
-        # share symbol "Z", so they must still group into one trade and
-        # classify as a Covered Call.
+        # The holding came in via one broker, the short call via Dhan --
+        # both share symbol "Z", so they must still group into one trade
+        # and classify as a Covered Call.
         monkeypatch.setattr(
             data_provider_settings.portfolio_repo,
             "list_holdings",
-            lambda client, user_id: [_holding(raw_name="Z", symbol="Z", broker="Zerodha")],
+            lambda client, user_id: [_holding(raw_name="Z", symbol="Z", broker="OtherBroker")],
         )
         monkeypatch.setattr(
             data_provider_settings.portfolio_repo,

@@ -345,7 +345,7 @@ def _render_cc_tab(
 portfolio_names = sorted({h.portfolio_name for h in saved_holdings} | {p.portfolio_name for p in saved_positions})
 
 if not portfolio_names:
-    st.info("No portfolios yet -- go to Settings > Data Provider to connect a Dhan or Zerodha account.")
+    st.info("No portfolios yet -- go to Settings > Data Provider to connect a Dhan account.")
 else:
     all_companies = load_all_companies(client, st.session_state["portfolio_cache_bust"])
     company_type_by_symbol = {c.symbol: c.company_type for c in all_companies}
