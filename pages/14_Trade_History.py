@@ -7,7 +7,7 @@ writing portfolio_trade_fills -- migration 0038). Dhan only for now, same
 as that sync itself.
 
 Unlike every other portfolio page (My Trades/My Holdings/My Positions/
-My CSP/My CC/Analyse Trade), Realized P&L's data does NOT come from the
+My CSP/My Portfolio Trades/Analyse Trade), Realized P&L's data does NOT come from the
 Stock & Option Data Refresh / Portfolio Refresh buttons -- those sync
 current-state holdings/positions snapshots, not historical fills -- so
 neither refresh bar is rendered here. Unrealised P&L, by contrast,

@@ -51,13 +51,15 @@ pages/                  Streamlit multipage app (each still its own script,
                               "My Portfolio"
   11_My_CSP.py                Every Trade with Trade Type "CSP" -- one position leg per row, with underlying
                               LTP + 1D/5D/20D change -- sidebar label "CSP", nested under "My Trades"
-  12_My_CC.py                 Every short-call leg from a "Portfolio CC"-tagged Trade, + covered stock's own
-                              Holding/Avg Price/LTP and Combined P&L -- sidebar label "CC", nested under "My Trades"
-  13_My_Other_Trades.py       Every Trade from My Trades whose Trade Type is neither "CSP" nor "Portfolio CC" --
-                              sidebar label "Other Trades", nested under "My Trades"
+  12_My_Portfolio_Trades.py   Every Trade whose Trade Type starts with "Portfolio " (Portfolio CC/Strangle/Jade
+                              Lizard/Twisted Sister/IC, ...) -- one row per Trade: Stock Holding's own numbers
+                              plus up to 4 option legs (PE Sell/PE Buy/CE Sell/CE Buy) -- sidebar label "Portfolio
+                              Trades", nested under "My Trades" (formerly "My CC", Covered-Call-only)
+  13_My_Other_Trades.py       Every Trade from My Trades whose Trade Type is neither "CSP" nor Portfolio-prefixed
+                              -- sidebar label "Other Trades", nested under "My Trades"
   10_Analyse_Trade.py          One Trade's legs -- correct underlying, rename trade type, merge/split
-                              (hidden from the sidebar -- reached only via All Trades'/CC's/Other Trades'
-                              row selection)
+                              (hidden from the sidebar -- reached only via All Trades'/Portfolio Trades'/Other
+                              Trades' row selection)
 src/
   config.py               Pydantic Settings (env-driven)
   data_providers/         PriceDataProvider / FundamentalsDataProvider + Dhan/mock/manual impls
@@ -428,7 +430,7 @@ regardless of which page triggered the refresh.
 | **Bhavcopy Refresh** (NSE + BSE) | Settings, same section | always | `render_fundamental_and_bhavcopy_refresh` |
 | **Stock Data Refresh** | every page except Settings | Data Provider = YFinance/Bhavcopy | `render_stock_refresh_button` |
 | **Stock & Option Data Refresh from Dhan** / **Stock Data Refresh from Dhan** / **Option Data Refresh from Dhan** | every page except Settings | Data Provider = Dhan | `render_stock_refresh_button` → `_render_dhan_stock_option_refresh_buttons` |
-| **Portfolio Refresh** | My Trades, My Holdings, My Positions, My CSP, My CC, My Other Trades | Data Provider = Dhan | `render_portfolio_refresh_button` |
+| **Portfolio Refresh** | My Trades, My Holdings, My Positions, My CSP, My Portfolio Trades, My Other Trades | Data Provider = Dhan | `render_portfolio_refresh_button` |
 | **Refresh Instrument Master - Dhan** | Settings ("Data Provider" section) | Data Provider = Dhan | `_render_dhan_instrument_master_refresh` |
 
 - **Fundamental Data Refresh** -- a fresh Yahoo Finance fundamentals
@@ -844,8 +846,10 @@ Your own holdings and F&O positions -- synced live from a connected
 broker (see [Connecting a broker](#connecting-a-broker-settings--data-provider)
 above), not the Nifty50 screener universe -- span seven pages, six of
 which appear in the sidebar: **My Trades** (`pages/7_My_Trades.py`,
-sidebar label "All Trades"), **My CSP** (sidebar label "CSP"), **My CC**
-(sidebar label "CC"), **My Other Trades** (sidebar label "Other
+sidebar label "All Trades"), **My CSP** (sidebar label "CSP"), **My
+Portfolio Trades** (`pages/12_My_Portfolio_Trades.py`, sidebar label
+"Portfolio Trades" -- formerly "My CC"/`pages/12_My_CC.py`, Covered-Call
+only), **My Other Trades** (sidebar label "Other
 Trades") -- all four nested under the "My Trades" sidebar section --
 plus **My Holdings** (sidebar label "Holdings") and **My Positions**
 (sidebar label "Positions"), nested under "My Portfolio". This doc keeps
@@ -853,9 +857,9 @@ referring to each page by its file-derived feature name (matching its
 filename and its own on-page title), not its current sidebar label,
 which is independent and can be renamed without touching the page
 itself -- see the "Navigation" note above and the `st.navigation` dict
-in `app.py`. **Analyse Trade** is reached only by selecting a row on
-All Trades/CC/Other Trades. All seven share one loader/formatting
-module, `src/utils/portfolio_page.py`
+in `app.py`. **Analyse Trade** is reached only by selecting a row on All
+Trades/Portfolio Trades/Other Trades. All seven share one loader/
+formatting module, `src/utils/portfolio_page.py`
 (cached data loaders, the cache-bust counter, `build_trade_legs`), so a
 cache hit on one page is a cache hit on another -- e.g. switching from My
 Holdings to My Trades doesn't re-fetch holdings that are still fresh.
@@ -866,21 +870,25 @@ portfolio per account (see above), in practice there's just the one tab
 change still shows all of them, just with no way to add another
 live-synced one.
 
-**My CC** and **My Other Trades** are filtered views of the exact same
-Trade list My Trades computes (`portfolio_service.group_into_trades`) --
-`is_covered_call_trade_type`/`is_other_trade_type` split it by `trade_type`
-the same way My CSP's `is_csp_trade_type` already did. My CC then renders
-a per-leg breakdown like My CSP's, plus the covered stock's own Holding/
-Avg Price/LTP/Combined P&L alongside the option leg (see My CC below);
-My Other Trades stays at My Trades' own per-trade summary depth (that
-richer per-leg breakdown doesn't generalize to an arbitrary multi-leg
-strategy, see My Other Trades below) and keeps the same Stock/Index/Other
-bucket tables My Trades uses. A Trade lands on My CC only once its Trade
-Type is renamed to "Portfolio CC" on Analyse Trade (or it was
-auto-classified as one, see "Auto-classifying a new Trade" below), and on
-My Other Trades by default (including the untouched "Trade" label,
-and any auto-classified type other than CSP/Portfolio CC -- see "Trade
-Type is auto-classified for a new trade" under My Trades below).
+**My Portfolio Trades** and **My Other Trades** are filtered views of
+the exact same Trade list My Trades computes
+(`portfolio_service.group_into_trades`) --
+`is_portfolio_trade_type`/`is_other_trade_type` split it by `trade_type`
+the same way My CSP's `is_csp_trade_type` already did:
+`is_portfolio_trade_type` matches any `trade_type` starting with
+"Portfolio " (case-insensitive/trimmed) -- Portfolio CC, Portfolio
+Strangle, Portfolio Jade Lizard, Portfolio Twisted Sister, Portfolio IC,
+or a hand-typed label using the same convention. My Portfolio Trades
+then renders one row **per Trade** (not per leg, since a Trade here can
+carry up to 4 option legs at once -- see "My Portfolio Trades" below for
+the full column layout); My Other Trades stays at My Trades' own
+per-trade summary depth and keeps the same Stock/Index/Other bucket
+tables My Trades uses. A Trade lands on My Portfolio Trades only once
+its Trade Type starts with "Portfolio " on Analyse Trade (or it was
+auto-classified as one, see "Auto-classifying a new Trade" below), and
+on My Other Trades by default (including the untouched "Trade" label,
+and any bare strategy with no stock holding -- Strangle/Jade
+Lizard/Twisted Sister/IC without the prefix).
 
 ### Connecting a broker (Settings > Data Provider)
 
@@ -1220,12 +1228,12 @@ appears as its own sidebar link). There you can:
   shape, so the CSP-specific columns only populate where they're
   actually meaningful: `Credit`/`Target P&L`/`Stop Loss` compute for any
   **short** option leg (a short call included -- these three formulas
-  were never really put-specific, see My CC), but `Breakeven` is
+  were never really put-specific), but `Breakeven` is
   specifically the textbook CSP breakeven (`Strike - Avg Price`) and only
   shows for a genuine short **put** leg -- a future, a long option, or a
   short call all show "—" for it. A **Holding** (stock) leg instead gets
   its own `Target P&L` -- a flat 5% of its own investment (`Avg Price ×
-  Qty`), same as My CC's own "Target Stock P&L" -- so `P&L` shows a ✅
+  Qty`) -- so `P&L` shows a ✅
   once that stock's own P&L clears it (`Credit`/`Stop Loss`/`Breakeven`
   stay "—" for a Holding either way, since there's no premium collected
   or strike to compute those against). `LTP Underlying` applies to every
@@ -1415,67 +1423,85 @@ identity `(portfolio_name, broker, raw_name)`. Like the other Portfolio
 pages, one tab per portfolio; a portfolio with no "CSP"-tagged Trades
 shows a plain caption rather than an empty table.
 
-### My CC (`pages/12_My_CC.py`)
+### My Portfolio Trades (`pages/12_My_Portfolio_Trades.py`) -- formerly "My CC"
 
-Every Trade whose Trade Type is exactly "Portfolio CC"
-(`is_covered_call_trade_type`, case-insensitive/trimmed) -- one row per
-short-**call** position leg, same Stock/Index/Other bucket split as My
-Trades. The option leg's own columns mirror My CSP: **CC Expiry**
-(labeled to disambiguate from any expiry the covered stock itself might
-imply -- a stock has none, but the label makes clear this column is the
-*call's* expiry)/**Strike**/**Qty**/**Avg Price**/**LTP**/**Momentum**/
-**1D/5D/20D**, and the same **Trade Date**/**Stop Loss** mechanics
-(`csp_max_credit`/`csp_target_pnl`/`csp_stop_loss`) -- relabeled
-**Credit** (was "Max Credit" on My CSP), **Option P&L** (was "P&L"), and
-**Target Option P&L** (was "Target P&L") to disambiguate from the new
-stock-side numbers below -- none of these three are actually put-specific
-despite the `csp_` name; they're just premium-collected/time-decay-target/
-ratcheting-stop math, equally valid for a short call.
+Renamed and rebuilt per an explicit user request: the old My CC only
+ever showed Covered Call trades; this page generalizes it to **every**
+Trade whose Trade Type starts with `"Portfolio "` (case-insensitive/
+trimmed, `is_portfolio_trade_type`) -- Portfolio CC, Portfolio Strangle,
+Portfolio Jade Lizard, Portfolio Twisted Sister, Portfolio IC, or a
+hand-typed label using the same convention. What all of these have in
+common is a stock holding sitting alongside the option legs, which is
+exactly what the "Portfolio " prefix flags (see "Trade Type is
+auto-classified for a new trade" below).
 
-A covered call's economics can't be judged from the option alone, so
-each row also carries the covered stock's own numbers, read from that
-trade's own Holding leg(s) (summed across lots/brokers if the same
-underlying is split more than one way within a trade):
+Same Stock/Index/Other bucket split as My Trades, but **one row per
+Trade**, not per leg -- a Trade here can carry up to 4 option legs at
+once, not just a single short call, so a flat per-leg table (My CSP's
+style) doesn't fit. Six column groups per row:
 
-- **Holding** -- number of shares of the underlying held in this trade.
-- **Avg Stock Price** -- the stock's own investment-weighted average buy
-  price (placed right after **Underlying**, before the option's own
-  **Avg Price**).
-- **Stock LTP** -- the stock's own current price (same broker-live-first,
-  screener-snapshot-fallback resolution as My Holdings' Current Value).
-- **Stock P&L** -- `(Stock LTP - Avg Stock Price) × Holding`, the stock's
-  own P&L on its own, as a % of its own investment (`Holding × Avg Stock
-  Price`) -- a ✅ once it clears **Target Stock P&L**.
-- **Target Stock P&L** -- a flat 5% of the stock's own investment
-  (`Holding × Avg Stock Price`). No percentage shown alongside it (unlike
-  every other Target column here) since it's always exactly 5% of that
-  same investment by definition -- restating it would be redundant.
-- **Combined P&L** -- Stock P&L plus the option leg's own P&L, shown as a
-  % of the same stock investment. "—" unless both the stock and the
-  option leg are priced.
+1. **Trade Details** -- **Underlying**, **Trade Type** (with the same
+   "⚠️" `trade_type_mismatch` marker My Trades uses), **Total P&L**
+   (`group_into_trades`' own sum across every leg), **Option P&L** (the
+   same sum, but Position legs only -- the option legs' own contribution
+   on its own, separate from the stock).
+2. **Stock Holding** -- **Stock Avg Price**/**Stock Qty**/**Stock
+   Invested**/**Stock LTP** (summed across lots/brokers if the same
+   underlying is split more than one way within a trade, same convention
+   the old My CC used) plus **Momentum**/**1D**/**5D**/**20D** (the same
+   `criterion_b` scorecard and broker-live-first LTP resolution every
+   other Portfolio page uses).
+3-6. **PE Sell Leg** / **PE Buy Leg** / **CE Sell Leg** / **CE Buy Leg**
+   -- **Strike**/**Expiry**/**Avg Price**/**Qty**/**LTP** for whichever
+   single Position leg matches that shape (a short PE, long PE, short
+   CE, long CE respectively, matched by `option_type` + the sign of
+   `qty`); blank across all five if the trade has no leg of that shape.
+   An option leg's own LTP comes from its already-resolved `ltp`/
+   `ltp_as_of` (`build_trade_legs`/`compute_positions_view` -- the same
+   live-quote-or-end-of-day-fallback pipeline every F&O position on this
+   app uses), not a fresh lookup.
 
-All stock-side columns show "—"/blank if the trade has no Holding leg to
-read (e.g. a naked short call mislabeled "Portfolio CC").
+If a trade has **more than one** leg matching the same slot (e.g. two
+short puts at different strikes -- theoretically possible for a Jade
+Lizard/Twisted Sister with more than 3 legs, or an IC with a same-side
+2-long-2-short shape, though not seen on any real account checked while
+building this), only the first is shown in that slot and a table-wide
+caption flags it, pointing at My Trades/Analyse Trade for the full leg
+list -- strike/expiry can't be meaningfully combined into one cell the
+way qty/avg price can, so this is surfaced rather than guessed at.
+
+A "Portfolio "-prefixed Trade with **no actual Holding leg** (a
+hand-typed label that doesn't match its own legs) leaves the whole Stock
+Holding block blank rather than guessing -- the same class of caveat the
+old My CC page had for a naked short call mislabeled "Covered Call".
+
+Dropped entirely from the old My CC page: Trade Date/Target Option
+P&L/Stop Loss/Credit -- that per-leg premium-decay-ratchet math
+(`csp_max_credit`/`csp_target_pnl`/`csp_stop_loss`) is CSP/CC-specific
+(whose target, whose stop, on a 4-leg spread?) and wasn't part of this
+rebuild's spec; Analyse Trade's own per-leg version of the same math
+(see My CSP above) is untouched and still computes independently for any
+short option leg, regardless of what this page shows.
 
 ### My Other Trades (`pages/13_My_Other_Trades.py`)
 
-Unlike My CSP/My CC, this one doesn't add any per-leg options analytics
-(no Breakeven/Target P&L/Stop Loss ratchet -- that machinery assumes a
-single well-defined option leg, which an arbitrary multi-leg strategy
-doesn't have). It's just My Trades' own Stock/Index/Other Trades tables
-(`portfolio_service.group_into_trades`, same **Underlying Instrument**/
-**Trade Type**/**Legs**/**Total P&L** columns, same "⚠️" mismatch marker,
-same row-select → "Analyse Trade" flow), pre-filtered to
-`is_other_trade_type(trade_type)` -- i.e. neither "CSP" nor "Covered
-Call" -- before the bucket split, so the untouched default "Trade"
-label, a Strangle, a Jade Lizard/Twisted Sister, or any other free-text
-Trade Type all land here.
+Unlike My CSP/My Portfolio Trades, this one doesn't add any per-leg
+options analytics (no Breakeven/Target P&L/Stop Loss ratchet -- that
+machinery assumes a single well-defined option leg, which an arbitrary
+multi-leg strategy doesn't have). It's just My Trades' own Stock/Index/
+Other Trades tables (`portfolio_service.group_into_trades`, same
+**Underlying Instrument**/**Trade Type**/**Legs**/**Total P&L** columns,
+same "⚠️" mismatch marker, same row-select → "Analyse Trade" flow),
+pre-filtered to `is_other_trade_type(trade_type)` -- i.e. neither "CSP"
+nor Portfolio-prefixed -- before the bucket split, so the untouched
+default "Trade" label, a bare Strangle/Jade Lizard/Twisted Sister/IC
+with no stock holding, or any other free-text Trade Type all land here.
 
-Together with My CSP and My CC, every Trade shown on My Trades appears
-on exactly one of these three filtered pages (a Trade's `trade_type` can
-only match one of `is_csp_trade_type`/`is_covered_call_trade_type`/
-`is_other_trade_type` at a time) -- My Trades itself is unfiltered and
-keeps showing all of them.
+Together with My CSP and My Portfolio Trades, every Trade shown on My
+Trades appears on exactly one of these three filtered pages (a Trade's
+`trade_type` can only match one of `is_csp_trade_type`/
+`is_portfolio_trade_type`/`is_other_trade_type` at a time) -- My Trades
+itself is unfiltered and keeps showing all of them.
 
 ### Trade History (`pages/14_Trade_History.py`) -- Dhan only
 

@@ -204,9 +204,9 @@ position_meta_by_leg = {(m.broker, m.raw_name): m for m in saved_position_meta i
 
 ltp_by_symbol = load_latest_prices(client, leg_symbols, st.session_state["portfolio_cache_bust"])
 # Same broker-live-first, daily_screener_snapshots-fallback preference as
-# My CSP/My CC's own "LTP Underlying" -- applies to every leg here
-# (Holding or Position), since it's a fact about the underlying itself,
-# not the leg's own instrument.
+# My CSP's own "LTP Underlying" -- applies to every leg here (Holding or
+# Position), since it's a fact about the underlying itself, not the
+# leg's own instrument.
 live_ltp_by_symbol = load_live_broker_prices(client, user_id, leg_symbols, st.session_state["portfolio_cache_bust"])
 ltp_by_symbol = {**ltp_by_symbol, **live_ltp_by_symbol}
 
@@ -216,10 +216,14 @@ for leg in trade_legs:
     trade_date_for_leg = leg_meta.trade_date if leg_meta else None
     existing_stop_loss = leg_meta.stop_loss if leg_meta else None
 
-    # "Credit"/decay-target/ratcheting-stop math is generic to any SHORT
-    # option leg (see My CC's own reuse of the same csp_* functions for a
-    # short call) -- but meaningless for a Holding, a future (no
-    # option_type), or a long option (a debit, not a credit received).
+    # "Credit"/decay-target/ratcheting-stop math (the same csp_* functions
+    # My CSP itself uses) is generic to any SHORT option leg -- but
+    # meaningless for a Holding, a future (no option_type), or a long
+    # option (a debit, not a credit received). Computed here independently
+    # per leg regardless of the trade's own Trade Type -- My Portfolio
+    # Trades (formerly My CC) doesn't compute this at all anymore for its
+    # own summary row, so this is Analyse Trade's own math, not a reuse of
+    # anything from that page.
     is_short_option_leg = (
         leg["leg_type"] == "Position"
         and leg.get("option_type") is not None
@@ -235,10 +239,9 @@ for leg in trade_legs:
             portfolio_repo.set_position_stop_loss(client, user_id, portfolio_name, leg["broker"], leg["raw_name"], new_stop_loss)
     elif leg["leg_type"] == "Holding":
         # No option premium to decay toward a target on a plain stock
-        # holding -- same flat-5%-of-investment Target P&L My CC's own
-        # "Target Stock P&L" uses instead (avg_price * qty is the
-        # holding's own investment; qty is always positive for a
-        # Holding, so no abs() needed here unlike csp_max_credit's short
+        # holding -- a flat 5% of its own investment instead (avg_price *
+        # qty is the holding's own investment; qty is always positive for
+        # a Holding, so no abs() needed here unlike csp_max_credit's short
         # leg case).
         target_pnl = 0.05 * leg["avg_price"] * leg["qty"]
 

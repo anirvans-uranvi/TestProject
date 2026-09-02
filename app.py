@@ -11,8 +11,8 @@ import streamlit as st
 # The dict form groups pages under a labeled section header in the
 # sidebar (Streamlit's only native notion of a "sub-page") -- "Market"
 # nests Equity/Options underneath the screener itself, "My Portfolio"
-# nests Holdings/Positions/Trade History together, and "My Trades" nests CSP/CC/Other
-# Trades underneath All Trades, the unfiltered list they're each a
+# nests Holdings/Positions/Trade History together, and "My Trades" nests
+# CSP/Portfolio Trades/Other Trades underneath All Trades, the unfiltered list they're each a
 # filtered view of. Settings gets its own single-page section since the
 # dict form requires every page to belong to one. Section headers and
 # st.Page(title=...) (the sidebar's own page labels) are independent of
@@ -32,7 +32,7 @@ pages = {
     "My Trades": [
         st.Page("pages/7_My_Trades.py", title="All Trades"),
         st.Page("pages/11_My_CSP.py", title="CSP"),
-        st.Page("pages/12_My_CC.py", title="CC"),
+        st.Page("pages/12_My_Portfolio_Trades.py", title="Portfolio Trades"),
         st.Page("pages/13_My_Other_Trades.py", title="Other Trades"),
         st.Page("pages/10_Analyse_Trade.py", title="Analyse Trade", visibility="hidden"),
     ],

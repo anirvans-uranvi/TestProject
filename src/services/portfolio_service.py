@@ -554,29 +554,36 @@ def is_csp_trade_type(trade_type: str) -> bool:
     return trade_type.strip().lower() == "csp"
 
 
-def is_covered_call_trade_type(trade_type: str) -> bool:
-    """Whether a Trade's `trade_type` marks it as a Covered Call -- the
-    signal `pages/12_My_CC.py` filters on. Same case-insensitive,
-    whitespace-trimmed convention as `is_csp_trade_type` (this is what
-    `classify_trade_type` writes as-is -- "Portfolio CC", always
-    Portfolio-prefixed since a Covered Call always involves a holding --
-    but the user can also type it by hand on Analyse Trade). Renamed from
-    "Covered Call" per an explicit user request, matching the same
-    "Portfolio " convention Strangle/Jade Lizard/Twisted Sister/IC use
-    when a holding is present -- deliberately not also matching the old
-    "Covered Call" string, so an already-saved trade using it surfaces as
-    a `trade_type_mismatch` (see `group_into_trades`) rather than being
-    silently accepted forever under two different spellings."""
-    return trade_type.strip().lower() == "portfolio cc"
+def is_portfolio_trade_type(trade_type: str) -> bool:
+    """Whether a Trade's (free-text, user-editable) `trade_type` marks it
+    as involving a stock holding alongside its option legs -- the signal
+    `pages/12_My_Portfolio_Trades.py` (formerly My CC) filters on.
+    Case-insensitive, whitespace-trimmed prefix match on `"portfolio "` --
+    this is the exact convention `classify_trade_type` writes for
+    Portfolio CC/Strangle/Jade Lizard/Twisted Sister/IC, but, like every
+    other `is_*_trade_type` check here, it's a plain string convention,
+    not a re-derivation from the trade's actual legs: a manually-typed
+    custom label that also happens to carry a holding (e.g. "Hedged",
+    "Batman" -- both seen on real accounts) won't match unless it's
+    renamed to start with "Portfolio ". Deliberately a prefix match, not
+    an exact one against a fixed list -- a hand-typed "Portfolio Collar"
+    or similar it doesn't yet auto-detect still lands here."""
+    return trade_type.strip().lower().startswith("portfolio ")
 
 
 def is_other_trade_type(trade_type: str) -> bool:
-    """Whether a Trade's `trade_type` is neither CSP nor Portfolio CC --
-    the signal `pages/13_My_Other_Trades.py` filters on: every Trade from
-    My Trades that isn't already broken out onto My CSP or My CC,
-    regardless of whether it's a real options strategy (Strangle, Jade
-    Lizard, Twisted Sister, IC, ...) or just the default "Trade"."""
-    return not is_csp_trade_type(trade_type) and not is_covered_call_trade_type(trade_type)
+    """Whether a Trade's `trade_type` is neither CSP nor a Portfolio-
+    prefixed type -- the signal `pages/13_My_Other_Trades.py` filters on:
+    every Trade from My Trades that isn't already broken out onto My CSP
+    or My Portfolio Trades, regardless of whether it's a real options
+    strategy (a bare Strangle/Jade Lizard/Twisted Sister/IC with no
+    holding, a custom label, ...) or just the default "Trade". Checks
+    `is_portfolio_trade_type` rather than a narrower "is this specifically
+    a Covered Call" check -- My Portfolio Trades now covers every
+    Portfolio-prefixed type (CC/Strangle/Jade Lizard/Twisted Sister/IC),
+    not just Covered Call, so all of them need to be excluded here too or
+    they'd double up on both pages."""
+    return not is_csp_trade_type(trade_type) and not is_portfolio_trade_type(trade_type)
 
 
 def classify_trade_type(legs: list[dict]) -> str | None:
@@ -812,8 +819,12 @@ def group_into_trades(
     classify_trade_type's read of the trade's current legs disagrees with
     the saved `trade_type`; a brand-new/never-touched trade, or one whose
     legs don't match any known strategy shape at all, is never flagged),
-    `leg_count`, and `total_pnl` (sum over legs with a known pnl; None if
-    none are priced)."""
+    `leg_count`, `total_pnl` (sum over legs with a known pnl; None if none
+    are priced), and `option_pnl` (same sum, but Position legs only,
+    excluding any Holding leg's own pnl -- None if no Position leg is
+    priced; added for My Portfolio Trades' "Option P&L" column, which
+    needs the option legs' contribution on its own, separate from the
+    stock holding's)."""
     assigned = assign_trade_ids(legs, overrides)
     trades: dict[str, list[dict]] = {}
     order: list[str] = []
@@ -845,6 +856,8 @@ def group_into_trades(
         )
         priced = [leg for leg in trade_legs if leg.get("pnl") is not None]
         total_pnl = sum(leg["pnl"] for leg in priced) if priced else None
+        priced_positions = [leg for leg in priced if leg["leg_type"] == "Position"]
+        option_pnl = sum(leg["pnl"] for leg in priced_positions) if priced_positions else None
         result.append(
             {
                 "trade_id": trade_id,
@@ -856,6 +869,7 @@ def group_into_trades(
                 "trade_type_mismatch": trade_type_mismatch,
                 "leg_count": len(trade_legs),
                 "total_pnl": total_pnl,
+                "option_pnl": option_pnl,
             }
         )
     return result

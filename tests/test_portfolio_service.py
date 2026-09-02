@@ -218,33 +218,46 @@ class TestIsCspTradeType:
         assert portfolio_service.is_csp_trade_type("Portfolio CC") is False
 
 
-class TestIsCoveredCallTradeType:
-    def test_exact_match(self):
-        assert portfolio_service.is_covered_call_trade_type("Portfolio CC") is True
+class TestIsPortfolioTradeType:
+    def test_portfolio_cc_matches(self):
+        assert portfolio_service.is_portfolio_trade_type("Portfolio CC") is True
+
+    def test_portfolio_strangle_matches(self):
+        assert portfolio_service.is_portfolio_trade_type("Portfolio Strangle") is True
 
     def test_case_insensitive_and_trimmed(self):
-        assert portfolio_service.is_covered_call_trade_type(" portfolio cc ") is True
+        assert portfolio_service.is_portfolio_trade_type(" portfolio cc ") is True
 
-    def test_default_trade_type_is_not_covered_call(self):
-        assert portfolio_service.is_covered_call_trade_type("Trade") is False
+    def test_default_trade_type_is_not_portfolio(self):
+        assert portfolio_service.is_portfolio_trade_type("Trade") is False
 
-    def test_csp_is_not_covered_call(self):
-        assert portfolio_service.is_covered_call_trade_type("CSP") is False
+    def test_csp_is_not_portfolio(self):
+        assert portfolio_service.is_portfolio_trade_type("CSP") is False
 
-    def test_old_covered_call_name_no_longer_matches(self):
-        # Deliberate, not an oversight: renamed to "Portfolio CC" per an
-        # explicit user request, and the old string is NOT also accepted
-        # -- an already-saved "Covered Call" trade is meant to surface as
-        # a trade_type_mismatch (see TestGroupIntoTrades) rather than
-        # silently keep matching under its old name forever.
-        assert portfolio_service.is_covered_call_trade_type("Covered Call") is False
+    def test_bare_strangle_with_no_holding_is_not_portfolio(self):
+        # The prefix is the whole signal -- a bare "Strangle" (no holding
+        # involved) must not match just because it shares a word.
+        assert portfolio_service.is_portfolio_trade_type("Strangle") is False
+
+    def test_old_covered_call_name_does_not_match(self):
+        # The old bare "Covered Call" name was renamed to "Portfolio CC"
+        # -- it never carried the "Portfolio " prefix, so it correctly
+        # never matched even before the rename, and still doesn't now.
+        assert portfolio_service.is_portfolio_trade_type("Covered Call") is False
+
+    def test_hand_typed_custom_holding_label_without_the_prefix_does_not_match(self):
+        # Documents a known, deliberate limitation: this is a string
+        # convention, not a re-derivation from the trade's actual legs --
+        # a custom label like "Hedged" that happens to carry a holding
+        # doesn't match unless renamed to start with "Portfolio ".
+        assert portfolio_service.is_portfolio_trade_type("Hedged") is False
 
 
 class TestIsOtherTradeType:
     def test_default_trade_type_is_other(self):
         assert portfolio_service.is_other_trade_type("Trade") is True
 
-    def test_custom_trade_type_is_other(self):
+    def test_bare_strangle_with_no_holding_is_other(self):
         assert portfolio_service.is_other_trade_type("Strangle") is True
 
     def test_csp_is_not_other(self):
@@ -252,6 +265,12 @@ class TestIsOtherTradeType:
 
     def test_portfolio_cc_is_not_other(self):
         assert portfolio_service.is_other_trade_type(" Portfolio CC ") is False
+
+    def test_portfolio_strangle_is_not_other(self):
+        # Every Portfolio-prefixed type is excluded here, not just
+        # Portfolio CC -- they all now live on My Portfolio Trades
+        # instead, and would double up on both pages otherwise.
+        assert portfolio_service.is_other_trade_type("Portfolio Strangle") is False
 
 
 class TestCspBreakevenPrice:
@@ -632,9 +651,18 @@ class TestGroupIntoTrades:
         assert trade["trade_id"] == "RELIANCE"
         assert trade["leg_count"] == 2
         assert trade["total_pnl"] == 800.0
+        assert trade["option_pnl"] == -200.0
         assert trade["bucket"] == "stock"
         assert trade["underlying_label"] == "RELIANCE"
         assert trade["trade_type"] == "Trade"
+
+    def test_option_pnl_is_none_when_no_position_leg_is_priced(self):
+        # A holding-only trade -- total_pnl reflects the holding's own
+        # pnl, but option_pnl (Position legs only) has nothing to sum.
+        legs = [self._leg(raw_name="X", broker="OtherBroker", symbol="X", leg_type="Holding", pnl=500.0)]
+        trades = portfolio_service.group_into_trades(legs, overrides={}, trade_meta={}, company_type_by_symbol={})
+        assert trades[0]["total_pnl"] == 500.0
+        assert trades[0]["option_pnl"] is None
 
     def test_unanimous_index_bucket(self):
         legs = [self._leg(raw_name="NIFTY", broker="OtherBroker", symbol="NIFTY", leg_type="Holding", pnl=None)]

@@ -34,9 +34,10 @@ render_disclaimer()
 render_stock_refresh_button(client, user_id, user_settings.data_provider)
 render_portfolio_refresh_button(client, user_id, user_settings.data_provider)
 st.caption(
-    'Every Trade from My Trades whose Trade Type is neither "CSP" nor "Portfolio CC" -- including the default '
-    '"Trade" label and any other strategy (Strangle, Jade Lizard, Twisted Sister, IC, ...). Go to My Trades, select '
-    'a trade, click "Analyse Trade" to review or rename its Trade Type.'
+    'Every Trade from My Trades whose Trade Type is neither "CSP" nor Portfolio-prefixed (Portfolio CC, Portfolio '
+    'Strangle, ...) -- including the default "Trade" label and any bare strategy with no stock holding (Strangle, '
+    'Jade Lizard, Twisted Sister, IC, ...). Go to My Trades, select a trade, click "Analyse Trade" to review or '
+    "rename its Trade Type."
 )
 
 ensure_cache_bust()
