@@ -595,12 +595,21 @@ def classify_trade_type(legs: list[dict]) -> str | None:
       leg, a short CE.
     - **Strangle**: exactly one PE and one CE Position leg (two total),
       both short or both long -- a Holding leg may or may not also be
-      present, doesn't affect the call.
+      present.
     - **Jade Lizard / Twisted Sister**: three or more Position legs, with
       exactly one long (`qty > 0`) and the rest all short. The lone long
       leg's side decides which: a bought CE -> Jade Lizard (short put +
       short call + a further-OTM long call caps upside risk); a bought PE
-      -> Twisted Sister (the put-side mirror)."""
+      -> Twisted Sister (the put-side mirror).
+
+    For these last three, a Holding leg being present doesn't change
+    which strategy is detected, but it does get flagged in the name: a
+    Strangle/Jade Lizard/Twisted Sister alongside a stock holding is
+    prefixed "Portfolio " (e.g. "Portfolio Strangle") since the holding
+    changes the position's actual risk profile even though the option
+    legs alone still fit the same shape. CSP/Covered Call already imply
+    (respectively rule out/require) a holding, so neither ever takes this
+    prefix."""
     holdings = [leg for leg in legs if leg.get("leg_type") == "Holding"]
     positions = [leg for leg in legs if leg.get("leg_type") == "Position"]
     if any(leg.get("option_type") is None for leg in positions):
@@ -608,6 +617,7 @@ def classify_trade_type(legs: list[dict]) -> str | None:
 
     pe_legs = [leg for leg in positions if leg["option_type"] == OptionType.PE]
     ce_legs = [leg for leg in positions if leg["option_type"] == OptionType.CE]
+    prefix = "Portfolio " if holdings else ""
 
     if len(positions) == 1 and not holdings and len(pe_legs) == 1 and pe_legs[0]["qty"] < 0:
         return "CSP"
@@ -617,13 +627,13 @@ def classify_trade_type(legs: list[dict]) -> str | None:
 
     if len(positions) == 2 and len(pe_legs) == 1 and len(ce_legs) == 1:
         if (pe_legs[0]["qty"] < 0) == (ce_legs[0]["qty"] < 0):
-            return "Strangle"
+            return f"{prefix}Strangle"
 
     if len(positions) >= 3:
         long_legs = [leg for leg in positions if leg["qty"] > 0]
         short_legs = [leg for leg in positions if leg["qty"] < 0]
         if len(long_legs) == 1 and len(short_legs) == len(positions) - 1:
-            return "Jade Lizard" if long_legs[0]["option_type"] == OptionType.CE else "Twisted Sister"
+            return f"{prefix}Jade Lizard" if long_legs[0]["option_type"] == OptionType.CE else f"{prefix}Twisted Sister"
 
     return None
 

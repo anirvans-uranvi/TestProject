@@ -2329,7 +2329,7 @@ strings, or `None` if the shape doesn't match any of them:
   leg, a short CE.
 - **Strangle**: exactly one PE and one CE Position leg, both short or
   both long (mismatched direction doesn't count); a Holding leg may or
-  may not also be present, doesn't affect the call either way.
+  may not also be present.
 - **Jade Lizard / Twisted Sister**: three or more Position legs with
   exactly one long and the rest all short -- the long leg's side decides
   which name: a bought CE -> Jade Lizard, a bought PE -> Twisted Sister
@@ -2339,6 +2339,27 @@ strings, or `None` if the shape doesn't match any of them:
 - Any Position leg with `option_type is None` (undecoded contract, or a
   futures leg) present anywhere in the trade -> bails to `None` rather
   than guessing on incomplete information.
+
+**"Portfolio " prefix for these last three when a Holding is present**
+(added per an explicit user request -- a Strangle/Jade Lizard/Twisted
+Sister sitting alongside a stock holding is a materially different risk
+profile from the same option legs on their own, even though the leg
+*shape* that triggers detection is identical either way): `holdings and
+positions` still decide *whether* one of these three fires, exactly as
+above, but the returned string becomes `"Portfolio Strangle"`,
+`"Portfolio Jade Lizard"`, or `"Portfolio Twisted Sister"` whenever at
+least one Holding leg is present alongside the matched Position legs.
+CSP and Covered Call never take this prefix -- CSP's own rule already
+requires zero Holding legs, and Covered Call's already requires at least
+one, so the prefix would be either impossible or redundant on those two.
+`is_other_trade_type`/`is_csp_trade_type`/`is_covered_call_trade_type`
+need no changes: a `"Portfolio Strangle"` string still fails both the
+CSP and Covered Call checks, so it still correctly falls under "other"
+for any bucketing that distinguishes CSP/Covered Call from everything
+else. `trade_type_mismatch` (see `group_into_trades` below) picks this
+up for free too -- a trade saved as plain `"Strangle"` that later gains a
+holding leg will now detect as `"Portfolio Strangle"`, disagree with the
+saved label, and get flagged exactly like any other shape-changed trade.
 
 Two call sites, deliberately asymmetric (confirmed with the user -- a
 trade the user has already typed a label for is never silently

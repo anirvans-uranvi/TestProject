@@ -457,9 +457,11 @@ class TestClassifyTradeType:
         legs = [self._position(OptionType.PE, 75), self._position(OptionType.CE, 50)]
         assert portfolio_service.classify_trade_type(legs) == "Strangle"
 
-    def test_strangle_with_a_holding_present_is_still_a_strangle(self):
+    def test_strangle_with_a_holding_present_is_prefixed_portfolio(self):
+        # The holding doesn't change which shape is detected, but it does
+        # change the risk profile -- flagged with a "Portfolio " prefix.
         legs = [self._holding(), self._position(OptionType.PE, -75), self._position(OptionType.CE, -50)]
-        assert portfolio_service.classify_trade_type(legs) == "Strangle"
+        assert portfolio_service.classify_trade_type(legs) == "Portfolio Strangle"
 
     def test_mismatched_direction_is_not_a_strangle(self):
         legs = [self._position(OptionType.PE, -75), self._position(OptionType.CE, 50)]
@@ -480,6 +482,24 @@ class TestClassifyTradeType:
             self._position(OptionType.PE, -75),
         ]
         assert portfolio_service.classify_trade_type(legs) == "Twisted Sister"
+
+    def test_jade_lizard_with_a_holding_present_is_prefixed_portfolio(self):
+        legs = [
+            self._holding(),
+            self._position(OptionType.CE, 25),
+            self._position(OptionType.CE, -50),
+            self._position(OptionType.PE, -75),
+        ]
+        assert portfolio_service.classify_trade_type(legs) == "Portfolio Jade Lizard"
+
+    def test_twisted_sister_with_a_holding_present_is_prefixed_portfolio(self):
+        legs = [
+            self._holding(),
+            self._position(OptionType.PE, 25),
+            self._position(OptionType.CE, -50),
+            self._position(OptionType.PE, -75),
+        ]
+        assert portfolio_service.classify_trade_type(legs) == "Portfolio Twisted Sister"
 
     def test_jade_lizard_with_more_than_three_legs(self):
         legs = [

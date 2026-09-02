@@ -1252,7 +1252,14 @@ appears as its own sidebar link). There you can:
   holding plus one short call -> Covered Call; a short put + short call
   (same direction, both short or both long) -> Strangle; 3+ legs with
   exactly one bought leg (a bought call -> Jade Lizard, a bought put ->
-  Twisted Sister) -> that. Only ever runs for a trade with **no** saved
+  Twisted Sister) -> that. For the last three, a stock holding present
+  alongside the option legs doesn't change which shape is detected, but
+  does get flagged in the name -- **"Portfolio Strangle"**, **"Portfolio
+  Jade Lizard"**, **"Portfolio Twisted Sister"** -- since the holding
+  changes the position's actual risk profile even though the option legs
+  alone still fit the same shape (CSP/Covered Call never take this prefix
+  -- one already rules out a holding, the other already requires one).
+  Only ever runs for a trade with **no** saved
   Trade Type yet -- an already-classified trade's own label is never
   overwritten automatically. If that trade's current legs later stop
   matching its saved type (a leg closed, a new one appeared), My Trades
