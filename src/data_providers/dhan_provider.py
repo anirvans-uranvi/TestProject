@@ -640,6 +640,47 @@ class DhanProvider(PriceDataProvider):
         """Raw rows from GET /v2/positions -- one per open F&O position."""
         return self._request("GET", f"{BASE_URL}/positions") or []
 
+    def renew_access_token(self) -> str:
+        """POST /v2/RenewToken -- extends a still-active Dhan Web access
+        token by another 24 hours, without the user visiting web.dhan.co
+        again (the pain point on mobile, away from a laptop). Per Dhan's
+        docs this ONLY works on a token that hasn't expired yet -- calling
+        it on an already-expired token 401s exactly like any other
+        rejected token (mapped to DhanAuthError below), and the caller
+        should fall back to asking for a freshly-pasted one. Also
+        documented as only renewing tokens generated via Dhan Web (i.e.
+        the plaintext-pasted kind this app stores) -- not one issued
+        through Dhan's separate API-key/secret flow, which this app
+        doesn't use anyway.
+
+        Uses its own header dict rather than self._headers: this endpoint
+        is documented to want `dhanClientId` (camelCase), not the
+        `client-id` header every other v2 endpoint in this class uses.
+
+        Response shape isn't fully documented; per DhanHQ's own Python
+        client the body carries `accessToken` (plus `expiryTime`,
+        `dhanClientId`, etc.) -- verify against a live call before relying
+        on this further, same caveat as the rest of this module."""
+        _throttle()
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "access-token": self._access_token,
+            "dhanClientId": self._client_id,
+        }
+        try:
+            resp = httpx.post(f"{BASE_URL}/RenewToken", headers=headers, timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"Dhan token renewal request failed: {exc}") from exc
+        if resp.status_code == 401:
+            raise DhanAuthError(f"Dhan access token rejected (401): {resp.text[:200]}")
+        if resp.status_code >= 400:
+            raise ProviderError(f"Dhan token renewal error {resp.status_code}: {resp.text[:200]}")
+        new_token = (resp.json() or {}).get("accessToken")
+        if not new_token:
+            raise ProviderError(f"Dhan token renewal response had no accessToken: {resp.text[:200]}")
+        return new_token
+
     def get_trade_history(self, from_date: date, to_date: date, max_pages: int = 500) -> list[dict]:
         """Raw rows from GET /v2/trades/{from-date}/{to-date}/{page} -- one
         per executed fill, paginated (page starts at 0, Dhan returns an

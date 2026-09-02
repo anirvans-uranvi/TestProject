@@ -245,6 +245,47 @@ def sync_broker_portfolio(*, client, user_id: str, data_provider: str) -> None:
     _sync_dhan(client=client, user_id=user_id, connection=connection)
 
 
+def _renew_dhan_token(*, client, user_id: str, connection: BrokerConnection) -> None:
+    """"Renew Token (+24h)" -- calls Dhan's own POST /v2/RenewToken to
+    extend the already-saved, still-active access token in place, entirely
+    from within this app (no web.dhan.co visit, no laptop needed). This is
+    the low-risk option: it reuses the exact same bearer token already
+    stored in broker_connections (same plaintext/RLS-only trade-off as
+    ever, see BrokerConnection's docstring) rather than adding a new,
+    longer-lived credential (Dhan's PIN+TOTP or API-key/secret flows would
+    let this app re-authenticate on its own indefinitely, but that means
+    storing the account's actual login credential -- a materially bigger
+    risk than a 24-hour bearer token, and deliberately not done here).
+
+    Only works while `connection.access_token` hasn't expired yet -- once
+    it has, DhanProvider.renew_access_token 401s exactly like a sync
+    attempt would, and the fix is the same "paste a freshly generated
+    token below" as everywhere else in this section."""
+    provider = DhanProvider(client_id=connection.client_id, access_token=connection.access_token)
+    try:
+        new_token = provider.renew_access_token()
+    except DhanAuthError:
+        st.error(
+            "This token has already expired and can't be renewed in place -- generate a fresh one on "
+            "web.dhan.co and paste it below."
+        )
+        return
+    except ProviderError as exc:
+        st.error(f"Could not renew Dhan token: {exc}")
+        return
+    renewed_connection = BrokerConnection(
+        user_id=user_id,
+        broker="Dhan",
+        client_id=connection.client_id,
+        access_token=new_token,
+        token_saved_at=datetime.now(timezone.utc),
+    )
+    portfolio_repo.upsert_broker_connection(client, renewed_connection)
+    _bump_cache_bust()
+    st.success("Token renewed -- valid for another ~24 hours.")
+    st.rerun()
+
+
 def _render_dhan_connect_section(*, client, user_id: str) -> None:
     try:
         connection = portfolio_repo.get_broker_connection(client, user_id, "Dhan")
@@ -290,13 +331,25 @@ def _render_dhan_connect_section(*, client, user_id: str) -> None:
     if connection.token_saved_at is not None:
         hours_old = _hours_since(connection.token_saved_at)
         st.caption(f"Connected -- Client ID {masked_id}, token saved {_relative_age(hours_old)}.")
-        if hours_old >= 23:
+        if hours_old >= 10:
             st.warning(
-                "This token is likely expired (Dhan tokens last ~24 hours) -- regenerate it on "
+                "This token is over 10 hours old and expires ~24 hours after it was saved. Renew it "
+                "now with \"Renew Token\" below -- that only works on a still-active token, so it's "
+                "safer to do it early (e.g. from mobile) than to wait and risk missing the window. "
+                "Once it has actually expired, renewal will fail and you'll need to regenerate one on "
                 "web.dhan.co and update it below."
             )
     else:
         st.caption(f"Connected -- Client ID {masked_id}.")
+
+    if st.button(
+        "Renew Token (+24h)",
+        key="dhan_renew_token",
+        help="Extends this token's validity by another 24 hours, in place, from wherever you are -- "
+        "no need to visit web.dhan.co. Only works while the token is still active; an already-expired "
+        "one still needs a fresh paste below.",
+    ):
+        _renew_dhan_token(client=client, user_id=user_id, connection=connection)
 
     st.caption('Use the "Portfolio Refresh" button on My Trades/My Holdings/My Positions/My CSP to re-sync.')
     if st.button("Disconnect", key="dhan_disconnect"):

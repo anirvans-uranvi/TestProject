@@ -2053,6 +2053,46 @@ background/scheduled sync in this version — `token_saved_at` only tracks
 when credentials were last saved, purely so the page can warn once it's
 old enough to likely be expired.
 
+**Renewing an active token in place ("Renew Token (+24h)").** Added
+after a real pain point: on mobile and away from a laptop, an expired
+token meant the app was simply unusable until you could reach
+`web.dhan.co` and paste a fresh one. Dhan's own `POST /v2/RenewToken`
+(`DhanProvider.renew_access_token`, `_renew_dhan_token` in
+`src/utils/data_provider_settings.py`) extends an **already-active**
+token by another 24 hours in place — no `web.dhan.co` visit, works from
+any device the app itself is reachable from. Two things make it safe to
+build on:
+
+- It reuses the exact same bearer token already sitting in
+  `broker_connections.access_token` — the renewal call just posts that
+  token back with a `dhanClientId` header (camelCase; this is the one
+  Dhan v2 endpoint that wants that header name instead of the
+  `client-id` every other call in this class uses) and gets a new token
+  string back (`accessToken` in the response body) to overwrite it with
+  via the same `upsert_broker_connection` path Save & Sync uses. No new
+  credential type, no new risk surface beyond what already exists.
+- It's documented to work **only on a token that hasn't expired yet** —
+  renewing an already-expired one 401s exactly like a sync attempt
+  would, mapped to the same `DhanAuthError` → "paste a fresh one below"
+  message. There's no way around that once the 24 hours are actually up;
+  this only helps if you renew *before* it lapses (e.g. right after the
+  "renew it now" ~10-hour warning fires -- deliberately early, well ahead
+  of the ~24-hour expiry, so there's a wide safe window even if the app
+  isn't opened again for a while, e.g. on mobile).
+
+Deliberately **not** built on Dhan's other two token-issuing flows, both
+of which genuinely can mint a brand-new token even past expiry, entirely
+headlessly: a `dhanClientId` + PIN + TOTP endpoint, and a 12-month
+API-key/secret pair. Both were ruled out for the same reason — either
+one means storing the account's actual login credential (a PIN, or a
+TOTP seed capable of generating valid codes indefinitely) at rest in
+`broker_connections`, which is a different, larger category of risk than
+a revocable, 24-hour bearer token: a leaked bearer token is a ticking
+clock; a leaked PIN/TOTP seed lets an attacker log into the account
+itself, no expiry. See `tests/test_dhan_provider.py`'s
+`TestRenewAccessToken` for the header/response-shape/error-mapping
+coverage.
+
 **Removed: Zerodha.** This section used to document a full second
 broker-connect flow -- Kite Connect's OAuth-style login (`login_url()`/
 `generate_session()`, a `sha256(api_key + request_token + api_secret)`

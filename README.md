@@ -930,7 +930,24 @@ symbol/expiry/strike/type come from Dhan's own structured fields
 `tradingSymbol`/`drvExpiryDate`/`drvStrikePrice`/`drvOptionType`, no
 name-matching or regex decoding needed). Since the token expires every 24
 hours, syncing is always a manual click -- Settings warns once a saved
-token is more than ~23 hours old. Fetching live LTP for positions needs
+token is more than 10 hours old (well ahead of the ~24-hour expiry, so
+there's a wide safe window to renew even if you don't see the app again
+for a while -- e.g. on mobile), and a **"Renew Token (+24h)"** button
+sits right there for exactly that moment: it calls Dhan's own `POST
+/v2/RenewToken` (`DhanProvider.renew_access_token`) to extend the
+already-saved token in place, from any device, with no `web.dhan.co`
+visit needed -- the point being a laptop-free fix when you're on mobile
+and the token expires away from a place you can regenerate one. It only
+works on a token that **hasn't expired yet** (Dhan's own documented
+limit -- renewing an already-expired one just 401s, same as a sync
+attempt would); past that point there's no way around a freshly-pasted
+token below. Deliberately built on the existing bearer token rather than
+a longer-lived credential: Dhan also offers a PIN+TOTP endpoint that can
+mint a brand-new token even after expiry, and a 12-month API-key/secret
+pair, but both mean storing the account's actual login credential (a PIN
+or a TOTP seed) at rest -- a materially bigger risk than the 24-hour
+bearer token already stored, so neither is implemented here. Fetching
+live LTP for positions needs
 Dhan's separate "Data APIs" subscription (distinct from "Trading APIs");
 without it (or for any security Dhan's own feed omits),
 `portfolio_service.apply_fallback_option_ltp` fills the gap from this

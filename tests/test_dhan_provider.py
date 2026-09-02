@@ -308,6 +308,57 @@ class TestGetPositions:
         assert provider.get_positions() == [{"netQty": -780}]
 
 
+class TestRenewAccessToken:
+    """POST /v2/RenewToken -- extends a still-active token by 24h from
+    within the app itself (Settings' "Renew Token (+24h)" button), the
+    mobile-friendly alternative to re-pasting a token generated on
+    web.dhan.co. Uses `dhanClientId` (camelCase), NOT the `client-id`
+    header every other v2 endpoint on this class sends -- confirmed
+    against Dhan's docs, this endpoint is documented to expect that name
+    specifically."""
+
+    def test_sends_dhan_client_id_header_and_returns_new_token(self, monkeypatch):
+        captured = {}
+
+        def fake_post(url, headers=None, timeout=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            return _FakeResponse(200, json_data={"accessToken": "NEW_TOKEN", "expiryTime": "..."})
+
+        monkeypatch.setattr(httpx, "post", fake_post)
+        provider = DhanProvider(client_id="CID1", access_token="OLD_TOKEN")
+
+        result = provider.renew_access_token()
+
+        assert result == "NEW_TOKEN"
+        assert captured["url"].endswith("/RenewToken")
+        assert captured["headers"]["dhanClientId"] == "CID1"
+        assert captured["headers"]["access-token"] == "OLD_TOKEN"
+        assert "client-id" not in captured["headers"]
+
+    def test_401_on_an_already_expired_token_raises_dhan_auth_error(self, monkeypatch):
+        monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeResponse(401, text="expired"))
+        provider = DhanProvider(client_id="CID1", access_token="EXPIRED")
+
+        with pytest.raises(DhanAuthError):
+            provider.renew_access_token()
+
+    def test_other_error_status_raises_generic_provider_error_not_auth_error(self, monkeypatch):
+        monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeResponse(500, text="boom"))
+        provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
+
+        with pytest.raises(ProviderError) as exc_info:
+            provider.renew_access_token()
+        assert not isinstance(exc_info.value, DhanAuthError)
+
+    def test_response_missing_access_token_raises_provider_error(self, monkeypatch):
+        monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeResponse(200, json_data={"expiryTime": "..."}))
+        provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
+
+        with pytest.raises(ProviderError):
+            provider.renew_access_token()
+
+
 class TestGetTradeHistory:
     def test_single_page_stops_after_one_empty_page(self, monkeypatch):
         calls = []
