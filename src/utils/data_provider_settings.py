@@ -96,9 +96,10 @@ def _default_new_position_trade_dates(*, client, user_id: str, portfolio_name: s
 
 
 def _auto_classify_new_trades(*, client, user_id: str, portfolio_name: str) -> None:
-    """Auto-detects and saves a strategy label (CSP/Covered Call/Strangle/
-    Jade Lizard/Twisted Sister -- portfolio_service.classify_trade_type)
-    for any Trade that doesn't have a portfolio_trade_meta row yet --
+    """Auto-detects and saves a strategy label (Holding/CSP/Portfolio CC/
+    Strangle/Jade Lizard/Twisted Sister/IC --
+    portfolio_service.classify_trade_type) for any Trade that doesn't
+    have a portfolio_trade_meta row yet --
     i.e. one this account has never visited Analyse Trade for, whether it
     already existed before this sync or a leg just synced into existence
     for the first time. A trade WITH a row is treated as already
@@ -112,7 +113,7 @@ def _auto_classify_new_trades(*, client, user_id: str, portfolio_name: str) -> N
     two brokers on the same underlying -- e.g. a stock held via one
     broker with a call written via another -- still groups and
     classifies as one
-    Covered Call. Deliberately builds its own lightweight leg dicts
+    Portfolio CC. Deliberately builds its own lightweight leg dicts
     rather than reusing build_trade_legs (My Trades/Analyse Trade's own
     loader) -- that also fetches live prices, which classify_trade_type
     (leg_type/option_type/qty only) has no use for."""

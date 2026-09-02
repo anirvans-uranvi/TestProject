@@ -558,17 +558,24 @@ def is_covered_call_trade_type(trade_type: str) -> bool:
     """Whether a Trade's `trade_type` marks it as a Covered Call -- the
     signal `pages/12_My_CC.py` filters on. Same case-insensitive,
     whitespace-trimmed convention as `is_csp_trade_type` (this is what
-    `classify_trade_type` writes as-is, but the user can also type it by
-    hand on Analyse Trade)."""
-    return trade_type.strip().lower() == "covered call"
+    `classify_trade_type` writes as-is -- "Portfolio CC", always
+    Portfolio-prefixed since a Covered Call always involves a holding --
+    but the user can also type it by hand on Analyse Trade). Renamed from
+    "Covered Call" per an explicit user request, matching the same
+    "Portfolio " convention Strangle/Jade Lizard/Twisted Sister/IC use
+    when a holding is present -- deliberately not also matching the old
+    "Covered Call" string, so an already-saved trade using it surfaces as
+    a `trade_type_mismatch` (see `group_into_trades`) rather than being
+    silently accepted forever under two different spellings."""
+    return trade_type.strip().lower() == "portfolio cc"
 
 
 def is_other_trade_type(trade_type: str) -> bool:
-    """Whether a Trade's `trade_type` is neither CSP nor Covered Call --
+    """Whether a Trade's `trade_type` is neither CSP nor Portfolio CC --
     the signal `pages/13_My_Other_Trades.py` filters on: every Trade from
     My Trades that isn't already broken out onto My CSP or My CC,
     regardless of whether it's a real options strategy (Strangle, Jade
-    Lizard, Twisted Sister, ...) or just the default "Trade"."""
+    Lizard, Twisted Sister, IC, ...) or just the default "Trade"."""
     return not is_csp_trade_type(trade_type) and not is_covered_call_trade_type(trade_type)
 
 
@@ -593,8 +600,11 @@ def classify_trade_type(legs: list[dict]) -> str | None:
     - **CSP**: exactly one Position leg, a short (`qty < 0`) PE, and no
       Holding legs at all (a CSP is specifically *uncovered* by a stock
       position -- that's what "cash-secured" instead of "covered" means).
-    - **Covered Call**: at least one Holding leg plus exactly one Position
-      leg, a short CE.
+    - **Portfolio CC** (Covered Call): at least one Holding leg plus
+      exactly one Position leg, a short CE. Always "Portfolio "-prefixed,
+      unconditionally -- unlike the four below, there's no bare "CC": the
+      rule itself already requires a Holding leg to fire at all, so the
+      un-prefixed name would never be reachable.
     - **Strangle**: exactly one PE and one CE Position leg (two total),
       both short or both long -- a Holding leg may or may not also be
       present.
@@ -608,14 +618,13 @@ def classify_trade_type(legs: list[dict]) -> str | None:
       it doesn't separately require a specific PE/CE split, unlike
       Strangle above).
 
-    For these last four, a Holding leg being present doesn't change
-    which strategy is detected, but it does get flagged in the name: a
-    Strangle/Jade Lizard/Twisted Sister/IC alongside a stock holding is
+    For Strangle/Jade Lizard/Twisted Sister/IC, a Holding leg being
+    present doesn't change which strategy is detected, but it does get
+    flagged in the name: one of these four alongside a stock holding is
     prefixed "Portfolio " (e.g. "Portfolio Strangle", "Portfolio IC")
     since the holding changes the position's actual risk profile even
-    though the option legs alone still fit the same shape. CSP/Covered
-    Call already imply (respectively rule out/require) a holding, so
-    neither ever takes this prefix."""
+    though the option legs alone still fit the same shape. CSP never
+    takes this prefix (its own rule already rules a holding out)."""
     holdings = [leg for leg in legs if leg.get("leg_type") == "Holding"]
     positions = [leg for leg in legs if leg.get("leg_type") == "Position"]
     if holdings and not positions:
@@ -631,7 +640,7 @@ def classify_trade_type(legs: list[dict]) -> str | None:
         return "CSP"
 
     if holdings and len(positions) == 1 and len(ce_legs) == 1 and ce_legs[0]["qty"] < 0:
-        return "Covered Call"
+        return f"{prefix}CC"
 
     if len(positions) == 2 and len(pe_legs) == 1 and len(ce_legs) == 1:
         if (pe_legs[0]["qty"] < 0) == (ce_legs[0]["qty"] < 0):

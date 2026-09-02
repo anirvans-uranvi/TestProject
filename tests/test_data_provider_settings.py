@@ -124,7 +124,7 @@ class TestAutoClassifyNewTrades:
     def test_covered_call_spanning_two_brokers_still_classifies_as_one_trade(self, monkeypatch):
         # The holding came in via one broker, the short call via Dhan --
         # both share symbol "Z", so they must still group into one trade
-        # and classify as a Covered Call.
+        # and classify as a Portfolio CC.
         monkeypatch.setattr(
             data_provider_settings.portfolio_repo,
             "list_holdings",
@@ -150,7 +150,7 @@ class TestAutoClassifyNewTrades:
 
         data_provider_settings._auto_classify_new_trades(client=object(), user_id="u1", portfolio_name="My Portfolio")
 
-        assert saved == {"trade_id": "Z", "trade_type": "Covered Call"}
+        assert saved == {"trade_id": "Z", "trade_type": "Portfolio CC"}
 
     def test_no_holdings_or_positions_short_circuits_without_any_repo_calls(self, monkeypatch):
         monkeypatch.setattr(data_provider_settings.portfolio_repo, "list_holdings", lambda client, user_id: [])

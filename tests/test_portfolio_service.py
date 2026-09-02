@@ -215,21 +215,29 @@ class TestIsCspTradeType:
         assert portfolio_service.is_csp_trade_type("Trade") is False
 
     def test_other_custom_trade_type_is_not_csp(self):
-        assert portfolio_service.is_csp_trade_type("Covered Call") is False
+        assert portfolio_service.is_csp_trade_type("Portfolio CC") is False
 
 
 class TestIsCoveredCallTradeType:
     def test_exact_match(self):
-        assert portfolio_service.is_covered_call_trade_type("Covered Call") is True
+        assert portfolio_service.is_covered_call_trade_type("Portfolio CC") is True
 
     def test_case_insensitive_and_trimmed(self):
-        assert portfolio_service.is_covered_call_trade_type(" covered call ") is True
+        assert portfolio_service.is_covered_call_trade_type(" portfolio cc ") is True
 
     def test_default_trade_type_is_not_covered_call(self):
         assert portfolio_service.is_covered_call_trade_type("Trade") is False
 
     def test_csp_is_not_covered_call(self):
         assert portfolio_service.is_covered_call_trade_type("CSP") is False
+
+    def test_old_covered_call_name_no_longer_matches(self):
+        # Deliberate, not an oversight: renamed to "Portfolio CC" per an
+        # explicit user request, and the old string is NOT also accepted
+        # -- an already-saved "Covered Call" trade is meant to surface as
+        # a trade_type_mismatch (see TestGroupIntoTrades) rather than
+        # silently keep matching under its old name forever.
+        assert portfolio_service.is_covered_call_trade_type("Covered Call") is False
 
 
 class TestIsOtherTradeType:
@@ -242,8 +250,8 @@ class TestIsOtherTradeType:
     def test_csp_is_not_other(self):
         assert portfolio_service.is_other_trade_type("CSP") is False
 
-    def test_covered_call_is_not_other(self):
-        assert portfolio_service.is_other_trade_type(" Covered Call ") is False
+    def test_portfolio_cc_is_not_other(self):
+        assert portfolio_service.is_other_trade_type(" Portfolio CC ") is False
 
 
 class TestCspBreakevenPrice:
@@ -442,8 +450,10 @@ class TestClassifyTradeType:
         assert portfolio_service.classify_trade_type(legs) is None
 
     def test_covered_call_is_holding_plus_one_short_call(self):
+        # Always "Portfolio CC" -- there's no bare "CC", since the rule
+        # itself already requires a Holding leg to fire at all.
         legs = [self._holding(), self._position(OptionType.CE, -50)]
-        assert portfolio_service.classify_trade_type(legs) == "Covered Call"
+        assert portfolio_service.classify_trade_type(legs) == "Portfolio CC"
 
     def test_short_call_without_a_holding_is_not_covered_call(self):
         legs = [self._position(OptionType.CE, -50)]
@@ -581,7 +591,7 @@ class TestGroupIntoTrades:
         assert trades[0]["trade_type_mismatch"] is False
 
     def test_trade_type_mismatch_true_when_saved_type_disagrees_with_current_legs(self):
-        # Saved as CSP, but the legs now look like a Covered Call (a
+        # Saved as CSP, but the legs now look like a Portfolio CC (a
         # holding plus a short call) -- a genuine disagreement, flagged.
         legs = [
             self._leg(raw_name="X", broker="OtherBroker", symbol="X", leg_type="Holding", pnl=None, qty=100),

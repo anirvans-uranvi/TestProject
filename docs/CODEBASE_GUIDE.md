@@ -111,8 +111,8 @@ pages/
   8_My_Holdings.py                   Equity holdings, ETFs & Mutual Funds / Stocks split, identical columns
   9_My_Positions.py                  Per-leg F&O positions, split into Stock Options / Index Options / Others
   11_My_CSP.py                       Every position leg from a "CSP"-tagged Trade, + underlying LTP/1D/5D/20D
-  12_My_CC.py                        Every short-call leg from a "Covered Call"-tagged Trade, + covered stock's own P&L
-  13_My_Other_Trades.py               My Trades' own tables, filtered to neither "CSP" nor "Covered Call"
+  12_My_CC.py                        Every short-call leg from a "Portfolio CC"-tagged Trade, + covered stock's own P&L
+  13_My_Other_Trades.py               My Trades' own tables, filtered to neither "CSP" nor "Portfolio CC"
   10_Analyse_Trade.py                 One Trade's legs -- correct underlying/trade type, merge/split (hidden page)
 src/
   config.py                       Pydantic Settings, reads .env
@@ -1364,11 +1364,11 @@ file's own LTP -- see the Positions subsection near the end of this
 section for why), `pages/11_My_CSP.py` (every position leg from a
 "CSP"-tagged Trade, with the underlying's own LTP/1D/5D/20D change -- see
 its own subsection below), `pages/12_My_CC.py` (every short-call position
-leg from a "Covered Call"-tagged Trade, alongside the covered stock's own
+leg from a "Portfolio CC"-tagged Trade, alongside the covered stock's own
 Holding/Avg Price/LTP and a Combined P&L across both legs -- see its own
 subsection below, right after My CSP's), `pages/13_My_Other_Trades.py`
 (My Trades' own
-Stock/Index/Other tables, filtered to neither "CSP" nor "Covered Call" --
+Stock/Index/Other tables, filtered to neither "CSP" nor "Portfolio CC" --
 see its own subsection further below), and `pages/10_Analyse_Trade.py`
 (one Trade's
 detail, registered `visibility="hidden"` in `app.py` so it's reachable
@@ -2316,7 +2316,7 @@ Stock/Index Options (see the Positions subsection), but has no
 `bucket_override` equivalent -- there's no per-leg meta table for
 positions the way `portfolio_trade_meta` exists for trades.
 
-**Auto-classified `trade_type` (Holding/CSP/Covered Call/Strangle/Jade
+**Auto-classified `trade_type` (Holding/CSP/Portfolio CC/Strangle/Jade
 Lizard/Twisted Sister/IC)** -- until now `trade_type` was purely free text
 the user typed on Analyse Trade (default `"Trade"`, no strategy
 semantics at all). `portfolio_service.classify_trade_type(legs)` reads a
@@ -2332,8 +2332,12 @@ of them:
 - **CSP**: exactly one Position leg, a short PE, **and zero Holding
   legs** (a CSP is specifically *uncovered* -- a holding present rules it
   out, deliberately, even if everything else matches).
-- **Covered Call**: at least one Holding leg plus exactly one Position
-  leg, a short CE.
+- **Portfolio CC** (Covered Call): at least one Holding leg plus exactly
+  one Position leg, a short CE. Always returned as `"Portfolio CC"`,
+  unconditionally -- renamed from the old bare `"Covered Call"` per an
+  explicit user request, using the same "Portfolio " convention as the
+  four below, except there's no bare "CC" variant to fall back to: the
+  rule itself already requires a Holding leg to fire at all.
 - **Strangle**: exactly one PE and one CE Position leg, both short or
   both long (mismatched direction doesn't count); a Holding leg may or
   may not also be present.
@@ -2362,18 +2366,23 @@ positions` still decide *whether* one of these four fires, exactly as
 above, but the returned string becomes `"Portfolio Strangle"`,
 `"Portfolio Jade Lizard"`, `"Portfolio Twisted Sister"`, or `"Portfolio
 IC"` whenever at least one Holding leg is present alongside the matched
-Position legs. CSP and Covered Call never take this prefix -- CSP's own
-rule already requires zero Holding legs, and Covered Call's already
-requires at least one, so the prefix would be either impossible or
-redundant on those two. `is_other_trade_type`/`is_csp_trade_type`/
-`is_covered_call_trade_type` need no changes: a `"Portfolio Strangle"`/
-`"IC"` string still fails both the CSP and Covered Call checks, so it
-still correctly falls under "other" for any bucketing that distinguishes
-CSP/Covered Call from everything else. `trade_type_mismatch` (see
-`group_into_trades` below) picks this up for free too -- a trade saved
-as plain `"Strangle"` that later gains a holding leg will now detect as
-`"Portfolio Strangle"`, disagree with the saved label, and get flagged
-exactly like any other shape-changed trade.
+Position legs. CSP never takes this prefix -- its own rule already
+requires zero Holding legs. `is_other_trade_type`/`is_csp_trade_type`/
+`is_covered_call_trade_type` need no changes for these four: a
+`"Portfolio Strangle"`/`"IC"` string still fails both the CSP and
+Portfolio CC checks, so it still correctly falls under "other" for any
+bucketing that distinguishes CSP/Portfolio CC from everything else.
+`trade_type_mismatch` (see `group_into_trades` below) picks this up for
+free too -- a trade saved as plain `"Strangle"` that later gains a
+holding leg will now detect as `"Portfolio Strangle"`, disagree with the
+saved label, and get flagged exactly like any other shape-changed trade.
+Same mechanism covers the Covered Call rename itself: any trade already
+saved as the old `"Covered Call"` string will now disagree with the
+freshly-detected `"Portfolio CC"` and surface a `trade_type_mismatch` ⚠️
+until re-saved -- `is_covered_call_trade_type` deliberately does NOT
+also match the old string, so My CC (`pages/12_My_CC.py`) stops showing
+such a trade until it's relabeled, rather than silently accepting two
+spellings forever.
 
 Two call sites, deliberately asymmetric (confirmed with the user -- a
 trade the user has already typed a label for is never silently
@@ -2396,7 +2405,7 @@ overwritten):
    identical to today's untouched "Trade" default. Re-reading all brokers
    (not just the synced one) matters for real: a stock held via one
    broker with a call written via another still correctly classifies as
-   one Covered Call, not two unrelated single-broker fragments -- this
+   one Portfolio CC, not two unrelated single-broker fragments -- this
    was genuinely exercised back when Zerodha was also supported.
 2. **Already-classified trades are validated, not touched, at read time.**
    `group_into_trades` gained one more computed field per trade:
@@ -2510,7 +2519,7 @@ lookup.
 *position* leg belonging to a Trade whose `trade_type` is "CSP". There's
 no dedicated boolean/tag column for this anywhere in the schema; it
 deliberately reuses the same free-text `trade_type` field Analyse Trade
-already lets you rename to anything ("Covered Call", "Aug Iron Condor",
+already lets you rename to anything ("Portfolio CC", "Aug Iron Condor",
 ...) — "CSP" is just a convention this one page happens to filter on.
 `portfolio_service.is_csp_trade_type(trade_type)` does the match
 (`trade_type.strip().lower() == "csp"`, so "CSP"/"csp"/" CSP " all
@@ -2839,7 +2848,7 @@ default `"Trade"` label, a Strangle, a Jade Lizard/Twisted Sister, or any
 other free-text Trade Type all land here. This was a deliberate scope
 choice, not an oversight — My Other Trades' arbitrary multi-leg
 strategies don't have a single well-defined breakeven/credit/target
-shape the way a CSP or Covered Call does, so inventing one wasn't
+shape the way a CSP or Portfolio CC does, so inventing one wasn't
 requested; it stays at My Trades' own summary-table depth (per-trade
 Total P&L, not per-leg breakeven/target/stop-loss) until a real formula
 is asked for.
@@ -2847,13 +2856,13 @@ is asked for.
 **My CC (`pages/12_My_CC.py`)** — like My CSP, this renders one row per
 short-**call** Position leg, across the same Stock Trades/Index
 Trades/Other Trades bucket split, but adds the covered *stock's* own
-numbers alongside the option leg's, since a Covered Call's economics
+numbers alongside the option leg's, since a covered call's economics
 can't be judged from the option alone: `Holding`/`Avg Stock Price`/
 `Stock LTP` are read from that trade's own Holding leg(s) (summed
 qty, investment-weighted avg price, in case the same underlying is
 split across more than one lot/broker within one trade — `None`/"—"
 across the board if the trade has no Holding leg, e.g. a naked short
-call someone mislabeled "Covered Call"). `stock_investment` (`Holding *
+call someone mislabeled "Portfolio CC"). `stock_investment` (`Holding *
 Avg Stock Price`) is computed once per row and reused as the denominator
 for three separate percentages: `Stock P&L` (`(Stock LTP - Avg Stock
 Price) * Holding`, shown as a % of `stock_investment` — a ✅ once it

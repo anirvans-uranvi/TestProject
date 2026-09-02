@@ -40,8 +40,8 @@ render_disclaimer()
 render_stock_refresh_button(client, user_id, user_settings.data_provider)
 render_portfolio_refresh_button(client, user_id, user_settings.data_provider)
 st.caption(
-    'Every short call leg from a Trade whose Trade Type is "Covered Call". Go to My Trades, select a trade, '
-    'click "Analyse Trade", and rename its Trade Type to "Covered Call" to have it show up here. Set each '
+    'Every short call leg from a Trade whose Trade Type is "Portfolio CC". Go to My Trades, select a trade, '
+    'click "Analyse Trade", and rename its Trade Type to "Portfolio CC" to have it show up here. Set each '
     'leg\'s Trade Date on that same "Analyse Trade" page to unlock Target Option P&L; Stop Loss ratchets up '
     "automatically as Option P&L% improves and is saved on every visit. Target Option P&L changes every day "
     "to reflect whether there has been higher-than-average decay in the option premium, but it never crosses "
@@ -82,7 +82,7 @@ try:
 except APIError:
     # portfolio_trade_meta doesn't exist yet (migration 0021) -- degrade to
     # "no corrected underlying label / custom trade type saved yet", which
-    # just means nothing is tagged "Covered Call".
+    # just means nothing is tagged "Portfolio CC".
     saved_trade_meta = []
 
 try:

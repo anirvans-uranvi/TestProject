@@ -51,9 +51,9 @@ pages/                  Streamlit multipage app (each still its own script,
                               "My Portfolio"
   11_My_CSP.py                Every Trade with Trade Type "CSP" -- one position leg per row, with underlying
                               LTP + 1D/5D/20D change -- sidebar label "CSP", nested under "My Trades"
-  12_My_CC.py                 Every short-call leg from a "Covered Call"-tagged Trade, + covered stock's own
+  12_My_CC.py                 Every short-call leg from a "Portfolio CC"-tagged Trade, + covered stock's own
                               Holding/Avg Price/LTP and Combined P&L -- sidebar label "CC", nested under "My Trades"
-  13_My_Other_Trades.py       Every Trade from My Trades whose Trade Type is neither "CSP" nor "Covered Call" --
+  13_My_Other_Trades.py       Every Trade from My Trades whose Trade Type is neither "CSP" nor "Portfolio CC" --
                               sidebar label "Other Trades", nested under "My Trades"
   10_Analyse_Trade.py          One Trade's legs -- correct underlying, rename trade type, merge/split
                               (hidden from the sidebar -- reached only via All Trades'/CC's/Other Trades'
@@ -876,10 +876,10 @@ My Other Trades stays at My Trades' own per-trade summary depth (that
 richer per-leg breakdown doesn't generalize to an arbitrary multi-leg
 strategy, see My Other Trades below) and keeps the same Stock/Index/Other
 bucket tables My Trades uses. A Trade lands on My CC only once its Trade
-Type is renamed to "Covered Call" on Analyse Trade (or it was
+Type is renamed to "Portfolio CC" on Analyse Trade (or it was
 auto-classified as one, see "Auto-classifying a new Trade" below), and on
 My Other Trades by default (including the untouched "Trade" label,
-and any auto-classified type other than CSP/Covered Call -- see "Trade
+and any auto-classified type other than CSP/Portfolio CC -- see "Trade
 Type is auto-classified for a new trade" under My Trades below).
 
 ### Connecting a broker (Settings > Data Provider)
@@ -1238,7 +1238,7 @@ appears as its own sidebar link). There you can:
   text, not constrained to a known symbol or a fixed list -- e.g.
   correcting a resolved "Tata Motors" to the real post-demerger
   underlying "Tata Motors Passenger Vehicle", or renaming "Trade" to
-  something meaningful like "Covered Call" or "Aug Iron Condor". Saved
+  something meaningful like "Portfolio CC" or "Aug Iron Condor". Saved
   to `portfolio_trade_meta` (migration `0021`), keyed by
   `(portfolio_name, trade_id)` -- a different grain from
   `portfolio_trade_groups`' per-*leg* key, since a label/type applies to
@@ -1247,21 +1247,23 @@ appears as its own sidebar link). There you can:
   **Trade Type is auto-classified for a new trade, on Portfolio
   Refresh.** `portfolio_service.classify_trade_type` reads a trade's legs
   (option type, buy/sell direction, whether a stock holding is present)
-  and detects **Holding**, **CSP**, **Covered Call**, **Strangle**,
-  **Jade Lizard**, **Twisted Sister**, or **IC** (Iron Condor) -- e.g. one
-  or more stock holdings and no option/futures legs at all -> Holding;
-  one short put with no holding -> CSP; a
-  holding plus one short call -> Covered Call; a short put + short call
+  and detects **Holding**, **CSP**, **Portfolio CC** (Covered Call),
+  **Strangle**, **Jade Lizard**, **Twisted Sister**, or **IC** (Iron
+  Condor) -- e.g. one or more stock holdings and no option/futures legs
+  at all -> Holding; one short put with no holding -> CSP; a
+  holding plus one short call -> Portfolio CC; a short put + short call
   (same direction, both short or both long) -> Strangle; 3+ legs with
   exactly one bought leg (a bought call -> Jade Lizard, a bought put ->
-  Twisted Sister) -> that; exactly 4 legs, 2 bought and 2 sold -> IC. For
-  the last four, a stock holding present alongside the option legs
-  doesn't change which shape is detected, but does get flagged in the
-  name -- **"Portfolio Strangle"**, **"Portfolio Jade Lizard"**,
-  **"Portfolio Twisted Sister"**, **"Portfolio IC"** -- since the holding
-  changes the position's actual risk profile even though the option legs
-  alone still fit the same shape (CSP/Covered Call never take this prefix
-  -- one already rules out a holding, the other already requires one).
+  Twisted Sister) -> that; exactly 4 legs, 2 bought and 2 sold -> IC.
+  Portfolio CC is *always* "Portfolio "-prefixed -- there's no bare "CC",
+  since the rule already requires a holding to fire at all. For the other
+  four (Strangle/Jade Lizard/Twisted Sister/IC), a stock holding present
+  alongside the option legs doesn't change which shape is detected, but
+  does get flagged in the name -- **"Portfolio Strangle"**, **"Portfolio
+  Jade Lizard"**, **"Portfolio Twisted Sister"**, **"Portfolio IC"** --
+  since the holding changes the position's actual risk profile even
+  though the option legs alone still fit the same shape (CSP never takes
+  this prefix -- its own rule already rules a holding out).
   Only ever runs for a trade with **no** saved
   Trade Type yet -- an already-classified trade's own label is never
   overwritten automatically. If that trade's current legs later stop
@@ -1415,7 +1417,7 @@ shows a plain caption rather than an empty table.
 
 ### My CC (`pages/12_My_CC.py`)
 
-Every Trade whose Trade Type is exactly "Covered Call"
+Every Trade whose Trade Type is exactly "Portfolio CC"
 (`is_covered_call_trade_type`, case-insensitive/trimmed) -- one row per
 short-**call** position leg, same Stock/Index/Other bucket split as My
 Trades. The option leg's own columns mirror My CSP: **CC Expiry**
@@ -1430,7 +1432,7 @@ stock-side numbers below -- none of these three are actually put-specific
 despite the `csp_` name; they're just premium-collected/time-decay-target/
 ratcheting-stop math, equally valid for a short call.
 
-A Covered Call's economics can't be judged from the option alone, so
+A covered call's economics can't be judged from the option alone, so
 each row also carries the covered stock's own numbers, read from that
 trade's own Holding leg(s) (summed across lots/brokers if the same
 underlying is split more than one way within a trade):
@@ -1453,7 +1455,7 @@ underlying is split more than one way within a trade):
   option leg are priced.
 
 All stock-side columns show "—"/blank if the trade has no Holding leg to
-read (e.g. a naked short call mislabeled "Covered Call").
+read (e.g. a naked short call mislabeled "Portfolio CC").
 
 ### My Other Trades (`pages/13_My_Other_Trades.py`)
 
