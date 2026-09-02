@@ -1248,16 +1248,17 @@ appears as its own sidebar link). There you can:
   Refresh.** `portfolio_service.classify_trade_type` reads a trade's legs
   (option type, buy/sell direction, whether a stock holding is present)
   and detects **Holding**, **CSP**, **Covered Call**, **Strangle**,
-  **Jade Lizard**, or **Twisted Sister** -- e.g. one or more stock
-  holdings and no option/futures legs at all -> Holding; one short put
-  with no holding -> CSP; a
+  **Jade Lizard**, **Twisted Sister**, or **IC** (Iron Condor) -- e.g. one
+  or more stock holdings and no option/futures legs at all -> Holding;
+  one short put with no holding -> CSP; a
   holding plus one short call -> Covered Call; a short put + short call
   (same direction, both short or both long) -> Strangle; 3+ legs with
   exactly one bought leg (a bought call -> Jade Lizard, a bought put ->
-  Twisted Sister) -> that. For the last three, a stock holding present
-  alongside the option legs doesn't change which shape is detected, but
-  does get flagged in the name -- **"Portfolio Strangle"**, **"Portfolio
-  Jade Lizard"**, **"Portfolio Twisted Sister"** -- since the holding
+  Twisted Sister) -> that; exactly 4 legs, 2 bought and 2 sold -> IC. For
+  the last four, a stock holding present alongside the option legs
+  doesn't change which shape is detected, but does get flagged in the
+  name -- **"Portfolio Strangle"**, **"Portfolio Jade Lizard"**,
+  **"Portfolio Twisted Sister"**, **"Portfolio IC"** -- since the holding
   changes the position's actual risk profile even though the option legs
   alone still fit the same shape (CSP/Covered Call never take this prefix
   -- one already rules out a holding, the other already requires one).

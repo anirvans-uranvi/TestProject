@@ -2317,7 +2317,7 @@ Stock/Index Options (see the Positions subsection), but has no
 positions the way `portfolio_trade_meta` exists for trades.
 
 **Auto-classified `trade_type` (Holding/CSP/Covered Call/Strangle/Jade
-Lizard/Twisted Sister)** -- until now `trade_type` was purely free text
+Lizard/Twisted Sister/IC)** -- until now `trade_type` was purely free text
 the user typed on Analyse Trade (default `"Trade"`, no strategy
 semantics at all). `portfolio_service.classify_trade_type(legs)` reads a
 trade's current legs (`leg_type`, `option_type`, signed `qty`) and
@@ -2343,30 +2343,37 @@ of them:
   (confirmed with the user: this is the only way to tell the two apart
   from leg shape alone, since both are otherwise identical "1 long + 2
   short" structures).
+- **IC (Iron Condor)**: exactly four Position legs, two long and two
+  short -- a pure leg-count-and-direction rule, deliberately with no
+  separate PE/CE-split requirement the way Strangle has one (confirmed
+  with the user: "2 buy legs and 2 sell legs" was the literal spec, so a
+  same-side 2-long-2-short combination also matches IC even though a
+  textbook Iron Condor is specifically two verticals, one on each side).
 - Any Position leg with `option_type is None` (undecoded contract, or a
   futures leg) present anywhere in the trade -> bails to `None` rather
   than guessing on incomplete information.
 
-**"Portfolio " prefix for these last three when a Holding is present**
+**"Portfolio " prefix for these last four when a Holding is present**
 (added per an explicit user request -- a Strangle/Jade Lizard/Twisted
-Sister sitting alongside a stock holding is a materially different risk
-profile from the same option legs on their own, even though the leg
+Sister/IC sitting alongside a stock holding is a materially different
+risk profile from the same option legs on their own, even though the leg
 *shape* that triggers detection is identical either way): `holdings and
-positions` still decide *whether* one of these three fires, exactly as
+positions` still decide *whether* one of these four fires, exactly as
 above, but the returned string becomes `"Portfolio Strangle"`,
-`"Portfolio Jade Lizard"`, or `"Portfolio Twisted Sister"` whenever at
-least one Holding leg is present alongside the matched Position legs.
-CSP and Covered Call never take this prefix -- CSP's own rule already
-requires zero Holding legs, and Covered Call's already requires at least
-one, so the prefix would be either impossible or redundant on those two.
-`is_other_trade_type`/`is_csp_trade_type`/`is_covered_call_trade_type`
-need no changes: a `"Portfolio Strangle"` string still fails both the
-CSP and Covered Call checks, so it still correctly falls under "other"
-for any bucketing that distinguishes CSP/Covered Call from everything
-else. `trade_type_mismatch` (see `group_into_trades` below) picks this
-up for free too -- a trade saved as plain `"Strangle"` that later gains a
-holding leg will now detect as `"Portfolio Strangle"`, disagree with the
-saved label, and get flagged exactly like any other shape-changed trade.
+`"Portfolio Jade Lizard"`, `"Portfolio Twisted Sister"`, or `"Portfolio
+IC"` whenever at least one Holding leg is present alongside the matched
+Position legs. CSP and Covered Call never take this prefix -- CSP's own
+rule already requires zero Holding legs, and Covered Call's already
+requires at least one, so the prefix would be either impossible or
+redundant on those two. `is_other_trade_type`/`is_csp_trade_type`/
+`is_covered_call_trade_type` need no changes: a `"Portfolio Strangle"`/
+`"IC"` string still fails both the CSP and Covered Call checks, so it
+still correctly falls under "other" for any bucketing that distinguishes
+CSP/Covered Call from everything else. `trade_type_mismatch` (see
+`group_into_trades` below) picks this up for free too -- a trade saved
+as plain `"Strangle"` that later gains a holding leg will now detect as
+`"Portfolio Strangle"`, disagree with the saved label, and get flagged
+exactly like any other shape-changed trade.
 
 Two call sites, deliberately asymmetric (confirmed with the user -- a
 trade the user has already typed a label for is never silently

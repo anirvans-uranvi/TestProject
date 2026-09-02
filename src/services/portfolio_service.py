@@ -603,15 +603,19 @@ def classify_trade_type(legs: list[dict]) -> str | None:
       leg's side decides which: a bought CE -> Jade Lizard (short put +
       short call + a further-OTM long call caps upside risk); a bought PE
       -> Twisted Sister (the put-side mirror).
+    - **IC** (Iron Condor): exactly four Position legs, two long and two
+      short (confirmed with the user: this is a leg-count rule only --
+      it doesn't separately require a specific PE/CE split, unlike
+      Strangle above).
 
-    For these last three, a Holding leg being present doesn't change
+    For these last four, a Holding leg being present doesn't change
     which strategy is detected, but it does get flagged in the name: a
-    Strangle/Jade Lizard/Twisted Sister alongside a stock holding is
-    prefixed "Portfolio " (e.g. "Portfolio Strangle") since the holding
-    changes the position's actual risk profile even though the option
-    legs alone still fit the same shape. CSP/Covered Call already imply
-    (respectively rule out/require) a holding, so neither ever takes this
-    prefix."""
+    Strangle/Jade Lizard/Twisted Sister/IC alongside a stock holding is
+    prefixed "Portfolio " (e.g. "Portfolio Strangle", "Portfolio IC")
+    since the holding changes the position's actual risk profile even
+    though the option legs alone still fit the same shape. CSP/Covered
+    Call already imply (respectively rule out/require) a holding, so
+    neither ever takes this prefix."""
     holdings = [leg for leg in legs if leg.get("leg_type") == "Holding"]
     positions = [leg for leg in legs if leg.get("leg_type") == "Position"]
     if holdings and not positions:
@@ -638,6 +642,8 @@ def classify_trade_type(legs: list[dict]) -> str | None:
         short_legs = [leg for leg in positions if leg["qty"] < 0]
         if len(long_legs) == 1 and len(short_legs) == len(positions) - 1:
             return f"{prefix}Jade Lizard" if long_legs[0]["option_type"] == OptionType.CE else f"{prefix}Twisted Sister"
+        if len(positions) == 4 and len(long_legs) == 2 and len(short_legs) == 2:
+            return f"{prefix}IC"
 
     return None
 

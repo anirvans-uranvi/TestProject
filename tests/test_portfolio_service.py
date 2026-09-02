@@ -501,6 +501,34 @@ class TestClassifyTradeType:
         ]
         assert portfolio_service.classify_trade_type(legs) == "Portfolio Twisted Sister"
 
+    def test_ic_is_two_long_and_two_short_legs_no_holding(self):
+        legs = [
+            self._position(OptionType.PE, 25),
+            self._position(OptionType.PE, -75),
+            self._position(OptionType.CE, -50),
+            self._position(OptionType.CE, 100),
+        ]
+        assert portfolio_service.classify_trade_type(legs) == "IC"
+
+    def test_ic_with_a_holding_present_is_prefixed_portfolio(self):
+        legs = [
+            self._holding(),
+            self._position(OptionType.PE, 25),
+            self._position(OptionType.PE, -75),
+            self._position(OptionType.CE, -50),
+            self._position(OptionType.CE, 100),
+        ]
+        assert portfolio_service.classify_trade_type(legs) == "Portfolio IC"
+
+    def test_three_long_one_short_among_four_is_not_ic(self):
+        legs = [
+            self._position(OptionType.PE, 25),
+            self._position(OptionType.PE, 75),
+            self._position(OptionType.CE, 50),
+            self._position(OptionType.CE, -100),
+        ]
+        assert portfolio_service.classify_trade_type(legs) is None
+
     def test_jade_lizard_with_more_than_three_legs(self):
         legs = [
             self._position(OptionType.CE, 25),
