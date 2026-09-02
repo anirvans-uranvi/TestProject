@@ -1247,8 +1247,10 @@ appears as its own sidebar link). There you can:
   **Trade Type is auto-classified for a new trade, on Portfolio
   Refresh.** `portfolio_service.classify_trade_type` reads a trade's legs
   (option type, buy/sell direction, whether a stock holding is present)
-  and detects **CSP**, **Covered Call**, **Strangle**, **Jade Lizard**, or
-  **Twisted Sister** -- e.g. one short put with no holding -> CSP; a
+  and detects **Holding**, **CSP**, **Covered Call**, **Strangle**,
+  **Jade Lizard**, or **Twisted Sister** -- e.g. one or more stock
+  holdings and no option/futures legs at all -> Holding; one short put
+  with no holding -> CSP; a
   holding plus one short call -> Covered Call; a short put + short call
   (same direction, both short or both long) -> Strangle; 3+ legs with
   exactly one bought leg (a bought call -> Jade Lizard, a bought put ->

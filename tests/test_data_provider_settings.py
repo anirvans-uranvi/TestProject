@@ -78,13 +78,38 @@ class TestAutoClassifyNewTrades:
 
         assert calls == []
 
-    def test_unclassifiable_new_trade_writes_nothing(self, monkeypatch):
-        # A plain stock holding with no options -- classify_trade_type
-        # returns None, so nothing is written (stays default "Trade").
+    def test_plain_stock_holding_gets_classified_as_holding(self, monkeypatch):
+        # A stock holding with no options/futures at all -- now a
+        # recognized shape ("Holding"), not left as the "Trade" default.
         monkeypatch.setattr(
             data_provider_settings.portfolio_repo, "list_holdings", lambda client, user_id: [_holding(raw_name="Y", symbol="Y")]
         )
         monkeypatch.setattr(data_provider_settings.portfolio_repo, "list_positions", lambda client, user_id: [])
+        monkeypatch.setattr(data_provider_settings.portfolio_repo, "list_trade_groups", lambda client, user_id: [])
+        monkeypatch.setattr(data_provider_settings.portfolio_repo, "list_trade_meta", lambda client, user_id: [])
+        saved = {}
+        monkeypatch.setattr(
+            data_provider_settings.portfolio_repo,
+            "set_trade_meta",
+            lambda client, user_id, portfolio_name, trade_id, *, underlying_label, trade_type: saved.update(
+                trade_id=trade_id, trade_type=trade_type
+            ),
+        )
+
+        data_provider_settings._auto_classify_new_trades(client=object(), user_id="u1", portfolio_name="My Portfolio")
+
+        assert saved == {"trade_id": "Y", "trade_type": "Holding"}
+
+    def test_unclassifiable_new_trade_writes_nothing(self, monkeypatch):
+        # A lone undecoded/futures Position leg (option_type unresolved) --
+        # classify_trade_type returns None, so nothing is written (stays
+        # default "Trade").
+        monkeypatch.setattr(data_provider_settings.portfolio_repo, "list_holdings", lambda client, user_id: [])
+        monkeypatch.setattr(
+            data_provider_settings.portfolio_repo,
+            "list_positions",
+            lambda client, user_id: [_position(raw_name="Y-FUT", symbol="Y", option_type=None, qty=-1)],
+        )
         monkeypatch.setattr(data_provider_settings.portfolio_repo, "list_trade_groups", lambda client, user_id: [])
         monkeypatch.setattr(data_provider_settings.portfolio_repo, "list_trade_meta", lambda client, user_id: [])
         calls = []

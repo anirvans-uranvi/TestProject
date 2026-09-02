@@ -522,8 +522,12 @@ class TestClassifyTradeType:
         legs = [self._position(OptionType.PE, -75), self._leg(leg_type="Position", option_type=None, qty=-1)]
         assert portfolio_service.classify_trade_type(legs) is None
 
-    def test_plain_holding_only_is_none(self):
-        assert portfolio_service.classify_trade_type([self._holding()]) is None
+    def test_plain_holding_only_is_holding(self):
+        assert portfolio_service.classify_trade_type([self._holding()]) == "Holding"
+
+    def test_multiple_holdings_no_positions_is_still_holding(self):
+        # e.g. the same stock held across two brokers, merged into one trade.
+        assert portfolio_service.classify_trade_type([self._holding(), self._holding()]) == "Holding"
 
     def test_empty_legs_is_none(self):
         assert portfolio_service.classify_trade_type([]) is None
@@ -567,11 +571,14 @@ class TestGroupIntoTrades:
 
     def test_trade_type_mismatch_false_when_shape_matches_no_known_strategy(self):
         # A trade meta row exists (user manually typed a custom label) but
-        # the legs don't match any known options shape at all --
-        # classify_trade_type returns None, which must NOT count as a
+        # the legs don't match any known shape at all -- a lone
+        # undecoded/futures Position leg (option_type unresolved) makes
+        # classify_trade_type return None, which must NOT count as a
         # mismatch (a custom label like "Earnings Play" shouldn't be
         # flagged just because it isn't a recognized strategy).
-        legs = [self._leg(raw_name="X", broker="OtherBroker", symbol="X", leg_type="Holding", pnl=None, qty=100)]
+        legs = [
+            self._leg(raw_name="X-FUT", broker="OtherBroker", symbol="X", leg_type="Position", pnl=None, option_type=None, qty=-1)
+        ]
         trade_meta = {"X": {"trade_type": "Earnings Play"}}
         trades = portfolio_service.group_into_trades(legs, overrides={}, trade_meta=trade_meta, company_type_by_symbol={})
         assert trades[0]["trade_type_mismatch"] is False

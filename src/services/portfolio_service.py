@@ -588,6 +588,8 @@ def classify_trade_type(legs: list[dict]) -> str | None:
     option_type can't be read (an undecoded contract or a futures leg) --
     better to not guess than to misclassify on incomplete information.
 
+    - **Holding**: one or more Holding legs and zero Position legs at all
+      -- just a stock/ETF holding, no options (or futures) involved.
     - **CSP**: exactly one Position leg, a short (`qty < 0`) PE, and no
       Holding legs at all (a CSP is specifically *uncovered* by a stock
       position -- that's what "cash-secured" instead of "covered" means).
@@ -612,6 +614,8 @@ def classify_trade_type(legs: list[dict]) -> str | None:
     prefix."""
     holdings = [leg for leg in legs if leg.get("leg_type") == "Holding"]
     positions = [leg for leg in legs if leg.get("leg_type") == "Position"]
+    if holdings and not positions:
+        return "Holding"
     if any(leg.get("option_type") is None for leg in positions):
         return None
 

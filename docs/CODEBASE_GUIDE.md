@@ -2316,12 +2316,19 @@ Stock/Index Options (see the Positions subsection), but has no
 `bucket_override` equivalent -- there's no per-leg meta table for
 positions the way `portfolio_trade_meta` exists for trades.
 
-**Auto-classified `trade_type` (CSP/Covered Call/Strangle/Jade Lizard/
-Twisted Sister)** -- until now `trade_type` was purely free text the user
-typed on Analyse Trade (default `"Trade"`, no strategy semantics at all).
-`portfolio_service.classify_trade_type(legs)` reads a trade's current legs
-(`leg_type`, `option_type`, signed `qty`) and returns one of those five
-strings, or `None` if the shape doesn't match any of them:
+**Auto-classified `trade_type` (Holding/CSP/Covered Call/Strangle/Jade
+Lizard/Twisted Sister)** -- until now `trade_type` was purely free text
+the user typed on Analyse Trade (default `"Trade"`, no strategy
+semantics at all). `portfolio_service.classify_trade_type(legs)` reads a
+trade's current legs (`leg_type`, `option_type`, signed `qty`) and
+returns one of those strings, or `None` if the shape doesn't match any
+of them:
+- **Holding**: one or more Holding legs and **zero Position legs** --
+  just a stock/ETF holding, no options (or futures) involved at all.
+  Added per an explicit user request, distinct from the plain `"Trade"`
+  default a trade with no saved meta row falls back to display-side --
+  this one is actually detected and auto-saved, same as every other
+  strategy below.
 - **CSP**: exactly one Position leg, a short PE, **and zero Holding
   legs** (a CSP is specifically *uncovered* -- a holding present rules it
   out, deliberately, even if everything else matches).
