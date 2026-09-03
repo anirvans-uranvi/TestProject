@@ -970,8 +970,9 @@ hours, syncing is always a manual click -- Settings warns once a saved
 token is more than 10 hours old (well ahead of the ~24-hour expiry, so
 there's a wide safe window to renew even if you don't see the app again
 for a while -- e.g. on mobile), and a **"Renew Token (+24h)"** button
-sits right there for exactly that moment: it calls Dhan's own `POST
-/v2/RenewToken` (`DhanProvider.renew_access_token`) to extend the
+sits right there for exactly that moment: it calls Dhan's own `GET
+/v2/RenewToken` (`DhanProvider.renew_access_token` -- confirmed live to
+need a GET, not a POST; see docs/CODEBASE_GUIDE.md) to extend the
 already-saved token in place, from any device, with no `web.dhan.co`
 visit needed -- the point being a laptop-free fix when you're on mobile
 and the token expires away from a place you can regenerate one. It only

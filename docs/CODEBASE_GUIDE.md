@@ -2090,7 +2090,7 @@ old enough to likely be expired.
 **Renewing an active token in place ("Renew Token (+24h)").** Added
 after a real pain point: on mobile and away from a laptop, an expired
 token meant the app was simply unusable until you could reach
-`web.dhan.co` and paste a fresh one. Dhan's own `POST /v2/RenewToken`
+`web.dhan.co` and paste a fresh one. Dhan's own `GET /v2/RenewToken`
 (`DhanProvider.renew_access_token`, `_renew_dhan_token` in
 `src/utils/data_provider_settings.py`) extends an **already-active**
 token by another 24 hours in place — no `web.dhan.co` visit, works from
@@ -2098,13 +2098,31 @@ any device the app itself is reachable from. Two things make it safe to
 build on:
 
 - It reuses the exact same bearer token already sitting in
-  `broker_connections.access_token` — the renewal call just posts that
-  token back with a `dhanClientId` header (camelCase; this is the one
-  Dhan v2 endpoint that wants that header name instead of the
+  `broker_connections.access_token` — the renewal call just re-sends
+  that token back with a `dhanClientId` header (camelCase; this is the
+  one Dhan v2 endpoint that wants that header name instead of the
   `client-id` every other call in this class uses) and gets a new token
   string back (`accessToken` in the response body) to overwrite it with
   via the same `upsert_broker_connection` path Save & Sync uses. No new
   credential type, no new risk surface beyond what already exists.
+
+  **A real bug found live, right after shipping this**: the first
+  version called `httpx.post`, and every renewal attempt failed with a
+  generic Dhan 400 — `{"errorType": "Input_Exception", "errorCode":
+  "DH-905", "errorMessage": "Missing required fields, bad values for
+  parameters etc."}` — with nothing in that message pointing at the HTTP
+  method itself (not a 401, not a 405). Dhan's own docs describe this
+  endpoint as taking no request body, which reads as method-agnostic
+  until checked against a reference implementation: Dhan's official
+  `dhanhq` Python client's `DhanLogin.renew_token`
+  (`src/dhanhq/auth.py`) calls `requests.get(url, headers=headers)` —
+  same two headers, no body, but **GET**, not POST. Switched to
+  `httpx.get` and it started working. A reminder that "no request body"
+  in a doc does not imply "any HTTP method" — worth checking an
+  official client library's actual behavior before trusting a
+  docs-only description of a REST endpoint, especially one Dhan's own
+  docs don't fully specify (this module's long-standing "verify against
+  a live account" caveat, borne out again here).
 - It's documented to work **only on a token that hasn't expired yet** —
   renewing an already-expired one 401s exactly like a sync attempt
   would, mapped to the same `DhanAuthError` → "paste a fresh one below"

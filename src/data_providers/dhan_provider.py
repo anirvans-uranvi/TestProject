@@ -641,7 +641,7 @@ class DhanProvider(PriceDataProvider):
         return self._request("GET", f"{BASE_URL}/positions") or []
 
     def renew_access_token(self) -> str:
-        """POST /v2/RenewToken -- extends a still-active Dhan Web access
+        """GET /v2/RenewToken -- extends a still-active Dhan Web access
         token by another 24 hours, without the user visiting web.dhan.co
         again (the pain point on mobile, away from a laptop). Per Dhan's
         docs this ONLY works on a token that hasn't expired yet -- calling
@@ -653,6 +653,19 @@ class DhanProvider(PriceDataProvider):
         through Dhan's separate API-key/secret flow, which this app
         doesn't use anyway.
 
+        **Confirmed live: this must be a GET, not a POST** -- an earlier
+        version of this method used `httpx.post`, which Dhan rejected
+        with a generic `DH-905 "Missing required fields, bad values for
+        parameters etc."` 400 (not a 401/405, so nothing about the error
+        itself pointed at the HTTP method) every single time, even with
+        headers otherwise identical to what's below. Cross-checked
+        against Dhan's own official `dhanhq` Python client
+        (`DhanLogin.renew_token`, `src/dhanhq/auth.py`), which calls
+        `requests.get(url, headers=headers)` -- no body, no query params,
+        same two headers -- and that matches Dhan's docs' own "no request
+        body" note for this endpoint, which (wrongly) reads as
+        method-agnostic until you see the reference implementation.
+
         Uses its own header dict rather than self._headers: this endpoint
         is documented to want `dhanClientId` (camelCase), not the
         `client-id` header every other v2 endpoint in this class uses.
@@ -663,13 +676,12 @@ class DhanProvider(PriceDataProvider):
         on this further, same caveat as the rest of this module."""
         _throttle()
         headers = {
-            "Content-Type": "application/json",
             "Accept": "application/json",
             "access-token": self._access_token,
             "dhanClientId": self._client_id,
         }
         try:
-            resp = httpx.post(f"{BASE_URL}/RenewToken", headers=headers, timeout=self._timeout)
+            resp = httpx.get(f"{BASE_URL}/RenewToken", headers=headers, timeout=self._timeout)
         except httpx.HTTPError as exc:
             raise ProviderError(f"Dhan token renewal request failed: {exc}") from exc
         if resp.status_code == 401:
