@@ -670,10 +670,15 @@ class DhanProvider(PriceDataProvider):
         is documented to want `dhanClientId` (camelCase), not the
         `client-id` header every other v2 endpoint in this class uses.
 
-        Response shape isn't fully documented; per DhanHQ's own Python
-        client the body carries `accessToken` (plus `expiryTime`,
-        `dhanClientId`, etc.) -- verify against a live call before relying
-        on this further, same caveat as the rest of this module."""
+        **Response shape confirmed live** (not what the docs/third-party
+        write-ups implied): `{"createTime", "expiryTime", "token"}` --
+        the new token is under `token`, NOT `accessToken` like
+        DhanHQ-py's own docstrings/other Dhan endpoints suggested. A
+        first version of this method trusted that unverified `accessToken`
+        guess and always raised "no accessToken" despite Dhan returning a
+        real 200 with a real token under a different key -- fixed by
+        checking `token` first, falling back to `accessToken` in case a
+        future/different account ever returns the other shape."""
         _throttle()
         headers = {
             "Accept": "application/json",
@@ -688,9 +693,10 @@ class DhanProvider(PriceDataProvider):
             raise DhanAuthError(f"Dhan access token rejected (401): {resp.text[:200]}")
         if resp.status_code >= 400:
             raise ProviderError(f"Dhan token renewal error {resp.status_code}: {resp.text[:200]}")
-        new_token = (resp.json() or {}).get("accessToken")
+        body = resp.json() or {}
+        new_token = body.get("token") or body.get("accessToken")
         if not new_token:
-            raise ProviderError(f"Dhan token renewal response had no accessToken: {resp.text[:200]}")
+            raise ProviderError(f"Dhan token renewal response had no token: {resp.text[:200]}")
         return new_token
 
     def get_trade_history(self, from_date: date, to_date: date, max_pages: int = 500) -> list[dict]:

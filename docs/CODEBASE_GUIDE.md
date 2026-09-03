@@ -2102,27 +2102,36 @@ build on:
   that token back with a `dhanClientId` header (camelCase; this is the
   one Dhan v2 endpoint that wants that header name instead of the
   `client-id` every other call in this class uses) and gets a new token
-  string back (`accessToken` in the response body) to overwrite it with
-  via the same `upsert_broker_connection` path Save & Sync uses. No new
-  credential type, no new risk surface beyond what already exists.
+  string back to overwrite it with via the same `upsert_broker_connection`
+  path Save & Sync uses. No new credential type, no new risk surface
+  beyond what already exists.
 
-  **A real bug found live, right after shipping this**: the first
-  version called `httpx.post`, and every renewal attempt failed with a
-  generic Dhan 400 — `{"errorType": "Input_Exception", "errorCode":
-  "DH-905", "errorMessage": "Missing required fields, bad values for
-  parameters etc."}` — with nothing in that message pointing at the HTTP
-  method itself (not a 401, not a 405). Dhan's own docs describe this
-  endpoint as taking no request body, which reads as method-agnostic
-  until checked against a reference implementation: Dhan's official
-  `dhanhq` Python client's `DhanLogin.renew_token`
-  (`src/dhanhq/auth.py`) calls `requests.get(url, headers=headers)` —
-  same two headers, no body, but **GET**, not POST. Switched to
-  `httpx.get` and it started working. A reminder that "no request body"
-  in a doc does not imply "any HTTP method" — worth checking an
-  official client library's actual behavior before trusting a
-  docs-only description of a REST endpoint, especially one Dhan's own
-  docs don't fully specify (this module's long-standing "verify against
-  a live account" caveat, borne out again here).
+  **Two real bugs found live, in sequence, right after shipping this**:
+
+  1. The first version called `httpx.post`, and every renewal attempt
+     failed with a generic Dhan 400 — `{"errorType": "Input_Exception",
+     "errorCode": "DH-905", "errorMessage": "Missing required fields,
+     bad values for parameters etc."}` — with nothing in that message
+     pointing at the HTTP method itself (not a 401, not a 405). Dhan's
+     own docs describe this endpoint as taking no request body, which
+     reads as method-agnostic until checked against a reference
+     implementation: Dhan's official `dhanhq` Python client's
+     `DhanLogin.renew_token` (`src/dhanhq/auth.py`) calls
+     `requests.get(url, headers=headers)` — same two headers, no body,
+     but **GET**, not POST. Switched to `httpx.get` and Dhan started
+     returning real 200s.
+  2. Those 200s still failed with "no accessToken", because the actual
+     response body is `{"createTime", "expiryTime", "token"}` —
+     confirmed live — **not** `accessToken`, despite that being the field
+     name DhanHQ-py's own docstrings and third-party write-ups implied.
+     Fixed by reading `token` first, falling back to `accessToken` only
+     in case some other account/version ever returns that shape instead.
+
+  A reminder that "no request body" in a doc does not imply "any HTTP
+  method," and a plausible-sounding field name repeated across several
+  secondary sources isn't the same as a confirmed one — this module's
+  long-standing "verify against a live account" caveat, borne out twice
+  in a row here.
 - It's documented to work **only on a token that hasn't expired yet** —
   renewing an already-expired one 401s exactly like a sync attempt
   would, mapped to the same `DhanAuthError` → "paste a fresh one below"

@@ -322,12 +322,17 @@ class TestRenewAccessToken:
     `requests.get`."""
 
     def test_sends_dhan_client_id_header_and_returns_new_token(self, monkeypatch):
+        # Real response shape, confirmed live: {"createTime", "expiryTime",
+        # "token"} -- NOT "accessToken", despite what DhanHQ-py's own
+        # docstrings/third-party write-ups implied.
         captured = {}
 
         def fake_get(url, headers=None, timeout=None):
             captured["url"] = url
             captured["headers"] = headers
-            return _FakeResponse(200, json_data={"accessToken": "NEW_TOKEN", "expiryTime": "..."})
+            return _FakeResponse(
+                200, json_data={"createTime": "...", "expiryTime": "...", "token": "NEW_TOKEN"}
+            )
 
         monkeypatch.setattr(httpx, "get", fake_get)
         provider = DhanProvider(client_id="CID1", access_token="OLD_TOKEN")
@@ -339,6 +344,12 @@ class TestRenewAccessToken:
         assert captured["headers"]["dhanClientId"] == "CID1"
         assert captured["headers"]["access-token"] == "OLD_TOKEN"
         assert "client-id" not in captured["headers"]
+
+    def test_falls_back_to_accessToken_key_if_that_shape_is_ever_returned_instead(self, monkeypatch):
+        monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResponse(200, json_data={"accessToken": "NEW_TOKEN"}))
+        provider = DhanProvider(client_id="CID1", access_token="OLD_TOKEN")
+
+        assert provider.renew_access_token() == "NEW_TOKEN"
 
     def test_401_on_an_already_expired_token_raises_dhan_auth_error(self, monkeypatch):
         monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResponse(401, text="expired"))
@@ -355,7 +366,7 @@ class TestRenewAccessToken:
             provider.renew_access_token()
         assert not isinstance(exc_info.value, DhanAuthError)
 
-    def test_response_missing_access_token_raises_provider_error(self, monkeypatch):
+    def test_response_missing_both_token_keys_raises_provider_error(self, monkeypatch):
         monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResponse(200, json_data={"expiryTime": "..."}))
         provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
 
