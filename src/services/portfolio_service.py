@@ -875,6 +875,58 @@ def group_into_trades(
     return result
 
 
+def symbols_with_active_csp(
+    holding_legs: list[dict],
+    position_legs: list[dict],
+    overrides: dict[tuple[str, str], str],
+    trade_meta: dict[str, dict],
+) -> set[str]:
+    """Every underlying `symbol` this account currently has an active
+    CSP-tagged Trade on, for **one** portfolio's holdings/positions
+    (same per-portfolio scoping `group_into_trades` itself always uses,
+    `trade_id` collisions aside) -- the signal the Screener for CSP page
+    (`pages/1_Dashboard.py`) flags with a "CSP Taken" column so a stock
+    already sold a put against isn't mistaken for a fresh opportunity.
+    The caller (`portfolio_page.load_csp_symbols`) unions this across
+    every portfolio the account has, since "has the user already taken a
+    CSP on any stock" is account-wide, not scoped to one portfolio name.
+
+    Deliberately takes plain leg dicts, not `PortfolioHolding`/
+    `PortfolioPosition` model instances or `build_trade_legs`'
+    live-priced output -- this flag only needs `leg_type`/`symbol`/
+    `raw_name`/`broker`/`qty`/`option_type` to group and classify, the
+    same lightweight shape `data_provider_settings.py`'s
+    `_auto_classify_new_trades` already builds for the same reason (no
+    live LTP fetch needed just to answer a yes/no question). `overrides`/
+    `trade_meta` are passed straight through to `group_into_trades`,
+    same shape as every other call site.
+
+    Uses `group_into_trades`' own `trade_type` via `is_csp_trade_type`,
+    exactly the same definition of "is this a CSP" My CSP itself filters
+    on -- not a fresh re-derivation. That means the same characteristic
+    My CSP itself already has: a Trade with no `portfolio_trade_meta` row
+    yet defaults to the plain `"Trade"` label (never the raw detected
+    shape), so a CSP-shaped Trade only actually flags here once
+    `_auto_classify_new_trades` has saved it as `"CSP"` -- which happens
+    automatically at the end of every Portfolio Refresh sync, so in
+    practice this lags a fresh sync by, at most, that one classify step,
+    not by anything this function does differently from My CSP's own
+    logic. A manually relabeled trade (either direction -- typed away
+    from "CSP", or typed onto a shape that doesn't look like one) is
+    honored either way, same as My CSP. `company_type_by_symbol` is
+    passed as `{}` since bucket (stock/index/other) is irrelevant to this
+    check."""
+    trades = group_into_trades(holding_legs + position_legs, overrides, trade_meta, company_type_by_symbol={})
+    symbols: set[str] = set()
+    for t in trades:
+        if not is_csp_trade_type(t["trade_type"]):
+            continue
+        for leg in t["legs"]:
+            if leg.get("symbol"):
+                symbols.add(leg["symbol"])
+    return symbols
+
+
 def compute_positions_view(positions: list[dict]) -> list[dict]:
     """Adds pnl/pnl_pct to each position, recomputed from qty/avg_price/
     ltp rather than trusted from Dhan's own response (its raw P&L-ish

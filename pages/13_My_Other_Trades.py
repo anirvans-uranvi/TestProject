@@ -36,8 +36,10 @@ render_portfolio_refresh_button(client, user_id, user_settings.data_provider)
 st.caption(
     'Every Trade from My Trades whose Trade Type is neither "CSP" nor Portfolio-prefixed (Portfolio CC, Portfolio '
     'Strangle, ...) -- including the default "Trade" label and any bare strategy with no stock holding (Strangle, '
-    'Jade Lizard, Twisted Sister, IC, ...). Go to My Trades, select a trade, click "Analyse Trade" to review or '
-    "rename its Trade Type."
+    'Jade Lizard, Twisted Sister, IC, ...) -- **except Index Options trades**, which have their own dedicated '
+    'Index Options section now and no longer show here (they\'re still visible via the unfiltered "All Trades" '
+    'page under My Portfolio). Go to My Trades, select a trade, click "Analyse Trade" to review or rename its '
+    "Trade Type."
 )
 
 ensure_cache_bust()
@@ -138,14 +140,18 @@ def _render_other_tab(
         for m in trade_meta_for_portfolio
     }
     trades = portfolio_service.group_into_trades(legs, overrides_by_leg, trade_meta_by_id, company_type_by_symbol)
-    other_trades_all = [t for t in trades if portfolio_service.is_other_trade_type(t["trade_type"])]
+    # bucket != "index" excludes Index Options trades entirely -- they
+    # get their own dedicated Index Options section now (per an explicit
+    # user request) and are otherwise only visible via the unfiltered
+    # "All Trades" page (My Portfolio section), not a dedicated view here.
+    other_trades_all = [
+        t for t in trades if portfolio_service.is_other_trade_type(t["trade_type"]) and t["bucket"] != "index"
+    ]
 
     stock_trades = [t for t in other_trades_all if t["bucket"] == "stock"]
-    index_trades = [t for t in other_trades_all if t["bucket"] == "index"]
     other_trades = [t for t in other_trades_all if t["bucket"] == "other"]
 
     _render_trades_table(title="Stock Trades", trades=stock_trades, portfolio_name=portfolio_name, key_suffix="stock")
-    _render_trades_table(title="Index Trades", trades=index_trades, portfolio_name=portfolio_name, key_suffix="index")
     _render_trades_table(title="Other Trades", trades=other_trades, portfolio_name=portfolio_name, key_suffix="other")
 
 

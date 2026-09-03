@@ -1201,22 +1201,28 @@ the Dashboard's own `except APIError` → "N/A" handling.
 
 ```python
 pages = {
+    "Wheel Strategy": [
+        st.Page("pages/1_Dashboard.py", title="Screener for CSP", default=True),
+        st.Page("pages/11_My_CSP.py", title="My Current CSPs"),
+        st.Page("pages/12_My_Portfolio_Trades.py", title="My Portfolio Trades"),
+        st.Page("pages/15_Other_Stock_Holdings.py", title="Other Stock Holdings"),
+        st.Page("pages/13_My_Other_Trades.py", title="Other Trades"),
+        st.Page("pages/10_Analyse_Trade.py", title="Analyse Trade", visibility="hidden"),
+    ],
+    "Index Options": [
+        st.Page("pages/16_Index_Options.py", title="Index Options"),
+    ],
     "Market": [
-        st.Page("pages/1_Dashboard.py", title="Screener", default=True),
         st.Page("pages/2_Stock_Detail.py", title="Equity"),
         st.Page("pages/5_Options.py", title="Options"),
     ],
     "My Portfolio": [
         st.Page("pages/8_My_Holdings.py", title="Holdings"),
         st.Page("pages/9_My_Positions.py", title="Positions"),
-        st.Page("pages/14_Trade_History.py", title="Trade History"),
-    ],
-    "My Trades": [
         st.Page("pages/7_My_Trades.py", title="All Trades"),
-        st.Page("pages/11_My_CSP.py", title="CSP"),
-        st.Page("pages/12_My_Portfolio_Trades.py", title="Portfolio Trades"),
-        st.Page("pages/13_My_Other_Trades.py", title="Other Trades"),
-        st.Page("pages/10_Analyse_Trade.py", title="Analyse Trade", visibility="hidden"),
+    ],
+    "Trade History": [
+        st.Page("pages/14_Trade_History.py", title="Trade History"),
     ],
     "Settings": [
         # url_path pinned explicitly (not left to Streamlit's filename-derived
@@ -1234,25 +1240,38 @@ st.navigation(pages).run()
 **The dict form (rather than a flat list)** groups pages under a labeled
 sidebar section header -- confirmed via `st.navigation`'s own docstring:
 in `position="sidebar"` mode (the default, unchanged here) every key
-renders as a header above its pages, so Settings gets a section of its
-own single page purely because the dict form requires every page to
-belong to one (the `""`-key trick the docstring mentions for hiding a
-header only applies to `position="top"`). This is what gives "Market"
-(Screener/Equity/Options), "My Portfolio" (Holdings/Positions/Trade
-History), and "My Trades" (All Trades/CSP/Portfolio Trades/Other Trades,
-plus the hidden Analyse Trade) their nested sub-page groupings ("Portfolio
-Trades" was "CC" until `12_My_CC.py` was renamed and rebuilt into
-`12_My_Portfolio_Trades.py`) -- Streamlit has no other native notion
-of a page belonging "under" another page. **The section/page labels here
-are a second, independent naming layer on top of this doc's own prose**
-(which keeps calling each page by its file-derived feature name -- "My
-Trades", "My CSP", "My Holdings", etc. -- matching the filename and each
-page's own on-page `st.title()`/`st.set_page_config()`) -- e.g. the
-sidebar shows "All Trades" for what this doc, the filename
-(`7_My_Trades.py`), and the page's own header all still call "My
-Trades"; only the `title=` argument passed to `st.Page` here changed,
-requested and renamed once already since these pages first shipped.
-Verified with an `AppTest.from_file`
+renders as a header above its pages, so Settings/Index Options/Trade
+History each get a section of their own single page purely because the
+dict form requires every page to belong to one (the `""`-key trick the
+docstring mentions for hiding a header only applies to `position="top"`).
+Six sections total, restructured per an explicit user request into a
+guided **"Wheel Strategy"** journey (the section login lands in, via
+`default=True` moving here with the Dashboard) -- screen for a CSP
+candidate (Screener for CSP) → track running CSPs (My Current CSPs) →
+see stocks assigned into holdings with option overlays (My Portfolio
+Trades) → see plain holdings with a covered-call trigger (Other Stock
+Holdings, new) → everything else (Other Trades), plus the hidden Analyse
+Trade -- alongside a standalone **"Index Options"** section (new,
+strangle ideas on the 4 major indices). "Market" (Equity/Options) stays
+its own section unchanged, per the user's explicit choice not to fold it
+elsewhere. "My Portfolio" keeps Holdings/Positions and picks up
+`7_My_Trades.py` ("All Trades", no longer sharing a section with the
+CSP/Portfolio-Trades/Other-Trades family it used to). "Trade History"
+gets its own top-level section (was nested under "My Portfolio" before)
+-- the user named it as a distinct item in their own list, and it
+already didn't share `build_trade_legs`/`group_into_trades` or the
+refresh-bar buttons with any other family here (see its own bullet
+below). Streamlit has no other native notion of a page belonging "under"
+another page. **The section/page labels here are a second, independent
+naming layer on top of this doc's own prose** (which keeps calling each
+page by its file-derived feature name -- "My Trades", "My CSP", "My
+Holdings", etc. -- matching the filename and each page's own on-page
+`st.title()`/`st.set_page_config()`) -- e.g. the sidebar shows "All
+Trades" for what this doc, the filename (`7_My_Trades.py`), and the
+page's own header all still call "My Trades"; only the `title=` argument
+passed to `st.Page` here changed, and the section a page's entry lives
+under, requested and rearranged more than once since these pages first
+shipped. Verified with an `AppTest.from_file`
 smoke pass over every page plus `app.py` itself (no exceptions); a real
 logged-in sidebar screenshot wasn't captured -- `require_login()` gates
 every page before any sidebar-adjacent content renders, and this
@@ -1280,7 +1299,7 @@ selecting a row and clicking "Analyse Trade" stashes
 calls `st.switch_page("pages/10_Analyse_Trade.py")`, landing on a real
 page (its own URL, its own script) that simply never appears as its own
 sidebar link alongside My Trades/My Holdings/My Positions/My CSP/My
-CC/My Other Trades.
+Portfolio Trades/My Other Trades.
 
 This replaced the legacy `pages/`-directory auto-discovery convention
 (where the sidebar label and display order were both derived from each
@@ -1290,9 +1309,12 @@ to be a real landing-page screen here (welcome text + quick links + a
 "data sources" info card reading `settings.market_data_provider`); it was
 dropped on request, along with that screen from the nav entirely, in
 favor of landing directly on a real page (`default=True` on the
-Dashboard/"Screener" entry). `st.Page`'s `title=` is independent of the
-underlying filename, which is why the sidebar shows "Screener"/"Equity"
-for files still named `1_Dashboard.py`/`2_Stock_Detail.py` -- nothing
+Dashboard/"Screener for CSP" entry -- moved here from a standalone
+"Market" section once the "Wheel Strategy" restructure made this the
+account's actual login landing page). `st.Page`'s `title=` is
+independent of the underlying filename, which is why the sidebar shows
+"Screener for CSP"/"Equity" for files still named
+`1_Dashboard.py`/`2_Stock_Detail.py` -- nothing
 else about those files (including every `st.switch_page("pages/...")`
 call elsewhere that references them by path) needed to change. Order in
 the sidebar is just this list's order, independent of the files' numeric
@@ -1325,11 +1347,11 @@ page's own `st.set_page_config(page_title=..., page_icon=...)` call
 
   **Metric cards**: seven buttons in a row (`st.columns(7)`) — `Total stocks`, `🟢 Green`/`🟠 Amber`/`🔴 Red` (each sets the status filter to just that one status), and `Yield > threshold`/`All momentum +ve`/`PEG ≤ threshold` (each sets `criterion_filter` instead). There is deliberately no `Unavailable` button — the status itself is still fully selectable via the sidebar's Status multiselect and still counts toward `ALL_STATUSES`, but it wasn't considered a useful one-click quick filter and was dropped to declutter the row (a purely cosmetic trim, not a behavior change to filtering).
 
-  **Screener table columns**, left to right: `Stock` (the NSE ticker symbol, e.g. `ADANIENT` — not the full company name; no separate `#`/`Symbol` key -- see below for why), `LTP` (latest price — renamed from "Latest price" for column-width economy), `52W High`/`52W Low` (value + `pass_fail_icon` for `criterion_52w_high`/`criterion_52w_low` — display-only proximity checks, **not** part of Green/Amber/Red; see `classification.py` above), `1D`/`5D`/`20D` (arrow + percentage only), `Momentum` (a single `pass_fail_icon(criterion_b)` — despite the name it's specifically criterion B, not a combined view), two F&O-derived columns (see below), and `Dividend`/`PEG`/`Fundamentals` last (`Dividend` — renamed from "Dividend yield" — and `PEG` each carry a `pass_fail_icon` for criteria A and C respectively; `Fundamentals` is `pass_fail_icon(criterion_fundamentals(criterion_a, criterion_c))`, i.e. A or C, and is what actually feeds the overall Green/Amber/Red status alongside Momentum — see `classification.py` above). `PE` (`pe_ratio`) is **not** shown on this table — it's a fundamentals input, not one of A/B/C/Fundamentals, and stayed too noisy for the Dashboard; it's still shown on Stock Detail's pass/fail scorecard and Fundamentals panel. There used to be a third F&O-derived column, the near-month future's price (header e.g. `Jul Future`, backed by `fo_service.near_month_futures_map`/`near_month_column_label`) — it was dropped on request, and those two now-unused `fo_service` functions (and their tests) were deleted along with it rather than left as dead code; futures data is no longer fetched on this page at all (only options, for the two columns below).
+  **Screener table columns**, left to right: `Stock` (the NSE ticker symbol, e.g. `ADANIENT` — not the full company name; no separate `#`/`Symbol` key -- see below for why), **`CSP Taken`** (new -- ✅ if `portfolio_service.symbols_with_active_csp`/`portfolio_page.load_csp_symbols` finds this symbol among the signed-in user's own currently-CSP-tagged Trades across every portfolio, blank otherwise; same "only mark the affirmative case" convention `Momentum`/`52W High`/`52W Low` already use, rather than a noisier ❌ on every other row -- added so the Screener doesn't suggest a stock the user has already sold a put against), `LTP` (latest price — renamed from "Latest price" for column-width economy), `52W High`/`52W Low` (value + `pass_fail_icon` for `criterion_52w_high`/`criterion_52w_low` — display-only proximity checks, **not** part of Green/Amber/Red; see `classification.py` above), `1D`/`5D`/`20D` (arrow + percentage only), `Momentum` (a single `pass_fail_icon(criterion_b)` — despite the name it's specifically criterion B, not a combined view), the F&O-derived `5% CSP` column (see below -- its `5% CC` sibling was dropped entirely per an explicit user request, see below), and `Dividend`/`PEG`/`Fundamentals` last (`Dividend` — renamed from "Dividend yield" — and `PEG` each carry a `pass_fail_icon` for criteria A and C respectively; `Fundamentals` is `pass_fail_icon(criterion_fundamentals(criterion_a, criterion_c))`, i.e. A or C, and is what actually feeds the overall Green/Amber/Red status alongside Momentum — see `classification.py` above). `PE` (`pe_ratio`) is **not** shown on this table — it's a fundamentals input, not one of A/B/C/Fundamentals, and stayed too noisy for the Dashboard; it's still shown on Stock Detail's pass/fail scorecard and Fundamentals panel. There used to be a third F&O-derived column, the near-month future's price (header e.g. `Jul Future`, backed by `fo_service.near_month_futures_map`/`near_month_column_label`) — it was dropped on request, and those two now-unused `fo_service` functions (and their tests) were deleted along with it rather than left as dead code; futures data is no longer fetched on this page at all (only options, for the `5% CSP` column below).
 
-  **The two F&O-derived columns** (between `Momentum` and `Dividend`) come from a *separate* data source than the rest of the table — `dashboard_fo_metrics` (migration `0011`), the Dashboard's precomputed F&O cache, not `latest_screener_view` — joined in by symbol after filtering, rather than being part of `ScreenerRow`. `_load_dashboard_fo_metrics` returns the *raw* row list (up to 3 per symbol, one per near/next/far expiry); an **"Options month" selectbox** lists the distinct `expiry_date`s actually present (formatted `"%b %Y"`, e.g. "Jul 2026") and defaults to the nearest one via `st.session_state["dashboard_options_month"]`. Picking a month is a pure re-render over already-cached rows -- `filtered["csp_5pct"]`/`filtered["cc_5pct"]` are built by filtering `dashboard_fo_metrics_rows` to that one `expiry_date` and mapping by symbol, no new fetch or recomputation triggered. This page only ever reads the final `csp_pct`/`cc_pct` key out of each row; see the Futures & Options section's "Dashboard cache" paragraph above for the full pipeline (`fo_service.dashboard_metrics_rows`/`recompute_dashboard_metrics`, and every refresh path that keeps it current) and `csp_5pct_for_rows`/`cc_5pct_for_rows`'s docs for the underlying formulas, which are also what the Options screen's "5% CSP"/"5% CC" breakdown sections use directly (unchanged, live, for a single symbol):
+  **The "5% CSP" column** (between `Momentum` and `Dividend` -- its "5% CC" sibling was dropped entirely per an explicit user request, see below) comes from a *separate* data source than the rest of the table — `dashboard_fo_metrics` (migration `0011`), the Dashboard's precomputed F&O cache, not `latest_screener_view` — joined in by symbol after filtering, rather than being part of `ScreenerRow`. `_load_dashboard_fo_metrics` returns the *raw* row list (up to 3 per symbol, one per near/next/far expiry); an **"Options month" selectbox** lists the distinct `expiry_date`s actually present (formatted `"%b %Y"`, e.g. "Jul 2026") and defaults to the nearest one via `st.session_state["dashboard_options_month"]`. Picking a month is a pure re-render over already-cached rows -- `filtered["csp_5pct"]` is built by filtering `dashboard_fo_metrics_rows` to that one `expiry_date` and mapping by symbol, no new fetch or recomputation triggered. This page only ever reads the final `csp_pct` key out of each row (the cache row itself still carries `cc_strike`/`cc_pct` too -- `recompute_dashboard_metrics`/`dashboard_fo_metrics` weren't touched by the column's removal, only this page's own display of it; the Options page's own "5% CC" section still reads the same cache); see the Futures & Options section's "Dashboard cache" paragraph above for the full pipeline (`fo_service.dashboard_metrics_rows`/`recompute_dashboard_metrics`, and every refresh path that keeps it current) and `csp_5pct_for_rows`/`cc_5pct_for_rows`'s docs for the underlying formulas, the latter of which is now used directly only by the Options screen's own "5% CSP"/"5% CC" breakdown sections (unchanged, live, for a single symbol):
   - **`5% CSP`** — a cash-secured-put yield: for the strike nearest 5% below spot (the screener's `latest_price`, not the option chain's `underlying_price`, kept consistent both here and on the Options screen — see the bug note on `5_Options.py` below), the selected expiry's put premium as a percentage of that strike (`put_price / strike * 100`). **Deliberately not divided by exchange margin** — SPAN margin isn't available from NSE as a simple downloadable per-contract figure (it's a licensed CME Group multi-scenario risk calculation, confirmed via a live search of NSE's actual report index turning up nothing), so this uses the strike itself (the full notional a cash-secured-put seller sets aside) as the yield's denominator instead; `strike * lot_size` cancels out of both the premium and this ratio, so lot size never needs to appear in the formula at all.
-  - **`5% CC`** — a covered-call yield: sell 1 lot of the lowest call strike still at or above 5% above spot (a floor filter, not a nearest-match -- see `fo_service.py`'s bullet above), expressed as a percentage of **gross investment** (spot, the cost of buying 1 share) -- `premium / spot * 100`. (The Options screen additionally shows "Net Investment" and "Assignment Profit" -- `(strike / net_investment - 1) * 100`, where `net_investment = spot - premium` -- but the Dashboard column only ever surfaces `cc_pct`.) This replaced an earlier three-leg "5% ITM PMCC" (poor-man's-covered-call) calculation on request; see `fo_service.py`'s bullet above for what that used to compute.
+  - **`5% CC`** — a covered-call yield: sell 1 lot of the lowest call strike still at or above 5% above spot (a floor filter, not a nearest-match -- see `fo_service.py`'s bullet above), expressed as a percentage of **gross investment** (spot, the cost of buying 1 share) -- `premium / spot * 100`. No longer shown on the Dashboard at all (its column was dropped entirely per an explicit user request once "Other Stock Holdings" took over the covered-call-decision role with a different, per-holding formula -- see the Portfolio pages section below) -- the Options screen's own "5% CC" section is now the only place `cc_pct` renders, additionally showing "Net Investment" and "Assignment Profit" -- `(strike / net_investment - 1) * 100`, where `net_investment = spot - premium`. This replaced an earlier three-leg "5% ITM PMCC" (poor-man's-covered-call) calculation on request; see `fo_service.py`'s bullet above for what that used to compute.
 
   **A real bug this surfaced**: `fo_repo.get_all_open_options()` initially had no pagination, and PostgREST caps a single response at a server-configured max (1000 rows on this project) regardless of how many rows actually match — against live data (~5,053 open PE legs across 50 symbols) this silently truncated to exactly 1000 rows, and whichever symbols fell outside that window (most of the universe, including RELIANCE/TCS/HDFCBANK) were missing from the 5% CSP column with **no error anywhere** — confirmed live (`PE rows: 1000` before, `5053` after). Fixed by a generic `fo_repo._paginate(query_builder, page_size=1000)` helper that `get_all_open_futures()`/`get_all_open_options()` go through, looping `.range()` calls until a page comes back short (this is still exercised by `recompute_dashboard_metrics`, which calls `get_all_open_options()` at refresh time, and by its TypeScript port's own paginated fetch). `tests/test_fo_repo.py` covers the pagination boundary cases (multi-page accumulation, an exact-multiple-of-page-size input not looping forever, empty results).
 
@@ -1706,8 +1728,9 @@ caller left at that point, so it was deleted along with
 of" with nothing to date.
 
 **Per-holding covered-call suggestion ("CC ROI" / "CC Assignment ROI",
-the Options page's "Portfolio CC" table)**: distinct from the
-Dashboard/Options "5% CC" figure (`cc_5pct_for_rows`, always spot-based,
+the Options page's "Portfolio CC" table, and now also Other Stock
+Holdings -- see the Portfolio pages section below)**: distinct from
+Options' own "5% CC" figure (`cc_5pct_for_rows`, always spot-based,
 fixed 5% OTM, floor-filtered strike) -- this one is
 `fo_service.covered_call_for_holding(ce_rows, avg_price, ltp, qty,
 expiry_date)`, keyed off the *holding's own* avg buy price, not just the
@@ -1716,10 +1739,16 @@ spot price. **This used to also drive a pair of columns on My Holdings**
 `include_cc` gate on `_render_holdings_table`) -- all of that was removed
 by request once the Stocks table was made to share the ETFs & Mutual
 Funds table's exact columns; `covered_call_for_holding` itself is
-unchanged and now only ever called from `pages/5_Options.py`'s Portfolio
-CC table, which needs no separate expiry selector at all -- it just
-reuses that page's own already-computed near/next/far expiry list (the
-same one 5% CSP/CC above it uses) for the stock currently being viewed:
+unchanged and stayed the only place with this figure for a long stretch
+(`pages/5_Options.py`'s Portfolio CC table, needing no separate expiry
+selector at all -- it just reuses that page's own already-computed
+near/next/far expiry list, the same one 5% CSP/CC above it uses, for the
+stock currently being viewed) until `pages/15_Other_Stock_Holdings.py`
+started calling it too, per an explicit user request, for every
+holding-with-no-option-leg across the whole portfolio at once (using the
+previously-unused `portfolio_page.load_option_expiries`/
+`load_option_chain` cached loaders instead, since it isn't scoped to one
+already-selected symbol the way Options is):
 
 - If `avg_price > ltp` (a loss so far), the target is 3% above
   `avg_price` -- writing a call struck near the original cost basis
@@ -1727,7 +1756,7 @@ same one 5% CSP/CC above it uses) for the stock currently being viewed:
   in the loss at assignment. Otherwise (`ltp >= avg_price`), the target
   is 5% above `ltp`, matching the app's usual 5% OTM convention.
 - The strike is the single one *nearest* that target (either side), not
-  floor-filtered like the Dashboard/Options "5% CC" -- "about 3%/5%
+  floor-filtered like Options' own "5% CC" -- "about 3%/5%
   above" here is an approximate target, not a floor the strike must
   clear.
 - `invested_amount` = `avg_price * qty` (the real, full cost basis) but
@@ -2859,18 +2888,21 @@ byte-for-byte copy of `7_My_Trades.py`'s own
 `group_into_trades` call, same `Underlying Instrument`/`Trade
 Type`/`Legs`/`Total P&L` columns, same "⚠️" `trade_type_mismatch` marker
 + caption, same row-select → `st.switch_page("pages/10_Analyse_Trade.py")`
-flow, same Stock Trades/Index Trades/Other Trades bucket split) with
-exactly one line added: the `trades` list is filtered to
-`is_other_trade_type(trade_type)` (`not is_csp_trade_type(trade_type)
-and not is_portfolio_trade_type(trade_type)`) before the bucket split,
-so the default `"Trade"` label, a bare Strangle/Jade Lizard/Twisted
-Sister/IC with no stock holding, or any other free-text Trade Type all
-land here. This was a deliberate scope choice, not an oversight — My
-Other Trades' arbitrary multi-leg strategies don't have a single
-well-defined breakeven/credit/target shape, so inventing one wasn't
-requested; it stays at My Trades' own summary-table depth (per-trade
-Total P&L, not per-leg breakeven/target/stop-loss) until a real formula
-is asked for.
+flow) with two lines changed: the `trades` list is filtered to
+`is_other_trade_type(trade_type) and t["bucket"] != "index"` (was: just
+`is_other_trade_type`) before the bucket split, so the default `"Trade"`
+label, a bare Strangle/Jade Lizard/Twisted Sister/IC with no stock
+holding, or any other free-text Trade Type all land here -- **but an
+Index Options trade never does**, per an explicit user request once
+Index Options got its own dedicated section (see below); it's now only
+ever visible via the unfiltered My Trades page. The **"Index Trades"
+table was removed entirely** from this page as a result -- only Stock
+Trades/Other Trades tabs remain here now. This was a deliberate scope
+choice, not an oversight — My Other Trades' arbitrary multi-leg
+strategies don't have a single well-defined breakeven/credit/target
+shape, so inventing one wasn't requested; it stays at My Trades' own
+summary-table depth (per-trade Total P&L, not per-leg
+breakeven/target/stop-loss) until a real formula is asked for.
 
 **My Portfolio Trades (`pages/12_My_Portfolio_Trades.py`, formerly My
 CC)** — renamed and rebuilt per an explicit user request: generalizes
@@ -2937,13 +2969,105 @@ invented to replace it — Analyse Trade's own independent per-leg version
 of the same math (see above) is completely unaffected and still computes
 for any short option leg regardless of what this page shows.
 
-`app.py` groups all five of `7_My_Trades.py`/`11_My_CSP.py`/
-`12_My_Portfolio_Trades.py`/`13_My_Other_Trades.py`/`10_Analyse_Trade.py`
-(hidden) under one `st.navigation` dict section, `"My Trades"` — see the
-"Streamlit app" section above for why the dict form (rather than a flat
-`st.Page(...)` list) was needed to get My CSP/My Portfolio Trades/My
-Other Trades to render nested under a "My Trades" sidebar header instead
-of as top-level, unrelated-looking sidebar entries.
+**Other Stock Holdings (`pages/15_Other_Stock_Holdings.py`)** — new page,
+added alongside the "Wheel Strategy" restructure (see "Streamlit app"
+above). Every stock/ETF holding with **no option leg at all**. Unlike
+every other filtered Trades page here, this one does **not** filter on
+the saved `trade_type` string at all -- it's a pure shape check on the
+Trade's own current legs: `not any(leg["leg_type"] == "Position" for leg
+in t["legs"])`, i.e. every leg is a Holding leg. Confirmed with the user
+as the right approach: the saved `trade_type` could be stale (still says
+"Portfolio CC" after the option leg was actually closed) or a custom
+label unrelated to the leg shape (`"Hedged"`, `"Batman"` -- both seen on
+a real account), so trusting it here could hide a genuinely uncovered
+holding or wrongly include one that's actually covered now. Same Stock/
+Index/Other bucket tabs every other Trades page uses.
+
+For each qualifying trade, its Holding leg(s) are merged (summed qty,
+investment-weighted avg price, mirroring My Portfolio Trades' own Stock
+Holding aggregation) into one row, then `fo_service
+.covered_call_for_holding` runs against near/next/far monthly expiries
+(`portfolio_page.load_option_expiries`/`load_option_chain` -- previously
+unused, cached loaders already sitting in `portfolio_page.py`, now
+finally called) -- **the exact same function** the Options page's own
+"Portfolio CC" section already uses, confirmed with the user rather than
+inventing a new formula. Renders the identical Term/Expiry/Strike/
+Premium/Trade Date/Invested Amount/CC ROI/CC Assignment ROI table, just
+gathered for every qualifying holding on one page instead of requiring a
+per-symbol visit to Options.
+
+**Index Options (`pages/16_Index_Options.py`)** — new page, its own
+top-level `st.navigation` section (not nested under "Wheel Strategy") --
+short-strangle ideas (sell OTM PE + sell OTM CE) on the 4 major indices:
+NIFTY, SENSEX, BANKNIFTY, FINNIFTY. Reads the same public
+`option_contracts`/`latest_option_chain_view` data every other F&O page
+reads, just for 4 fixed symbols -- no new migration, no new ingestion.
+Confirmed live while building this: `option_daily_prices` already
+carries all 4 (FINNIFTY included, live and not discontinued, despite an
+ingestion comment elsewhere only naming NIFTY/BANKNIFTY/SENSEX/BANKEX as
+*examples* of index rows, not an exhaustive filter list -- NSE/BSE's
+bhavcopy filter is by instrument-type code, not a symbol allowlist).
+NIFTY/SENSEX still carry weekly *and* monthly cadence (3 rows: current
+week/next week/current month, at 3%/4%/5%); BANKNIFTY/FINNIFTY are
+monthly-only now (1 row: current month, at 5%) -- also confirmed live
+via `fo_repo.list_option_expiries`.
+
+Two new pure functions in `fo_service.py`:
+- **`classify_index_expiry_terms(expiries, today)`** — picks the actual
+  dates for `current_week`/`next_week`/`current_month` out of a symbol's
+  own listed future expiries. Filters to `e >= today` itself first —
+  **required**, a real data quirk found while building this:
+  `option_contracts.is_open` does not reliably flip the day after an
+  expiry passes (NIFTY's already-past 2026-09-01 expiry was still
+  flagged open on 2026-09-02 in a live check), so trusting the raw
+  "open" list alone can surface a dead expiry as "current week."
+  `current_month` is the *latest* remaining expiry whose `(year, month)`
+  matches the *soonest* remaining expiry's own month — rolls forward to
+  next month automatically once every expiry in the current calendar
+  month has passed. Returns a dict missing whichever keys don't apply
+  (e.g. no `next_week` with only one future expiry left) rather than
+  `None`/placeholder values.
+- **`index_strangle_for_expiry(chain_rows, pct)`** — mirrors
+  `csp_5pct_for_rows`/`cc_5pct_for_rows`'s shape. Spot from
+  `option_chain_summary(chain_rows)["spot"]`; PE target = `spot * (1 -
+  pct/100)`, CE target = `spot * (1 + pct/100)`, each side independently
+  picks the single listed strike **nearest** its own target (`_freshest_rows`
+  applied separately per side, not across the whole chain at once, since
+  puts and calls can go stale independently) — deliberately the
+  "nearest" convention `csp_5pct_for_rows` uses, not `cc_5pct_for_rows`'s
+  floor-filter (that floor-filter exists specifically to avoid
+  assignment risk on a real *held* covered call, which doesn't apply to
+  a speculative index strangle idea). Returns both strikes/premiums plus
+  `credit_per_unit` (`pe_premium + ce_premium`) and `credit_total`
+  (lot-size-aware, `None` if either the credit or `lot_size` is
+  missing).
+
+The page loops over 4 hardcoded `(symbol, {term: pct})` configs, calling
+`load_option_expiries`/`load_option_chain` (the same previously-unused
+cached loaders Other Stock Holdings now also uses) for each term this
+symbol shows, and renders one small table per index with a "Current
+Price" caption (the strangle's own echoed-back `spot`) above it.
+
+`app.py` groups `1_Dashboard.py`/`11_My_CSP.py`/
+`12_My_Portfolio_Trades.py`/`15_Other_Stock_Holdings.py`/
+`13_My_Other_Trades.py`/`10_Analyse_Trade.py` (hidden) under one
+`st.navigation` dict section, `"Wheel Strategy"` — a guided journey
+(screen for a CSP candidate → track running CSPs → see stocks assigned
+into holdings with option overlays → see plain holdings with a
+covered-call trigger → everything else) restructured from the app's
+former flat "Market"/"My Trades" split per an explicit user request.
+`16_Index_Options.py` gets its own single-page `"Index Options"`
+section; `7_My_Trades.py` (still "All Trades") moved into `"My
+Portfolio"` alongside Holdings/Positions, no longer sharing a section
+with the CSP/Portfolio-Trades/Other-Trades family; `14_Trade_History.py`
+kept its own top-level `"Trade History"` section (it already didn't
+share `build_trade_legs`/`group_into_trades` or the refresh-bar buttons
+with that family, see its own bullet below); `"Market"`
+(`2_Stock_Detail.py`/`5_Options.py`) is unchanged, kept as its own
+section per the user's explicit choice rather than folded elsewhere. See
+the "Streamlit app" section above for why the dict form (rather than a
+flat `st.Page(...)` list) is what actually produces these nested sidebar
+headers.
 
 **Trade History (`pages/14_Trade_History.py`)** — Dhan only, and the one
 portfolio page that doesn't belong in the `st.navigation` groupings

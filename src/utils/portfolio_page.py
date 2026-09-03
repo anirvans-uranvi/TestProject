@@ -1,9 +1,13 @@
 """Cross-page helpers for the Portfolio feature's pages -- My Trades (7),
-My Holdings (8), My Positions (9), My CSP (11), and Analyse Trade (10,
-hidden from the sidebar). Broker connect/sync UI lives in Settings' "Data
-Provider" section (src/utils/data_provider_settings.py) now, not a
-dedicated page -- these loaders are still shared across every page that
-reads the resulting holdings/positions/broker-live prices. Every page needs the same
+My Holdings (8), My Positions (9), My CSP (11), My Portfolio Trades (12),
+My Other Trades (13), and Analyse Trade (10, hidden from the sidebar) --
+plus the Screener for CSP page (1, `load_csp_symbols` only, for its "CSP
+Taken" flag column) and Other Stock Holdings (15, reuses `build_trade_legs`/
+`load_option_expiries`/`load_option_chain` the same way). Broker
+connect/sync UI lives in Settings' "Data Provider" section
+(src/utils/data_provider_settings.py) now, not a dedicated page -- these
+loaders are still shared across every page that reads the resulting
+holdings/positions/broker-live prices. Every page needs the same
 cached data loaders (e.g. My Trades and Analyse Trade both need holdings +
 positions + trade groups + trade meta to rebuild the same leg/Trade view;
 My Holdings and My Positions each need a subset), so they're extracted
@@ -115,6 +119,58 @@ def load_position_meta(_client, _user_id: str, _cache_bust: int):
 @st.cache_data(ttl=300, show_spinner=False)
 def load_all_companies(_client, _cache_bust: int):
     return companies_repo.list_all_companies(_client)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_csp_symbols(_client, _user_id: str, _cache_bust: int) -> set[str]:
+    """Every underlying symbol this account currently has an active CSP
+    Trade on, across **every** portfolio -- the Screener for CSP page's
+    "CSP Taken" column (pages/1_Dashboard.py), so a stock already sold a
+    put against doesn't look like a fresh opportunity. "Any stock" per
+    the user's own phrasing, not scoped to one portfolio.
+
+    Deliberately builds the same lightweight, live-LTP-free leg dicts
+    data_provider_settings.py's `_auto_classify_new_trades` already
+    builds for the same reason (raw `portfolio_repo.list_holdings`/
+    `list_positions`, not this module's own `load_holdings`/
+    `load_positions`, which additionally fetch live prices this flag has
+    no use for) -- one portfolio at a time (matching every
+    `group_into_trades` call site's own per-portfolio scoping, since
+    `trade_id`s aren't guaranteed unique across portfolios), unioning
+    `portfolio_service.symbols_with_active_csp`'s result across all of
+    them. Returns an empty set if the account has no holdings/positions
+    at all (a brand-new account, or `portfolio_holdings` not provisioned
+    yet -- the caller's own `except APIError` guard covers the latter)."""
+    holdings = portfolio_repo.list_holdings(_client, _user_id)
+    positions = portfolio_repo.list_positions(_client, _user_id)
+    if not holdings and not positions:
+        return set()
+    trade_groups = portfolio_repo.list_trade_groups(_client, _user_id)
+    trade_meta = portfolio_repo.list_trade_meta(_client, _user_id)
+
+    portfolio_names = {h.portfolio_name for h in holdings} | {p.portfolio_name for p in positions}
+    symbols: set[str] = set()
+    for portfolio_name in portfolio_names:
+        holding_legs = [
+            {"leg_type": "Holding", "symbol": h.symbol, "raw_name": h.raw_name, "broker": h.broker, "qty": h.qty, "option_type": None}
+            for h in holdings
+            if h.portfolio_name == portfolio_name
+        ]
+        position_legs = [
+            {"leg_type": "Position", "symbol": p.symbol, "raw_name": p.raw_name, "broker": p.broker, "qty": p.qty, "option_type": p.option_type}
+            for p in positions
+            if p.portfolio_name == portfolio_name
+        ]
+        overrides = {
+            (g.broker, g.raw_name): g.trade_id for g in trade_groups if g.portfolio_name == portfolio_name
+        }
+        trade_meta_by_id = {
+            m.trade_id: {"underlying_label": m.underlying_label, "trade_type": m.trade_type, "bucket_override": m.bucket_override}
+            for m in trade_meta
+            if m.portfolio_name == portfolio_name
+        }
+        symbols |= portfolio_service.symbols_with_active_csp(holding_legs, position_legs, overrides, trade_meta_by_id)
+    return symbols
 
 
 @st.cache_data(ttl=60, show_spinner=False)

@@ -7,6 +7,8 @@ screen renders, so they're unit-testable without Streamlit or a live DB.
 """
 from __future__ import annotations
 
+from datetime import date
+
 from supabase import Client
 
 from src.data_providers.nse_fo_provider import FOBhavcopy
@@ -314,6 +316,110 @@ def cc_5pct_for_rows(ce_rows: list[dict], spot: float, expiry_date) -> dict | No
         "spot": spot,
         "expiry_date": expiry_date,
         "trade_date": best_row.get("trade_date"),
+    }
+
+
+def classify_index_expiry_terms(expiries: list[date], today: date) -> dict[str, date]:
+    """For the Index Options page: picks out which of a symbol's own
+    listed expiries counts as "current week", "next week", and "current
+    month" -- e.g. NIFTY/SENSEX (weekly *and* monthly cadence) show all
+    three as separate rows; BANKNIFTY/FINNIFTY (monthly-only now) only
+    ever populate `current_month`, which the caller shows as that
+    index's one and only row.
+
+    Filters to `e >= today` first -- **required**, not a redundant
+    safety net: confirmed live that `option_contracts.is_open` does not
+    reliably flip the day after an expiry passes (an already-past expiry
+    was still returned by `fo_repo.list_option_expiries` the very next
+    day), so trusting the raw list without this filter can surface a
+    dead expiry as "current week."
+
+    - `current_week`/`next_week`: simply the 1st/2nd soonest remaining
+      expiry. Omitted if there aren't that many.
+    - `current_month`: the **latest** remaining expiry whose
+      `(year, month)` matches the *soonest* remaining expiry's own
+      `(year, month)` -- i.e. the last expiry still inside "the soonest
+      month that still has one." This naturally rolls forward to next
+      month once every expiry in the current calendar month has passed
+      (there's nothing left with this month's `(year, month)`, so the
+      soonest remaining expiry's own month becomes the new anchor).
+      Always populated whenever any future expiry exists at all.
+
+    Returns `{}` if there's no expiry `>= today` at all."""
+    future = sorted(e for e in expiries if e >= today)
+    if not future:
+        return {}
+    result: dict[str, date] = {"current_week": future[0]}
+    if len(future) > 1:
+        result["next_week"] = future[1]
+    anchor_month = (future[0].year, future[0].month)
+    same_month = [e for e in future if (e.year, e.month) == anchor_month]
+    result["current_month"] = max(same_month)
+    return result
+
+
+def index_strangle_for_expiry(chain_rows: list[dict], pct: float) -> dict | None:
+    """Best strikes for a short strangle (sell OTM PE + sell OTM CE) on
+    one index expiry, `pct`% away from spot on each side -- the Index
+    Options page's core calculation, one call per (index, term) row.
+
+    `chain_rows` should already be filtered to one symbol + one expiry
+    (mirrors `csp_5pct_for_rows`/`cc_5pct_for_rows`'s own convention).
+    Spot comes from `option_chain_summary(chain_rows)["spot"]` -- same
+    "freshest trade_date's own underlying_price" resolution every other
+    F&O page already uses, not a separately-tracked index price (this
+    app has no `daily_screener_snapshots`-equivalent for an index, unlike
+    a stock).
+
+    PE target = `spot * (1 - pct/100)`, CE target = `spot * (1 +
+    pct/100)` -- each side independently picks the single listed strike
+    **nearest** its own target (matching `csp_5pct_for_rows`'s "nearest"
+    convention, not `cc_5pct_for_rows`'s floor-filter: that floor-filter
+    exists specifically to avoid assignment risk on a real covered call,
+    which doesn't apply to a speculative index strangle idea -- nearest
+    is the more natural reading of "best strike ~`pct`% OTM" here).
+
+    Returns `{"spot", "pe_strike", "pe_premium", "ce_strike",
+    "ce_premium", "lot_size", "credit_per_unit"
+    (`pe_premium + ce_premium`, `None` if either premium is missing),
+    "credit_total" (`credit_per_unit * lot_size`, `None` if either the
+    credit or lot_size is missing), "expiry_date", "trade_date"}`, or
+    `None` if there's no spot, or no priceable strike on either side."""
+    summary = option_chain_summary(chain_rows)
+    spot = summary.get("spot")
+    if spot is None:
+        return None
+    pe_rows = [r for r in chain_rows if str(r.get("option_type")) == "PE" and r.get("strike_price") is not None]
+    ce_rows = [r for r in chain_rows if str(r.get("option_type")) == "CE" and r.get("strike_price") is not None]
+    if not pe_rows or not ce_rows:
+        return None
+
+    pe_target = spot * (1 - pct / 100)
+    ce_target = spot * (1 + pct / 100)
+    pe_best = min(_freshest_rows(pe_rows), key=lambda r: abs(_num(r["strike_price"]) - pe_target))
+    ce_best = min(_freshest_rows(ce_rows), key=lambda r: abs(_num(r["strike_price"]) - ce_target))
+
+    pe_strike = _num(pe_best["strike_price"])
+    pe_premium = _num(pe_best.get("last_price")) or _num(pe_best.get("close")) or _num(pe_best.get("settlement_price"))
+    ce_strike = _num(ce_best["strike_price"])
+    ce_premium = _num(ce_best.get("last_price")) or _num(ce_best.get("close")) or _num(ce_best.get("settlement_price"))
+    lot_size = _int(pe_best.get("lot_size")) or _int(ce_best.get("lot_size"))
+
+    credit_per_unit = (pe_premium + ce_premium) if (pe_premium is not None and ce_premium is not None) else None
+    credit_total = credit_per_unit * lot_size if (credit_per_unit is not None and lot_size) else None
+    trade_date = max(filter(None, [pe_best.get("trade_date"), ce_best.get("trade_date")]), default=None)
+
+    return {
+        "spot": spot,
+        "pe_strike": pe_strike,
+        "pe_premium": pe_premium,
+        "ce_strike": ce_strike,
+        "ce_premium": ce_premium,
+        "lot_size": lot_size,
+        "credit_per_unit": credit_per_unit,
+        "credit_total": credit_total,
+        "expiry_date": pe_best.get("expiry_date"),
+        "trade_date": trade_date,
     }
 
 

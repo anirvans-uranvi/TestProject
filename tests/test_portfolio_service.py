@@ -747,6 +747,82 @@ class TestGroupIntoTrades:
         assert trades[0]["trade_type"] == "Trade"
 
 
+class TestSymbolsWithActiveCsp:
+    def _position(self, *, symbol, option_type, qty, raw_name=None, broker="Dhan"):
+        return {
+            "leg_type": "Position",
+            "symbol": symbol,
+            "raw_name": raw_name or f"{symbol}-leg",
+            "broker": broker,
+            "qty": qty,
+            "option_type": option_type,
+        }
+
+    def _holding(self, *, symbol, qty=100.0, broker="Dhan"):
+        return {
+            "leg_type": "Holding",
+            "symbol": symbol,
+            "raw_name": symbol,
+            "broker": broker,
+            "qty": qty,
+            "option_type": None,
+        }
+
+    def test_csp_shaped_position_is_included_once_classified_and_saved(self):
+        # Same characteristic My CSP itself already has: a Trade with no
+        # saved meta row defaults to the plain "Trade" label, never the
+        # raw detected shape -- so this needs the saved "CSP" label
+        # _auto_classify_new_trades would have already written right
+        # after the sync that brought this position in.
+        legs = [self._position(symbol="X", option_type=OptionType.PE, qty=-75)]
+        trade_meta = {"X": {"trade_type": "CSP"}}
+        result = portfolio_service.symbols_with_active_csp([], legs, overrides={}, trade_meta=trade_meta)
+        assert result == {"X"}
+
+    def test_csp_shaped_position_with_no_saved_meta_yet_is_not_included(self):
+        # The un-classified-yet case: legs look like a CSP, but no
+        # portfolio_trade_meta row exists (auto-classify hasn't run/saved
+        # it) -- defaults to "Trade", not flagged, exactly matching how
+        # My CSP's own trade_type filter behaves for the same trade.
+        legs = [self._position(symbol="X", option_type=OptionType.PE, qty=-75)]
+        result = portfolio_service.symbols_with_active_csp([], legs, overrides={}, trade_meta={})
+        assert result == set()
+
+    def test_covered_call_shape_is_not_included(self):
+        holding = self._holding(symbol="Y")
+        call = self._position(symbol="Y", option_type=OptionType.CE, qty=-50)
+        result = portfolio_service.symbols_with_active_csp([holding], [call], overrides={}, trade_meta={})
+        assert result == set()
+
+    def test_saved_override_renaming_a_csp_shaped_trade_away_is_honored(self):
+        # The trade's legs look like a CSP, but the user relabeled it --
+        # symbols_with_active_csp must respect that, not the raw shape.
+        legs = [self._position(symbol="X", option_type=OptionType.PE, qty=-75)]
+        trade_meta = {"X": {"trade_type": "Earnings Play"}}
+        result = portfolio_service.symbols_with_active_csp([], legs, overrides={}, trade_meta=trade_meta)
+        assert result == set()
+
+    def test_saved_override_labeling_a_non_csp_shape_as_csp_is_honored(self):
+        # The reverse: legs don't look like a CSP shape at all (a lone
+        # long put), but the user saved it as "CSP" by hand -- still counts.
+        legs = [self._position(symbol="X", option_type=OptionType.PE, qty=75)]
+        trade_meta = {"X": {"trade_type": "csp"}}  # case-insensitive
+        result = portfolio_service.symbols_with_active_csp([], legs, overrides={}, trade_meta=trade_meta)
+        assert result == {"X"}
+
+    def test_unions_multiple_qualifying_trades(self):
+        legs = [
+            self._position(symbol="X", option_type=OptionType.PE, qty=-75),
+            self._position(symbol="Y", option_type=OptionType.PE, qty=-50),
+        ]
+        trade_meta = {"X": {"trade_type": "CSP"}, "Y": {"trade_type": "CSP"}}
+        result = portfolio_service.symbols_with_active_csp([], legs, overrides={}, trade_meta=trade_meta)
+        assert result == {"X", "Y"}
+
+    def test_no_legs_at_all_is_empty(self):
+        assert portfolio_service.symbols_with_active_csp([], [], overrides={}, trade_meta={}) == set()
+
+
 class TestPositionsToRecords:
     def test_builds_portfolio_position_models(self):
         positions = [

@@ -35,31 +35,42 @@ app.py                  Pure st.navigation() router -- no visible content of its
                         own; see "Navigation" below for the sidebar it builds
 pages/                  Streamlit multipage app (each still its own script,
                         registered by app.py rather than auto-discovered)
-  1_Dashboard.py         Screener table, metric cards, filters, CSV export -- sidebar label "Screener",
-                              nested under the "Market" sidebar section
+  1_Dashboard.py         Screener table, metric cards, filters, CSV export, "CSP Taken" flag -- sidebar label
+                              "Screener for CSP", nested under the "Wheel Strategy" sidebar section (login default)
+  11_My_CSP.py                Every Trade with Trade Type "CSP" -- one position leg per row, with underlying
+                              LTP + 1D/5D/20D change -- sidebar label "My Current CSPs", nested under "Wheel
+                              Strategy"
+  12_My_Portfolio_Trades.py   Every Trade whose Trade Type starts with "Portfolio " (Portfolio CC/Strangle/Jade
+                              Lizard/Twisted Sister/IC, ...) -- one row per Trade: Stock Holding's own numbers
+                              plus up to 4 option legs (PE Sell/PE Buy/CE Sell/CE Buy) -- sidebar label "My
+                              Portfolio Trades", nested under "Wheel Strategy" (formerly "My CC", Covered-Call
+                              only)
+  15_Other_Stock_Holdings.py  Every stock/ETF holding with no option leg at all, with a per-holding covered-call
+                              entry trigger (near/next/far month) -- sidebar label "Other Stock Holdings", nested
+                              under "Wheel Strategy"
+  13_My_Other_Trades.py       Every Trade from My Trades whose Trade Type is neither "CSP" nor Portfolio-prefixed,
+                              excluding Index Options trades -- sidebar label "Other Trades", nested under "Wheel
+                              Strategy"
+  10_Analyse_Trade.py          One Trade's legs -- correct underlying, rename trade type, merge/split
+                              (hidden from the sidebar -- reached only via My Current CSPs'/My Portfolio
+                              Trades'/Other Trades' row selection)
+  16_Index_Options.py         Short-strangle ideas (sell OTM PE + sell OTM CE) on NIFTY/SENSEX/BANKNIFTY/FINNIFTY
+                              -- sidebar label "Index Options", its own top-level sidebar section
   2_Stock_Detail.py       Price/volume/dividend charts, scorecard, per-stock alerts -- sidebar label "Equity",
+                              nested under the "Market" sidebar section
+  5_Options.py              F&O: futures term structure, 5% CSP / 5% CC breakdown, per-holding "Portfolio CC" --
                               nested under "Market"
-  4_Settings.py            Per-user thresholds, alert CRUD + notification history, notification channels,
-                              Data Provider (Dhan/YFinance+Bhavcopy) + broker sync, sign out
-  5_Options.py              F&O: futures term structure, 5% CSP / 5% CC breakdown -- nested under "Market"
-  7_My_Trades.py              Holdings + positions grouped by underlying into Stock/Index/Other Trades --
-                              sidebar label "All Trades", nested under the "My Trades" sidebar section
   8_My_Holdings.py            Equity holdings, split ETFs & Mutual Funds / Stocks, both with 1D/5D/20D Change --
                               sidebar label "Holdings", nested under the "My Portfolio" sidebar section
   9_My_Positions.py           Per-leg F&O positions, split into Stock Options / Index Options / Others (no
                               grouping -- see My Trades for that) -- sidebar label "Positions", nested under
                               "My Portfolio"
-  11_My_CSP.py                Every Trade with Trade Type "CSP" -- one position leg per row, with underlying
-                              LTP + 1D/5D/20D change -- sidebar label "CSP", nested under "My Trades"
-  12_My_Portfolio_Trades.py   Every Trade whose Trade Type starts with "Portfolio " (Portfolio CC/Strangle/Jade
-                              Lizard/Twisted Sister/IC, ...) -- one row per Trade: Stock Holding's own numbers
-                              plus up to 4 option legs (PE Sell/PE Buy/CE Sell/CE Buy) -- sidebar label "Portfolio
-                              Trades", nested under "My Trades" (formerly "My CC", Covered-Call-only)
-  13_My_Other_Trades.py       Every Trade from My Trades whose Trade Type is neither "CSP" nor Portfolio-prefixed
-                              -- sidebar label "Other Trades", nested under "My Trades"
-  10_Analyse_Trade.py          One Trade's legs -- correct underlying, rename trade type, merge/split
-                              (hidden from the sidebar -- reached only via All Trades'/Portfolio Trades'/Other
-                              Trades' row selection)
+  7_My_Trades.py              Holdings + positions grouped by underlying into Stock/Index/Other Trades --
+                              sidebar label "All Trades", nested under "My Portfolio"
+  14_Trade_History.py         Realized + Unrealised P&L from synced Dhan trade fills -- its own top-level
+                              sidebar section
+  4_Settings.py            Per-user thresholds, alert CRUD + notification history, notification channels,
+                              Data Provider (Dhan/YFinance+Bhavcopy) + broker sync, sign out
 src/
   config.py               Pydantic Settings (env-driven)
   data_providers/         PriceDataProvider / FundamentalsDataProvider + Dhan/mock/manual impls
@@ -453,8 +464,9 @@ regardless of which page triggered the refresh.
     disambiguate from the other two), still the only one that widens the
     equity/ETF universe with every tracked ETF and refetches live LTP for
     every futures/option contract this account's own portfolio holds plus
-    the exact CSP/CC option legs the Dashboard's 5% CSP/5% CC columns use
-    (`_dhan_fo_universe`, `DhanProvider.get_fo_quotes`, migration `0032`)
+    the exact CSP/CC option legs the Dashboard's 5% CSP column and the
+    Options page's own 5% CC section use (`_dhan_fo_universe`,
+    `DhanProvider.get_fo_quotes`, migration `0032`)
     -- not the full option chain for every strike/expiry, just what the
     Screener and the account's own positions actually reference.
   - **Stock Data Refresh from Dhan** -- just the equity/ETF leg
@@ -589,8 +601,9 @@ As its last step, this function also recomputes the Dashboard's
 `dashboard_fo_metrics` cache (a TypeScript port of the same calculation
 `fo_service.py` uses, in `supabase/functions/_shared/dashboardMetrics.ts`
 -- see [Futures & Options data](#futures--options-fo-data)) so a changed
-spot price shows up in the 5% CSP / 5% CC columns immediately,
-without waiting for the next scheduled recompute.
+spot price shows up in the Dashboard's 5% CSP column and the Options
+page's own 5% CC section immediately, without waiting for the next
+scheduled recompute.
 
 **Deploying the Edge Function** (one-time setup, requires the Supabase
 CLI -- Edge Functions are genuinely easier to develop/deploy with proper
@@ -763,15 +776,19 @@ portfolio that holds it, each showing its own qty/avg price plus
 Strike/Premium/Trade Date/Invested Amount/CC ROI/CC Assignment ROI for
 the near, next, and far monthly expiries.
 
-The Dashboard's own **5% CSP** / **5% CC** columns read from a small
-precomputed cache table (`dashboard_fo_metrics`, migration `0011`, keyed
-by `(symbol, expiry_date)` -- up to 3 rows per symbol, near/next/far)
-instead of recalculating across every open option contract on every page
-load -- every refresh path (the cron script, `fetch_fo_data.py`, and
-Stock Data Refresh/Bhavcopy Refresh below) recomputes all 3 months as its last step, so
-it's never more than one refresh out of date. An **"Options month"
-dropdown** lets you pick which of the 3 cached months feeds those two
-columns -- purely a re-render over already-cached rows, no new fetch --
+The Dashboard's own **5% CSP** column (its "5% CC" sibling column was
+dropped per an explicit user request once the "Other Stock Holdings"
+page's own per-holding covered-call trigger took over that role -- the
+underlying cache still computes/stores `cc_pct` too, just unused by this
+particular page now, see below) reads from a small precomputed cache
+table (`dashboard_fo_metrics`, migration `0011`, keyed by `(symbol,
+expiry_date)` -- up to 3 rows per symbol, near/next/far) instead of
+recalculating across every open option contract on every page load --
+every refresh path (the cron script, `fetch_fo_data.py`, and Stock Data
+Refresh/Bhavcopy Refresh below) recomputes all 3 months as its last
+step, so it's never more than one refresh out of date. An **"Options
+month" dropdown** lets you pick which of the 3 cached months feeds that
+column -- purely a re-render over already-cached rows, no new fetch --
 shown as `"Aug 2026 (25-Aug-26)"`, the full date alongside the month, not
 just the month (see below for why). The dropdown's choices are
 restricted to expiries that belong to a symbol actually shown in the
@@ -844,22 +861,27 @@ published yet.
 
 Your own holdings and F&O positions -- synced live from a connected
 broker (see [Connecting a broker](#connecting-a-broker-settings--data-provider)
-above), not the Nifty50 screener universe -- span seven pages, six of
-which appear in the sidebar: **My Trades** (`pages/7_My_Trades.py`,
-sidebar label "All Trades"), **My CSP** (sidebar label "CSP"), **My
-Portfolio Trades** (`pages/12_My_Portfolio_Trades.py`, sidebar label
-"Portfolio Trades" -- formerly "My CC"/`pages/12_My_CC.py`, Covered-Call
-only), **My Other Trades** (sidebar label "Other
-Trades") -- all four nested under the "My Trades" sidebar section --
-plus **My Holdings** (sidebar label "Holdings") and **My Positions**
-(sidebar label "Positions"), nested under "My Portfolio". This doc keeps
-referring to each page by its file-derived feature name (matching its
-filename and its own on-page title), not its current sidebar label,
-which is independent and can be renamed without touching the page
-itself -- see the "Navigation" note above and the `st.navigation` dict
-in `app.py`. **Analyse Trade** is reached only by selecting a row on All
-Trades/Portfolio Trades/Other Trades. All seven share one loader/
-formatting module, `src/utils/portfolio_page.py`
+above), not the Nifty50 screener universe -- span eight pages across two
+sidebar sections. Restructured per an explicit user request into a
+guided **"Wheel Strategy"** journey (the section login lands in by
+default): **My Current CSPs** (`pages/11_My_CSP.py`, was sidebar label
+"CSP") -> **My Portfolio Trades** (`pages/12_My_Portfolio_Trades.py`,
+formerly "My CC"/`pages/12_My_CC.py`, Covered-Call only) -> **Other
+Stock Holdings** (new, `pages/15_Other_Stock_Holdings.py`) -> **Other
+Trades** (`pages/13_My_Other_Trades.py`), plus the hidden **Analyse
+Trade**. The Screener itself (`pages/1_Dashboard.py`, sidebar label
+"Screener for CSP") also lives in this section as its first/default
+page. **My Holdings**, **My Positions**, and **My Trades**
+(`pages/7_My_Trades.py`, sidebar label "All Trades") stay together under
+**"My Portfolio"**, unchanged in behavior -- just no longer sharing a
+section with the CSP/Portfolio-Trades/Other-Trades family, which moved
+into "Wheel Strategy" instead. This doc keeps referring to each page by
+its file-derived feature name (matching its filename and its own on-page
+title), not its current sidebar label, which is independent and can be
+renamed without touching the page itself -- see the `st.navigation` dict
+in `app.py`. **Analyse Trade** is reached only by selecting a row on My
+Current CSPs/My Portfolio Trades/Other Trades. All eight share one
+loader/formatting module, `src/utils/portfolio_page.py`
 (cached data loaders, the cache-bust counter, `build_trade_legs`), so a
 cache hit on one page is a cache hit on another -- e.g. switching from My
 Holdings to My Trades doesn't re-fetch holdings that are still fresh.
@@ -870,25 +892,31 @@ portfolio per account (see above), in practice there's just the one tab
 change still shows all of them, just with no way to add another
 live-synced one.
 
-**My Portfolio Trades** and **My Other Trades** are filtered views of
-the exact same Trade list My Trades computes
-(`portfolio_service.group_into_trades`) --
-`is_portfolio_trade_type`/`is_other_trade_type` split it by `trade_type`
-the same way My CSP's `is_csp_trade_type` already did:
+**My Portfolio Trades**, **Other Stock Holdings**, and **My Other
+Trades** are all filtered views of the exact same Trade list My Trades
+computes (`portfolio_service.group_into_trades`).
 `is_portfolio_trade_type` matches any `trade_type` starting with
 "Portfolio " (case-insensitive/trimmed) -- Portfolio CC, Portfolio
 Strangle, Portfolio Jade Lizard, Portfolio Twisted Sister, Portfolio IC,
-or a hand-typed label using the same convention. My Portfolio Trades
-then renders one row **per Trade** (not per leg, since a Trade here can
-carry up to 4 option legs at once -- see "My Portfolio Trades" below for
-the full column layout); My Other Trades stays at My Trades' own
-per-trade summary depth and keeps the same Stock/Index/Other bucket
-tables My Trades uses. A Trade lands on My Portfolio Trades only once
-its Trade Type starts with "Portfolio " on Analyse Trade (or it was
-auto-classified as one, see "Auto-classifying a new Trade" below), and
-on My Other Trades by default (including the untouched "Trade" label,
-and any bare strategy with no stock holding -- Strangle/Jade
-Lizard/Twisted Sister/IC without the prefix).
+or a hand-typed label using the same convention -- and drives My
+Portfolio Trades, which renders one row **per Trade** (not per leg,
+since a Trade here can carry up to 4 option legs at once -- see "My
+Portfolio Trades" below for the full column layout). **Other Stock
+Holdings** picks a different signal entirely -- not the saved
+`trade_type` string at all, but a **shape check on the Trade's actual
+current legs** (`not any(leg["leg_type"] == "Position" for leg in
+t["legs"])`, i.e. every leg is a Holding leg) -- so a stale or
+mislabeled `trade_type` can't hide a plain holding from this page or
+wrongly include one that actually has options now; see its own
+subsection below. `is_other_trade_type` -- neither CSP nor
+Portfolio-prefixed, **and** not an Index Options trade (bucket !=
+"index") -- covers everything left over for My Other Trades: the
+untouched "Trade" label, a bare strategy with no stock holding
+(Strangle/Jade Lizard/Twisted Sister/IC without the "Portfolio " prefix),
+or any other free-text Trade Type. An index-underlying Trade is
+deliberately **not** given its own dedicated page (confirmed with the
+user) -- it's visible only via the unfiltered "All Trades" page under My
+Portfolio.
 
 ### Connecting a broker (Settings > Data Provider)
 
@@ -916,9 +944,10 @@ per-portfolio design), and it governs two things at once:
    bhavcopy-sourced regardless of this setting. **Dhan only** (migration
    `0032`), Stock & Option Data Refresh separately live-prices the
    *specific* F&O contracts that actually matter to this account: every
-   futures/option position it holds, and the Dashboard's own cached 5%
-   CSP/5% CC legs -- see [On-demand refresh](#on-demand-refresh-the-refresh-bar)
-   below.
+   futures/option position it holds, and the cached 5% CSP/5% CC legs
+   (`dashboard_fo_metrics`) the Dashboard's 5% CSP column and the
+   Options page's own 5% CC section respectively read from -- see
+   [On-demand refresh](#on-demand-refresh-the-refresh-bar) below.
 2. **Where your holdings/positions come from.** Picking Dhan
    reveals a credential form and a "Sync now" button right there in
    Settings; picking the default shows nothing further to connect.
@@ -1483,25 +1512,97 @@ rebuild's spec; Analyse Trade's own per-leg version of the same math
 (see My CSP above) is untouched and still computes independently for any
 short option leg, regardless of what this page shows.
 
+### Other Stock Holdings (`pages/15_Other_Stock_Holdings.py`)
+
+New page, added alongside the "Wheel Strategy" restructure: every stock/
+ETF holding with **no option leg at all** -- a Trade whose current legs
+are entirely Holding legs. Deliberately a **shape check**
+(`not any(leg["leg_type"] == "Position" for leg in t["legs"])`), not a
+`trade_type` string match -- unlike every other filtered Trades page,
+this one can't trust a saved label, since the whole point is "does this
+holding *currently* have an option overlay," and a stale/custom
+`trade_type` shouldn't be able to hide a holding here or wrongly include
+one that's actually covered now. Same Stock/Index/Other bucket tabs
+every other Trades page uses.
+
+For each qualifying holding, a covered-call entry trigger broken out by
+near/next/far monthly expiry -- **exactly** `fo_service
+.covered_call_for_holding`, the same per-holding formula already live on
+the Options page's own "Portfolio CC" section (see below): if avg buy
+price is above the last traded price, the strike targeted is ~3% above
+avg buy price; otherwise it's ~5% above the last traded price, picking
+whichever listed strike is nearest that target. Confirmed with the user
+to reuse this unchanged rather than invent a new formula -- this page
+just gathers it for every qualifying holding across the whole portfolio
+at once, instead of requiring a per-symbol visit to Options. Columns:
+Term / Expiry / Strike / Premium / Trade Date / Invested Amount / CC
+ROI / CC Assignment ROI -- identical to the Options page's own table.
+
 ### My Other Trades (`pages/13_My_Other_Trades.py`)
 
 Unlike My CSP/My Portfolio Trades, this one doesn't add any per-leg
 options analytics (no Breakeven/Target P&L/Stop Loss ratchet -- that
 machinery assumes a single well-defined option leg, which an arbitrary
-multi-leg strategy doesn't have). It's just My Trades' own Stock/Index/
-Other Trades tables (`portfolio_service.group_into_trades`, same
-**Underlying Instrument**/**Trade Type**/**Legs**/**Total P&L** columns,
-same "⚠️" mismatch marker, same row-select → "Analyse Trade" flow),
-pre-filtered to `is_other_trade_type(trade_type)` -- i.e. neither "CSP"
-nor Portfolio-prefixed -- before the bucket split, so the untouched
-default "Trade" label, a bare Strangle/Jade Lizard/Twisted Sister/IC
-with no stock holding, or any other free-text Trade Type all land here.
+multi-leg strategy doesn't have). It's just My Trades' own Stock/Other
+Trades tables (`portfolio_service.group_into_trades`, same **Underlying
+Instrument**/**Trade Type**/**Legs**/**Total P&L** columns, same "⚠️"
+mismatch marker, same row-select → "Analyse Trade" flow), pre-filtered
+to `is_other_trade_type(trade_type) and t["bucket"] != "index"` -- i.e.
+neither "CSP" nor Portfolio-prefixed, **and not an Index Options
+trade** -- before the bucket split, so the untouched default "Trade"
+label, a bare Strangle/Jade Lizard/Twisted Sister/IC with no stock
+holding, or any other free-text Trade Type all land here. **No "Index
+Trades" table anymore** -- an index-underlying Trade isn't given its own
+dedicated page at all (confirmed with the user); it's visible only via
+the unfiltered "All Trades" page (My Portfolio section).
 
-Together with My CSP and My Portfolio Trades, every Trade shown on My
-Trades appears on exactly one of these three filtered pages (a Trade's
-`trade_type` can only match one of `is_csp_trade_type`/
+Together with My CSP and My Portfolio Trades, every non-index Trade
+shown on My Trades appears on exactly one of these three filtered pages
+(a Trade's `trade_type` can only match one of `is_csp_trade_type`/
 `is_portfolio_trade_type`/`is_other_trade_type` at a time) -- My Trades
-itself is unfiltered and keeps showing all of them.
+itself is unfiltered and keeps showing all of them, index-bucket
+included.
+
+### Index Options (`pages/16_Index_Options.py`)
+
+New page, its own top-level sidebar section (not nested under "Wheel
+Strategy") -- quick short-strangle ideas (sell OTM PE + sell OTM CE) on
+the 4 major indices: **NIFTY**, **SENSEX**, **BANKNIFTY**, **FINNIFTY**.
+Not a per-user portfolio view -- reads the same public NSE/BSE F&O
+bhavcopy data (`option_contracts`/`latest_option_chain_view`) every
+other F&O page already reads, just for 4 fixed index symbols instead of
+one stock at a time. No new migration, no new ingestion.
+
+NIFTY and SENSEX still carry both weekly *and* monthly expiry cadence,
+so each gets **3 rows** -- Current Week / Next Week / Current Month, at
+3% / 4% / 5% away from spot respectively (wider term, wider strangle).
+BANKNIFTY and FINNIFTY are monthly-only now (confirmed live via
+`fo_repo.list_option_expiries` while building this page -- there's no
+weekly contract left to show), so each gets exactly **1 row** (Current
+Month, at 5%).
+
+Two new pure functions in `fo_service.py` do the work:
+- **`classify_index_expiry_terms(expiries, today)`** -- picks the actual
+  dates for "current week"/"next week"/"current month" out of a symbol's
+  own listed expiries. Filters to `expiry >= today` itself first --
+  **required**, not a redundant safety net: confirmed live that
+  `option_contracts.is_open` does not reliably flip the day after an
+  expiry passes (an already-past expiry was still returned the very next
+  day), so trusting the raw "open" list alone can surface a dead expiry
+  as "current week." "Current month" is the *last* remaining expiry
+  whose `(year, month)` matches the *soonest* remaining expiry's own
+  month -- rolls forward to next month automatically once every expiry
+  in the current calendar month has passed.
+- **`index_strangle_for_expiry(chain_rows, pct)`** -- spot from
+  `option_chain_summary(chain_rows)["spot"]`; each side (PE/CE)
+  independently picks the single listed strike **nearest** its own
+  `spot * (1 ∓ pct/100)` target (the same "nearest" convention
+  `csp_5pct_for_rows` uses, not `cc_5pct_for_rows`'s floor-filter --
+  that floor-filter exists specifically to avoid assignment risk on a
+  real *held* covered call, which doesn't apply to a speculative index
+  strangle idea). Returns both strikes/premiums plus **Credit (per
+  unit)** (`pe_premium + ce_premium`) and **Credit (1 lot)**
+  (lot-size-aware, from the chain's own `lot_size` column).
 
 ### Trade History (`pages/14_Trade_History.py`) -- Dhan only
 

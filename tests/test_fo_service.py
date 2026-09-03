@@ -347,6 +347,135 @@ class TestCc5PctForRows:
         assert result["trade_date"] == "2026-07-20"
 
 
+class TestClassifyIndexExpiryTerms:
+    def test_weekly_and_monthly_cadence_gives_three_distinct_terms(self):
+        # NIFTY/SENSEX-shaped: weekly expiries plus a further-out monthly
+        # one -- all three land on distinct dates.
+        expiries = [date(2026, 9, 8), date(2026, 9, 15), date(2026, 9, 22), date(2026, 9, 29), date(2026, 10, 27)]
+        result = fo_service.classify_index_expiry_terms(expiries, today=date(2026, 9, 2))
+        assert result == {
+            "current_week": date(2026, 9, 8),
+            "next_week": date(2026, 9, 15),
+            "current_month": date(2026, 9, 29),
+        }
+
+    def test_monthly_only_cadence_current_week_and_month_coincide(self):
+        # BANKNIFTY/FINNIFTY-shaped: no weekly cadence at all -- the
+        # soonest expiry is both "current week" and "current month".
+        expiries = [date(2026, 9, 29), date(2026, 10, 27), date(2026, 11, 23)]
+        result = fo_service.classify_index_expiry_terms(expiries, today=date(2026, 9, 2))
+        assert result["current_week"] == date(2026, 9, 29)
+        assert result["current_month"] == date(2026, 9, 29)
+        assert result["next_week"] == date(2026, 10, 27)
+
+    def test_already_past_expiry_is_excluded(self):
+        # Confirmed live: option_contracts.is_open doesn't reliably flip
+        # the day after an expiry passes -- classify_index_expiry_terms
+        # must filter to >= today itself regardless of what the caller's
+        # own "open" list already excluded (or didn't).
+        expiries = [date(2026, 9, 1), date(2026, 9, 8), date(2026, 9, 15)]
+        result = fo_service.classify_index_expiry_terms(expiries, today=date(2026, 9, 2))
+        assert result["current_week"] == date(2026, 9, 8)
+
+    def test_no_future_expiries_returns_empty(self):
+        expiries = [date(2026, 9, 1)]
+        assert fo_service.classify_index_expiry_terms(expiries, today=date(2026, 9, 2)) == {}
+
+    def test_empty_input_returns_empty(self):
+        assert fo_service.classify_index_expiry_terms([], today=date(2026, 9, 2)) == {}
+
+    def test_single_remaining_expiry_has_no_next_week(self):
+        expiries = [date(2026, 9, 29)]
+        result = fo_service.classify_index_expiry_terms(expiries, today=date(2026, 9, 2))
+        assert result == {"current_week": date(2026, 9, 29), "current_month": date(2026, 9, 29)}
+
+    def test_current_month_rolls_forward_once_this_months_expiry_has_passed(self):
+        # today is already past every September expiry -- "current month"
+        # rolls to October, the soonest remaining expiry's own month.
+        expiries = [date(2026, 10, 27), date(2026, 11, 23)]
+        result = fo_service.classify_index_expiry_terms(expiries, today=date(2026, 9, 30))
+        assert result["current_month"] == date(2026, 10, 27)
+
+
+class TestIndexStrangleForExpiry:
+    EXPIRY = "2026-09-29"
+
+    def _rows(self, spot=1000.0, lot_size=50):
+        return [
+            {"option_type": "PE", "strike_price": 950.0, "expiry_date": self.EXPIRY, "last_price": 10.0, "underlying_price": spot, "lot_size": lot_size},
+            {"option_type": "PE", "strike_price": 900.0, "expiry_date": self.EXPIRY, "last_price": 5.0, "underlying_price": spot, "lot_size": lot_size},
+            {"option_type": "CE", "strike_price": 1050.0, "expiry_date": self.EXPIRY, "last_price": 12.0, "underlying_price": spot, "lot_size": lot_size},
+            {"option_type": "CE", "strike_price": 1100.0, "expiry_date": self.EXPIRY, "last_price": 6.0, "underlying_price": spot, "lot_size": lot_size},
+        ]
+
+    def test_picks_nearest_strike_to_target_on_each_side(self):
+        # spot 1000, pct=5 -> PE target 950 (exact match), CE target 1050 (exact match)
+        result = fo_service.index_strangle_for_expiry(self._rows(), pct=5.0)
+        assert result["pe_strike"] == 950.0
+        assert result["pe_premium"] == 10.0
+        assert result["ce_strike"] == 1050.0
+        assert result["ce_premium"] == 12.0
+
+    def test_nearest_is_not_a_floor_filter_unlike_cc_5pct(self):
+        # target 1050 sits exactly between no strikes here, but confirms
+        # "nearest" picks the closer one on either side, not "lowest
+        # strike still at or above target" the way cc_5pct_for_rows does.
+        rows = [
+            {"option_type": "PE", "strike_price": 940.0, "expiry_date": self.EXPIRY, "last_price": 8.0, "underlying_price": 1000.0, "lot_size": 50},
+            {"option_type": "CE", "strike_price": 1040.0, "expiry_date": self.EXPIRY, "last_price": 14.0, "underlying_price": 1000.0, "lot_size": 50},
+            {"option_type": "CE", "strike_price": 1200.0, "expiry_date": self.EXPIRY, "last_price": 1.0, "underlying_price": 1000.0, "lot_size": 50},
+        ]
+        # pct=4 -> CE target 1040 -- nearer strike (1040, exact) must win
+        # over the far one (1200), even though 1200 is "more OTM."
+        result = fo_service.index_strangle_for_expiry(rows, pct=4.0)
+        assert result["ce_strike"] == 1040.0
+
+    def test_credit_per_unit_and_total(self):
+        result = fo_service.index_strangle_for_expiry(self._rows(), pct=5.0)
+        assert result["credit_per_unit"] == 22.0  # 10.0 + 12.0
+        assert result["credit_total"] == 1100.0  # 22.0 * 50
+
+    def test_spot_is_echoed_back(self):
+        result = fo_service.index_strangle_for_expiry(self._rows(spot=24000.0), pct=3.0)
+        assert result["spot"] == 24000.0
+
+    def test_no_pe_rows_returns_none(self):
+        rows = [r for r in self._rows() if r["option_type"] == "CE"]
+        assert fo_service.index_strangle_for_expiry(rows, pct=5.0) is None
+
+    def test_no_ce_rows_returns_none(self):
+        rows = [r for r in self._rows() if r["option_type"] == "PE"]
+        assert fo_service.index_strangle_for_expiry(rows, pct=5.0) is None
+
+    def test_no_spot_returns_none(self):
+        rows = [{**r, "underlying_price": None} for r in self._rows()]
+        assert fo_service.index_strangle_for_expiry(rows, pct=5.0) is None
+
+    def test_empty_rows_returns_none(self):
+        assert fo_service.index_strangle_for_expiry([], pct=5.0) is None
+
+    def test_missing_lot_size_makes_credit_total_none_but_not_credit_per_unit(self):
+        rows = [{**r, "lot_size": None} for r in self._rows()]
+        result = fo_service.index_strangle_for_expiry(rows, pct=5.0)
+        assert result["credit_per_unit"] == 22.0
+        assert result["credit_total"] is None
+
+    def test_prefers_freshest_trade_date_over_pure_nearest_strike(self):
+        # spot 1000, pct=5 -> PE target 950. Strike 950 is the literal
+        # nearest match but hasn't traded since 2026-08-01 (illiquid);
+        # strike 940 is farther from target but is the only PE strike
+        # from the freshest trade_date (2026-09-01), so it must win
+        # instead -- mirrors cc_5pct_for_rows' own documented behavior.
+        rows = [
+            {"option_type": "PE", "strike_price": 950.0, "expiry_date": self.EXPIRY, "last_price": 999.0, "underlying_price": 1000.0, "lot_size": 50, "trade_date": "2026-08-01"},
+            {"option_type": "PE", "strike_price": 940.0, "expiry_date": self.EXPIRY, "last_price": 8.0, "underlying_price": 1000.0, "lot_size": 50, "trade_date": "2026-09-01"},
+            {"option_type": "CE", "strike_price": 1050.0, "expiry_date": self.EXPIRY, "last_price": 12.0, "underlying_price": 1000.0, "lot_size": 50, "trade_date": "2026-09-01"},
+        ]
+        result = fo_service.index_strangle_for_expiry(rows, pct=5.0)
+        assert result["pe_strike"] == 940.0
+        assert result["pe_premium"] == 8.0
+
+
 class TestCoveredCallForHolding:
     """The Portfolio page's per-holding covered-call suggestion --
     distinct from TestCc5PctForRows above (spot-based, fixed 5% OTM,

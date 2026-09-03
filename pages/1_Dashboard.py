@@ -5,6 +5,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 from postgrest.exceptions import APIError
+from pydantic import ValidationError
 
 from src.calculations.classification import criterion_fundamentals
 from src.config import get_settings
@@ -13,6 +14,7 @@ from src.repositories import fetch_log_repo, fo_repo, settings_repo, snapshot_re
 from src.services.market_calendar import get_market_state
 from src.services.threshold_override import apply_user_thresholds
 from src.utils.formatting import direction_arrow, format_inr, format_pct, pass_fail_icon
+from src.utils.portfolio_page import ensure_cache_bust, load_csp_symbols
 from src.utils.refresh_bar import render_stock_refresh_button
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.timezones import now_ist
@@ -25,6 +27,16 @@ client = get_user_client_cached()
 user_id = current_user_id()
 user_settings = settings_repo.get_user_settings(client, user_id)
 inject_global_styles(user_settings.theme)  # re-inject with the user's actual theme -- a later <style> tag wins
+
+ensure_cache_bust()
+try:
+    csp_symbols = load_csp_symbols(client, user_id, st.session_state["portfolio_cache_bust"])
+except (APIError, ValidationError):
+    # portfolio_holdings/positions not provisioned yet (migration 0012), or
+    # a malformed saved row -- degrade to "no flags" rather than crashing
+    # the whole screener over a column that's a bonus on top of the core
+    # screener data anyway.
+    csp_symbols = set()
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -373,12 +385,17 @@ metrics_by_symbol = (
 
 # ---------------------------------------------------------------------
 # Live F&O override (Dhan only, migration 0032) -- "Market Data Refresh"
-# also live-prices the exact CSP/CC legs cached above for a Dhan-provider
+# also live-prices the exact CSP leg cached above for a Dhan-provider
 # account (see src/utils/refresh_bar.py's _dhan_fo_universe); recompute
-# csp_pct/cc_pct from the live premium using the same formulas
-# fo_service.csp_5pct_for_rows/cc_5pct_for_rows already document
-# (csp_pct = put_price / strike * 100, cc_pct = premium / spot * 100) --
-# only the premium itself is live, the cached strike/spot are unchanged.
+# csp_pct from the live premium using the same formula
+# fo_service.csp_5pct_for_rows already documents
+# (csp_pct = put_price / strike * 100) -- only the premium itself is
+# live, the cached strike/spot are unchanged. CC's own equivalent
+# (cc_strike/cc_pct, still cached in dashboard_fo_metrics for
+# pages/5_Options.py's own "5% CC" section) is no longer read here --
+# this screener dropped its "5% CC" column entirely (CC decisions moved
+# to the "Other Stock Holdings" page instead, see fo_service's
+# covered_call_for_holding).
 # ---------------------------------------------------------------------
 live_fo_premiums: dict = {}
 if user_settings.data_provider == "dhan" and metrics_by_symbol:
@@ -387,8 +404,6 @@ if user_settings.data_provider == "dhan" and metrics_by_symbol:
         expiry = date.fromisoformat(m["expiry_date"])
         if m.get("csp_strike") is not None:
             fo_contracts.append((m["symbol"], expiry, float(m["csp_strike"]), "PE"))
-        if m.get("cc_strike") is not None:
-            fo_contracts.append((m["symbol"], expiry, float(m["cc_strike"]), "CE"))
     live_fo_premiums = snapshot_repo.get_user_live_fo_prices(client, user_id, fo_contracts)
 
 
@@ -403,19 +418,7 @@ def _csp_pct(symbol: str) -> float | None:
     return m.get("csp_pct")
 
 
-def _cc_pct(symbol: str) -> float | None:
-    m = metrics_by_symbol.get(symbol)
-    if not m or m.get("cc_strike") is None:
-        return (m or {}).get("cc_pct")
-    key = (symbol, date.fromisoformat(m["expiry_date"]), float(m["cc_strike"]), "CE")
-    live_price = live_fo_premiums.get(key)
-    if live_price is not None and m.get("spot"):
-        return live_price / m["spot"] * 100
-    return m.get("cc_pct")
-
-
 filtered["csp_5pct"] = filtered["symbol"].map(_csp_pct)
-filtered["cc_5pct"] = filtered["symbol"].map(_cc_pct)
 
 filtered = filtered.sort_values("symbol", ascending=True, na_position="last")
 
@@ -444,6 +447,12 @@ for _, r in filtered.iterrows():
     display_rows.append(
         {
             "Stock": r["symbol"],
+            # "Has the user already taken a CSP on this stock?" -- a
+            # blank rather than a ❌ for "no", matching Momentum/52W's own
+            # convention of only marking the affirmative case, since most
+            # rows won't have one and a ❌ on every other row would be
+            # noisier than informative.
+            "CSP Taken": "✅" if r["symbol"] in csp_symbols else "",
             "LTP": ltp_cell,
             "52W High": f"{format_inr(r['week_52_high'])} {pass_fail_icon(r['criterion_52w_high'])}" if pd.notna(r["week_52_high"]) else "N/A",
             "52W Low": f"{format_inr(r['week_52_low'])} {pass_fail_icon(r['criterion_52w_low'])}" if pd.notna(r["week_52_low"]) else "N/A",
@@ -452,7 +461,6 @@ for _, r in filtered.iterrows():
             "20D": f"{direction_arrow(r['return_20d'])} {format_pct(r['return_20d'])}",
             "Momentum": pass_fail_icon(r["criterion_b"]),
             "5% CSP": format_pct(r["csp_5pct"], signed=False) if pd.notna(r["csp_5pct"]) else "N/A",
-            "5% CC": format_pct(r["cc_5pct"], signed=False) if pd.notna(r["cc_5pct"]) else "N/A",
             "Dividend": f"{format_pct(r['ttm_dividend_yield'], signed=False)} {pass_fail_icon(r['criterion_a'])}",
             "PEG": f"{r['peg_ratio']:.2f} {pass_fail_icon(r['criterion_c'])}" if pd.notna(r["peg_ratio"]) else "N/A",
             "Fundamentals": pass_fail_icon(criterion_fundamentals(r["criterion_a"], r["criterion_c"])),
