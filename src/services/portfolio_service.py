@@ -1,6 +1,7 @@
 """Broker API response translation and valuation for the Portfolio
 feature's pages (7_My_Trades.py, 8_My_Holdings.py, 9_My_Positions.py,
-10_Analyse_Trade.py, 11_My_CSP.py, 12_My_CC.py, 13_My_Other_Trades.py) --
+10_Analyse_Trade.py, 11_My_CSP.py, 12_My_Portfolio_Trades.py,
+15_Other_Stock_Holdings.py, 14_Trade_History.py, 5_Options.py) --
 holdings/positions come from a live
 Dhan sync (Settings' "Data Provider" section,
 src/utils/data_provider_settings.py) only; CSV upload was dropped
@@ -569,21 +570,6 @@ def is_portfolio_trade_type(trade_type: str) -> bool:
     an exact one against a fixed list -- a hand-typed "Portfolio Collar"
     or similar it doesn't yet auto-detect still lands here."""
     return trade_type.strip().lower().startswith("portfolio ")
-
-
-def is_other_trade_type(trade_type: str) -> bool:
-    """Whether a Trade's `trade_type` is neither CSP nor a Portfolio-
-    prefixed type -- the signal `pages/13_My_Other_Trades.py` filters on:
-    every Trade from My Trades that isn't already broken out onto My CSP
-    or My Portfolio Trades, regardless of whether it's a real options
-    strategy (a bare Strangle/Jade Lizard/Twisted Sister/IC with no
-    holding, a custom label, ...) or just the default "Trade". Checks
-    `is_portfolio_trade_type` rather than a narrower "is this specifically
-    a Covered Call" check -- My Portfolio Trades now covers every
-    Portfolio-prefixed type (CC/Strangle/Jade Lizard/Twisted Sister/IC),
-    not just Covered Call, so all of them need to be excluded here too or
-    they'd double up on both pages."""
-    return not is_csp_trade_type(trade_type) and not is_portfolio_trade_type(trade_type)
 
 
 def classify_trade_type(legs: list[dict]) -> str | None:

@@ -253,26 +253,6 @@ class TestIsPortfolioTradeType:
         assert portfolio_service.is_portfolio_trade_type("Hedged") is False
 
 
-class TestIsOtherTradeType:
-    def test_default_trade_type_is_other(self):
-        assert portfolio_service.is_other_trade_type("Trade") is True
-
-    def test_bare_strangle_with_no_holding_is_other(self):
-        assert portfolio_service.is_other_trade_type("Strangle") is True
-
-    def test_csp_is_not_other(self):
-        assert portfolio_service.is_other_trade_type("CSP") is False
-
-    def test_portfolio_cc_is_not_other(self):
-        assert portfolio_service.is_other_trade_type(" Portfolio CC ") is False
-
-    def test_portfolio_strangle_is_not_other(self):
-        # Every Portfolio-prefixed type is excluded here, not just
-        # Portfolio CC -- they all now live on My Portfolio Trades
-        # instead, and would double up on both pages otherwise.
-        assert portfolio_service.is_other_trade_type("Portfolio Strangle") is False
-
-
 class TestCspBreakevenPrice:
     def test_subtracts_avg_price_from_strike(self):
         assert portfolio_service.csp_breakeven_price(23500.0, 45.0) == 23455.0

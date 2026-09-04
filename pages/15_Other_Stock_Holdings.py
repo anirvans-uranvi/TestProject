@@ -4,7 +4,13 @@ with a covered-call entry trigger per holding so writing a call against it
 doesn't require a separate visit to Options per symbol. New page, added per
 an explicit user request as part of the "Wheel Strategy" journey: Screener
 for CSP -> My Current CSPs -> My Portfolio Trades (holdings *with* option
-legs) -> **this page** (holdings with none) -> Other Trades.
+legs) -> **this page** (holdings with none).
+
+**Stock bucket only** -- the page originally also showed Index Holdings
+and Other Holdings tables (the same shape check's `index`/`other`
+buckets), removed by explicit request; `_merged`/`holding_only_trades`
+still compute across every bucket (unchanged, shared shape-check logic),
+only the render call for the non-stock buckets was dropped.
 
 A Trade lands here purely by *shape* -- `not any(leg["leg_type"] ==
 "Position" for leg in t["legs"])` -- not by trusting the stored
@@ -197,13 +203,11 @@ def _render_other_holdings_tab(
             "ltp": holding_legs[0]["ltp"],
         }
 
-    merged_by_bucket: dict[str, list[dict]] = {"stock": [], "index": [], "other": []}
-    for t in holding_only_trades:
-        merged_by_bucket[t["bucket"]].append(_merged(t))
+    # Only the Stock bucket is shown on this page (Index/Other Holdings
+    # tables removed by request).
+    stock_holdings = [_merged(t) for t in holding_only_trades if t["bucket"] == "stock"]
 
-    _render_holdings_cc_table(title="Stock Holdings", holdings=merged_by_bucket["stock"], key_suffix="stock", portfolio_name=portfolio_name)
-    _render_holdings_cc_table(title="Index Holdings", holdings=merged_by_bucket["index"], key_suffix="index", portfolio_name=portfolio_name)
-    _render_holdings_cc_table(title="Other Holdings", holdings=merged_by_bucket["other"], key_suffix="other", portfolio_name=portfolio_name)
+    _render_holdings_cc_table(title="Stock Holdings", holdings=stock_holdings, key_suffix="stock", portfolio_name=portfolio_name)
 
 
 portfolio_names = sorted({h.portfolio_name for h in saved_holdings} | {p.portfolio_name for p in saved_positions})

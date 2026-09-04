@@ -13,8 +13,8 @@ import streamlit as st
 # per an explicit user request into a guided "Wheel Strategy" journey --
 # screen for a CSP candidate -> track running CSPs -> see stocks that
 # have been assigned into holdings with option overlays -> see plain
-# holdings with a covered-call trigger -> everything else -- with
-# "Index Options" (strangle ideas on the 4 major indices) as its own
+# holdings with a covered-call trigger -- with "Index Options" (strangle
+# ideas on the 4 major indices) as its own
 # section alongside it. "Market" (raw Equity/Options lookup, kept as its
 # own section per the user's explicit choice) and "My Portfolio"
 # (Holdings/Positions/All Trades) and "Trade History" round out the
@@ -29,7 +29,6 @@ pages = {
         st.Page("pages/11_My_CSP.py", title="My Current CSPs"),
         st.Page("pages/12_My_Portfolio_Trades.py", title="My Portfolio Trades"),
         st.Page("pages/15_Other_Stock_Holdings.py", title="Other Stock Holdings"),
-        st.Page("pages/13_My_Other_Trades.py", title="Other Trades"),
         st.Page("pages/10_Analyse_Trade.py", title="Analyse Trade", visibility="hidden"),
     ],
     "Index Options": [

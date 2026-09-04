@@ -45,15 +45,12 @@ pages/                  Streamlit multipage app (each still its own script,
                               plus up to 4 option legs (PE Sell/PE Buy/CE Sell/CE Buy) -- sidebar label "My
                               Portfolio Trades", nested under "Wheel Strategy" (formerly "My CC", Covered-Call
                               only)
-  15_Other_Stock_Holdings.py  Every stock/ETF holding with no option leg at all, with a per-holding covered-call
-                              entry trigger (near/next/far month) -- sidebar label "Other Stock Holdings", nested
-                              under "Wheel Strategy"
-  13_My_Other_Trades.py       Every Trade from My Trades whose Trade Type is neither "CSP" nor Portfolio-prefixed,
-                              excluding Index Options trades -- sidebar label "Other Trades", nested under "Wheel
-                              Strategy"
+  15_Other_Stock_Holdings.py  Every stock/ETF holding with no option leg at all (Stock bucket only), with a
+                              per-holding covered-call entry trigger (near/next/far month) -- sidebar label
+                              "Other Stock Holdings", nested under "Wheel Strategy"
   10_Analyse_Trade.py          One Trade's legs -- correct underlying, rename trade type, merge/split
                               (hidden from the sidebar -- reached only via My Current CSPs'/My Portfolio
-                              Trades'/Other Trades' row selection)
+                              Trades' row selection)
   16_Index_Options.py         Short-strangle ideas (sell OTM PE + sell OTM CE) on NIFTY/SENSEX/BANKNIFTY/FINNIFTY
                               -- sidebar label "Index Options", its own top-level sidebar section
   2_Stock_Detail.py       Price/volume/dividend charts, scorecard, per-stock alerts -- sidebar label "Equity",
@@ -441,7 +438,7 @@ regardless of which page triggered the refresh.
 | **Bhavcopy Refresh** (NSE + BSE) | Settings, same section | always | `render_fundamental_and_bhavcopy_refresh` |
 | **Stock Data Refresh** | every page except Settings | Data Provider = YFinance/Bhavcopy | `render_stock_refresh_button` |
 | **Stock & Option Data Refresh from Dhan** / **Stock Data Refresh from Dhan** / **Option Data Refresh from Dhan** | every page except Settings | Data Provider = Dhan | `render_stock_refresh_button` → `_render_dhan_stock_option_refresh_buttons` |
-| **Portfolio Refresh** | My Trades, My Holdings, My Positions, My CSP, My Portfolio Trades, My Other Trades | Data Provider = Dhan | `render_portfolio_refresh_button` |
+| **Portfolio Refresh** | My Trades, My Holdings, My Positions, My CSP, My Portfolio Trades, Other Stock Holdings | Data Provider = Dhan | `render_portfolio_refresh_button` |
 | **Refresh Instrument Master - Dhan** | Settings ("Data Provider" section) | Data Provider = Dhan | `_render_dhan_instrument_master_refresh` |
 
 - **Fundamental Data Refresh** -- a fresh Yahoo Finance fundamentals
@@ -875,62 +872,64 @@ published yet.
 
 Your own holdings and F&O positions -- synced live from a connected
 broker (see [Connecting a broker](#connecting-a-broker-settings--data-provider)
-above), not the Nifty50 screener universe -- span eight pages across two
+above), not the Nifty50 screener universe -- span seven pages across two
 sidebar sections. Restructured per an explicit user request into a
 guided **"Wheel Strategy"** journey (the section login lands in by
 default): **My Current CSPs** (`pages/11_My_CSP.py`, was sidebar label
 "CSP") -> **My Portfolio Trades** (`pages/12_My_Portfolio_Trades.py`,
 formerly "My CC"/`pages/12_My_CC.py`, Covered-Call only) -> **Other
-Stock Holdings** (new, `pages/15_Other_Stock_Holdings.py`) -> **Other
-Trades** (`pages/13_My_Other_Trades.py`), plus the hidden **Analyse
-Trade**. The Screener itself (`pages/1_Dashboard.py`, sidebar label
-"Screener for CSP") also lives in this section as its first/default
-page. **My Holdings**, **My Positions**, and **My Trades**
+Stock Holdings** (`pages/15_Other_Stock_Holdings.py`), plus the hidden
+**Analyse Trade**. The Screener itself (`pages/1_Dashboard.py`, sidebar
+label "Screener for CSP") also lives in this section as its
+first/default page. **My Holdings**, **My Positions**, and **My Trades**
 (`pages/7_My_Trades.py`, sidebar label "All Trades") stay together under
 **"My Portfolio"**, unchanged in behavior -- just no longer sharing a
-section with the CSP/Portfolio-Trades/Other-Trades family, which moved
-into "Wheel Strategy" instead. This doc keeps referring to each page by
-its file-derived feature name (matching its filename and its own on-page
+section with the CSP/Portfolio-Trades family, which moved into "Wheel
+Strategy" instead. This doc keeps referring to each page by its
+file-derived feature name (matching its filename and its own on-page
 title), not its current sidebar label, which is independent and can be
 renamed without touching the page itself -- see the `st.navigation` dict
 in `app.py`. **Analyse Trade** is reached only by selecting a row on My
-Current CSPs/My Portfolio Trades/Other Trades. All eight share one
-loader/formatting module, `src/utils/portfolio_page.py`
-(cached data loaders, the cache-bust counter, `build_trade_legs`), so a
-cache hit on one page is a cache hit on another -- e.g. switching from My
-Holdings to My Trades doesn't re-fetch holdings that are still fresh.
-Every page keeps the same "one tab per portfolio" structure it always
-has, but since a live broker sync now targets exactly one resolved
-portfolio per account (see above), in practice there's just the one tab
--- a pre-existing account with multiple portfolio_names from before this
-change still shows all of them, just with no way to add another
-live-synced one.
+Current CSPs/My Portfolio Trades. All seven share one loader/formatting
+module, `src/utils/portfolio_page.py` (cached data loaders, the
+cache-bust counter, `build_trade_legs`), so a cache hit on one page is a
+cache hit on another -- e.g. switching from My Holdings to My Trades
+doesn't re-fetch holdings that are still fresh. Every page keeps the
+same "one tab per portfolio" structure it always has, but since a live
+broker sync now targets exactly one resolved portfolio per account (see
+above), in practice there's just the one tab -- a pre-existing account
+with multiple portfolio_names from before this change still shows all
+of them, just with no way to add another live-synced one.
 
-**My Portfolio Trades**, **Other Stock Holdings**, and **My Other
-Trades** are all filtered views of the exact same Trade list My Trades
-computes (`portfolio_service.group_into_trades`).
-`is_portfolio_trade_type` matches any `trade_type` starting with
-"Portfolio " (case-insensitive/trimmed) -- Portfolio CC, Portfolio
-Strangle, Portfolio Jade Lizard, Portfolio Twisted Sister, Portfolio IC,
-or a hand-typed label using the same convention -- and drives My
-Portfolio Trades, which renders one row **per Trade** (not per leg,
-since a Trade here can carry up to 4 option legs at once -- see "My
-Portfolio Trades" below for the full column layout). **Other Stock
-Holdings** picks a different signal entirely -- not the saved
-`trade_type` string at all, but a **shape check on the Trade's actual
-current legs** (`not any(leg["leg_type"] == "Position" for leg in
-t["legs"])`, i.e. every leg is a Holding leg) -- so a stale or
+**There used to be an eighth page, "My Other Trades"**
+(`pages/13_My_Other_Trades.py`) -- every Trade whose Trade Type was
+neither CSP nor Portfolio-prefixed, excluding Index Options trades --
+**deleted entirely per an explicit user request**, along with its
+`portfolio_service.is_other_trade_type` helper (now unused, removed
+rather than left as dead code). Its filtered content isn't shown
+anywhere dedicated anymore -- it's still visible only via the
+unfiltered "All Trades" page under My Portfolio.
+
+**My Portfolio Trades** and **Other Stock Holdings** are both filtered
+views of the exact same Trade list My Trades computes
+(`portfolio_service.group_into_trades`). `is_portfolio_trade_type`
+matches any `trade_type` starting with "Portfolio " (case-insensitive/
+trimmed) -- Portfolio CC, Portfolio Strangle, Portfolio Jade Lizard,
+Portfolio Twisted Sister, Portfolio IC, or a hand-typed label using the
+same convention -- and drives My Portfolio Trades, which renders one row
+**per Trade** (not per leg, since a Trade here can carry up to 4 option
+legs at once -- see "My Portfolio Trades" below for the full column
+layout). **Other Stock Holdings** picks a different signal entirely --
+not the saved `trade_type` string at all, but a **shape check on the
+Trade's actual current legs** (`not any(leg["leg_type"] == "Position"
+for leg in t["legs"])`, i.e. every leg is a Holding leg) -- so a stale or
 mislabeled `trade_type` can't hide a plain holding from this page or
 wrongly include one that actually has options now; see its own
-subsection below. `is_other_trade_type` -- neither CSP nor
-Portfolio-prefixed, **and** not an Index Options trade (bucket !=
-"index") -- covers everything left over for My Other Trades: the
-untouched "Trade" label, a bare strategy with no stock holding
-(Strangle/Jade Lizard/Twisted Sister/IC without the "Portfolio " prefix),
-or any other free-text Trade Type. An index-underlying Trade is
-deliberately **not** given its own dedicated page (confirmed with the
-user) -- it's visible only via the unfiltered "All Trades" page under My
-Portfolio.
+subsection below. The page shows only the **Stock** bucket's holdings --
+its Index Holdings and Other Holdings tables were removed per an
+explicit user request; the underlying bucket split
+(`portfolio_service.classify_underlying_bucket`) is unaffected, just no
+longer rendered for the `index`/`other` buckets on this page.
 
 ### Connecting a broker (Settings > Data Provider)
 
@@ -1551,16 +1550,21 @@ every multi-leg trade shown here, only genuinely offsetting structures
 
 ### Other Stock Holdings (`pages/15_Other_Stock_Holdings.py`)
 
-New page, added alongside the "Wheel Strategy" restructure: every stock/
-ETF holding with **no option leg at all** -- a Trade whose current legs
-are entirely Holding legs. Deliberately a **shape check**
+Added alongside the "Wheel Strategy" restructure: every stock/ETF
+holding with **no option leg at all** -- a Trade whose current legs are
+entirely Holding legs. Deliberately a **shape check**
 (`not any(leg["leg_type"] == "Position" for leg in t["legs"])`), not a
 `trade_type` string match -- unlike every other filtered Trades page,
 this one can't trust a saved label, since the whole point is "does this
 holding *currently* have an option overlay," and a stale/custom
 `trade_type` shouldn't be able to hide a holding here or wrongly include
-one that's actually covered now. Same Stock/Index/Other bucket tabs
-every other Trades page uses.
+one that's actually covered now.
+
+**Stock bucket only** -- shows one table, "Stock Holdings". It
+originally also showed "Index Holdings" and "Other Holdings" tables (the
+same shape check's `index`/`other` buckets), removed entirely per an
+explicit user request; the underlying bucket classification is
+unaffected, just no longer rendered for those two buckets here.
 
 For each qualifying holding, a covered-call entry trigger broken out by
 near/next/far monthly expiry -- **exactly** `fo_service
@@ -1574,31 +1578,6 @@ just gathers it for every qualifying holding across the whole portfolio
 at once, instead of requiring a per-symbol visit to Options. Columns:
 Term / Expiry / Strike / Premium / Trade Date / Invested Amount / CC
 ROI / CC Assignment ROI -- identical to the Options page's own table.
-
-### My Other Trades (`pages/13_My_Other_Trades.py`)
-
-Unlike My CSP/My Portfolio Trades, this one doesn't add any per-leg
-options analytics (no Breakeven/Target P&L/Stop Loss ratchet -- that
-machinery assumes a single well-defined option leg, which an arbitrary
-multi-leg strategy doesn't have). It's just My Trades' own Stock/Other
-Trades tables (`portfolio_service.group_into_trades`, same **Underlying
-Instrument**/**Trade Type**/**Legs**/**Total P&L** columns, same "⚠️"
-mismatch marker, same row-select → "Analyse Trade" flow), pre-filtered
-to `is_other_trade_type(trade_type) and t["bucket"] != "index"` -- i.e.
-neither "CSP" nor Portfolio-prefixed, **and not an Index Options
-trade** -- before the bucket split, so the untouched default "Trade"
-label, a bare Strangle/Jade Lizard/Twisted Sister/IC with no stock
-holding, or any other free-text Trade Type all land here. **No "Index
-Trades" table anymore** -- an index-underlying Trade isn't given its own
-dedicated page at all (confirmed with the user); it's visible only via
-the unfiltered "All Trades" page (My Portfolio section).
-
-Together with My CSP and My Portfolio Trades, every non-index Trade
-shown on My Trades appears on exactly one of these three filtered pages
-(a Trade's `trade_type` can only match one of `is_csp_trade_type`/
-`is_portfolio_trade_type`/`is_other_trade_type` at a time) -- My Trades
-itself is unfiltered and keeps showing all of them, index-bucket
-included.
 
 ### Index Options (`pages/16_Index_Options.py`)
 

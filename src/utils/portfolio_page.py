@@ -1,8 +1,8 @@
 """Cross-page helpers for the Portfolio feature's pages -- My Trades (7),
 My Holdings (8), My Positions (9), My CSP (11), My Portfolio Trades (12),
-My Other Trades (13), and Analyse Trade (10, hidden from the sidebar) --
-plus the Screener for CSP page (1, `load_trade_types_by_symbol` only, for
-its "Trade Taken" column) and Other Stock Holdings (15, reuses `build_trade_legs`/
+and Analyse Trade (10, hidden from the sidebar) -- plus the Screener for
+CSP page (1, `load_trade_types_by_symbol` only, for its "Trade Taken"
+column) and Other Stock Holdings (15, reuses `build_trade_legs`/
 `load_option_expiries`/`load_option_chain` the same way). Broker
 connect/sync UI lives in Settings' "Data Provider" section
 (src/utils/data_provider_settings.py) now, not a dedicated page -- these
