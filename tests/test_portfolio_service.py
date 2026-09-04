@@ -747,7 +747,7 @@ class TestGroupIntoTrades:
         assert trades[0]["trade_type"] == "Trade"
 
 
-class TestSymbolsWithActiveCsp:
+class TestTradeTypeBySymbol:
     def _position(self, *, symbol, option_type, qty, raw_name=None, broker="Dhan"):
         return {
             "leg_type": "Position",
@@ -768,59 +768,66 @@ class TestSymbolsWithActiveCsp:
             "option_type": None,
         }
 
-    def test_csp_shaped_position_is_included_once_classified_and_saved(self):
-        # Same characteristic My CSP itself already has: a Trade with no
-        # saved meta row defaults to the plain "Trade" label, never the
-        # raw detected shape -- so this needs the saved "CSP" label
-        # _auto_classify_new_trades would have already written right
-        # after the sync that brought this position in.
+    def test_saved_trade_type_is_reported(self):
         legs = [self._position(symbol="X", option_type=OptionType.PE, qty=-75)]
         trade_meta = {"X": {"trade_type": "CSP"}}
-        result = portfolio_service.symbols_with_active_csp([], legs, overrides={}, trade_meta=trade_meta)
-        assert result == {"X"}
+        result = portfolio_service.trade_type_by_symbol([], legs, overrides={}, trade_meta=trade_meta)
+        assert result == {"X": "CSP"}
 
-    def test_csp_shaped_position_with_no_saved_meta_yet_is_not_included(self):
-        # The un-classified-yet case: legs look like a CSP, but no
-        # portfolio_trade_meta row exists (auto-classify hasn't run/saved
-        # it) -- defaults to "Trade", not flagged, exactly matching how
-        # My CSP's own trade_type filter behaves for the same trade.
+    def test_no_saved_meta_yet_reports_the_default_trade_label(self):
+        # Unlike a CSP-specific filter, "any trade taken" includes the
+        # untouched "Trade" default -- there IS a Trade here, just not
+        # yet classified.
         legs = [self._position(symbol="X", option_type=OptionType.PE, qty=-75)]
-        result = portfolio_service.symbols_with_active_csp([], legs, overrides={}, trade_meta={})
-        assert result == set()
+        result = portfolio_service.trade_type_by_symbol([], legs, overrides={}, trade_meta={})
+        assert result == {"X": "Trade"}
 
-    def test_covered_call_shape_is_not_included(self):
+    def test_plain_holding_only_trade_is_reported_too(self):
+        # "Any trade" includes a stock-only Holding, not just options
+        # trades -- classify_trade_type's "Holding" auto-detection means
+        # this shows up as "Holding" once classified and saved.
+        holding = self._holding(symbol="Y")
+        trade_meta = {"Y": {"trade_type": "Holding"}}
+        result = portfolio_service.trade_type_by_symbol([holding], [], overrides={}, trade_meta=trade_meta)
+        assert result == {"Y": "Holding"}
+
+    def test_covered_call_shape_reports_its_saved_type(self):
         holding = self._holding(symbol="Y")
         call = self._position(symbol="Y", option_type=OptionType.CE, qty=-50)
-        result = portfolio_service.symbols_with_active_csp([holding], [call], overrides={}, trade_meta={})
-        assert result == set()
+        trade_meta = {"Y": {"trade_type": "Portfolio CC"}}
+        result = portfolio_service.trade_type_by_symbol([holding], [call], overrides={}, trade_meta=trade_meta)
+        assert result == {"Y": "Portfolio CC"}
 
-    def test_saved_override_renaming_a_csp_shaped_trade_away_is_honored(self):
-        # The trade's legs look like a CSP, but the user relabeled it --
-        # symbols_with_active_csp must respect that, not the raw shape.
+    def test_custom_label_is_honored_verbatim(self):
         legs = [self._position(symbol="X", option_type=OptionType.PE, qty=-75)]
         trade_meta = {"X": {"trade_type": "Earnings Play"}}
-        result = portfolio_service.symbols_with_active_csp([], legs, overrides={}, trade_meta=trade_meta)
-        assert result == set()
+        result = portfolio_service.trade_type_by_symbol([], legs, overrides={}, trade_meta=trade_meta)
+        assert result == {"X": "Earnings Play"}
 
-    def test_saved_override_labeling_a_non_csp_shape_as_csp_is_honored(self):
-        # The reverse: legs don't look like a CSP shape at all (a lone
-        # long put), but the user saved it as "CSP" by hand -- still counts.
-        legs = [self._position(symbol="X", option_type=OptionType.PE, qty=75)]
-        trade_meta = {"X": {"trade_type": "csp"}}  # case-insensitive
-        result = portfolio_service.symbols_with_active_csp([], legs, overrides={}, trade_meta=trade_meta)
-        assert result == {"X"}
-
-    def test_unions_multiple_qualifying_trades(self):
+    def test_multiple_symbols_each_get_their_own_entry(self):
         legs = [
             self._position(symbol="X", option_type=OptionType.PE, qty=-75),
             self._position(symbol="Y", option_type=OptionType.PE, qty=-50),
         ]
-        trade_meta = {"X": {"trade_type": "CSP"}, "Y": {"trade_type": "CSP"}}
-        result = portfolio_service.symbols_with_active_csp([], legs, overrides={}, trade_meta=trade_meta)
-        assert result == {"X", "Y"}
+        trade_meta = {"X": {"trade_type": "CSP"}, "Y": {"trade_type": "Strangle"}}
+        result = portfolio_service.trade_type_by_symbol([], legs, overrides={}, trade_meta=trade_meta)
+        assert result == {"X": "CSP", "Y": "Strangle"}
+
+    def test_symbol_split_across_two_trades_joins_distinct_types(self):
+        # A manual split (Analyse Trade) could put two legs of the same
+        # symbol into different trade_ids -- both trade_types show,
+        # sorted and joined, same convention default_underlying_label uses.
+        legs = [
+            self._position(symbol="X", option_type=OptionType.PE, qty=-75, raw_name="X-PE-1"),
+            self._position(symbol="X", option_type=OptionType.CE, qty=-50, raw_name="X-CE-1"),
+        ]
+        overrides = {("Dhan", "X-CE-1"): "X-second"}
+        trade_meta = {"X": {"trade_type": "CSP"}, "X-second": {"trade_type": "Covered Call Attempt"}}
+        result = portfolio_service.trade_type_by_symbol([], legs, overrides=overrides, trade_meta=trade_meta)
+        assert result == {"X": "CSP + Covered Call Attempt"}
 
     def test_no_legs_at_all_is_empty(self):
-        assert portfolio_service.symbols_with_active_csp([], [], overrides={}, trade_meta={}) == set()
+        assert portfolio_service.trade_type_by_symbol([], [], overrides={}, trade_meta={}) == {}
 
 
 class TestPositionsToRecords:

@@ -35,7 +35,7 @@ app.py                  Pure st.navigation() router -- no visible content of its
                         own; see "Navigation" below for the sidebar it builds
 pages/                  Streamlit multipage app (each still its own script,
                         registered by app.py rather than auto-discovered)
-  1_Dashboard.py         Screener table, metric cards, filters, CSV export, "CSP Taken" flag -- sidebar label
+  1_Dashboard.py         Screener table, metric cards, filters, CSV export, "Trade Taken" column -- sidebar label
                               "Screener for CSP", nested under the "Wheel Strategy" sidebar section (login default)
   11_My_CSP.py                Every Trade with Trade Type "CSP" -- one position leg per row, with underlying
                               LTP + 1D/5D/20D change -- sidebar label "My Current CSPs", nested under "Wheel

@@ -875,56 +875,56 @@ def group_into_trades(
     return result
 
 
-def symbols_with_active_csp(
+def trade_type_by_symbol(
     holding_legs: list[dict],
     position_legs: list[dict],
     overrides: dict[tuple[str, str], str],
     trade_meta: dict[str, dict],
-) -> set[str]:
-    """Every underlying `symbol` this account currently has an active
-    CSP-tagged Trade on, for **one** portfolio's holdings/positions
-    (same per-portfolio scoping `group_into_trades` itself always uses,
-    `trade_id` collisions aside) -- the signal the Screener for CSP page
-    (`pages/1_Dashboard.py`) flags with a "CSP Taken" column so a stock
-    already sold a put against isn't mistaken for a fresh opportunity.
-    The caller (`portfolio_page.load_csp_symbols`) unions this across
-    every portfolio the account has, since "has the user already taken a
-    CSP on any stock" is account-wide, not scoped to one portfolio name.
+) -> dict[str, str]:
+    """Every underlying `symbol` this account currently has **any** Trade
+    on, mapped to that Trade's own `trade_type`, for **one** portfolio's
+    holdings/positions (same per-portfolio scoping `group_into_trades`
+    itself always uses, `trade_id` collisions aside) -- the Screener for
+    CSP page's (`pages/1_Dashboard.py`) "Trade Taken" column, so a stock
+    already carrying a position isn't mistaken for a fresh CSP
+    opportunity without saying what's already on it. The caller
+    (`portfolio_page.load_trade_types_by_symbol`) merges this across
+    every portfolio the account has, since this is account-wide, not
+    scoped to one portfolio name.
+
+    Every Trade type counts, not just CSP -- a plain stock-only Holding
+    Trade shows up too (as `"Holding"`, or `"Trade"` if it hasn't been
+    auto-classified yet), since holding the stock outright is itself
+    relevant context for a wheel-strategy decision, not only an existing
+    options trade against it. A symbol absent from the returned dict
+    means no Trade touches it at all -- the caller shows a blank cell for
+    that case, never a literal `"None"`.
+
+    If the same symbol appears across more than one Trade for this
+    portfolio (rare -- only possible via a manual split in Analyse
+    Trade), every distinct `trade_type` found is joined with `" + "`,
+    sorted, same convention `group_into_trades`' own
+    `default_underlying_label` already uses for multiple symbols on one
+    Trade.
 
     Deliberately takes plain leg dicts, not `PortfolioHolding`/
     `PortfolioPosition` model instances or `build_trade_legs`'
-    live-priced output -- this flag only needs `leg_type`/`symbol`/
+    live-priced output -- this only needs `leg_type`/`symbol`/
     `raw_name`/`broker`/`qty`/`option_type` to group and classify, the
     same lightweight shape `data_provider_settings.py`'s
     `_auto_classify_new_trades` already builds for the same reason (no
-    live LTP fetch needed just to answer a yes/no question). `overrides`/
-    `trade_meta` are passed straight through to `group_into_trades`,
-    same shape as every other call site.
-
-    Uses `group_into_trades`' own `trade_type` via `is_csp_trade_type`,
-    exactly the same definition of "is this a CSP" My CSP itself filters
-    on -- not a fresh re-derivation. That means the same characteristic
-    My CSP itself already has: a Trade with no `portfolio_trade_meta` row
-    yet defaults to the plain `"Trade"` label (never the raw detected
-    shape), so a CSP-shaped Trade only actually flags here once
-    `_auto_classify_new_trades` has saved it as `"CSP"` -- which happens
-    automatically at the end of every Portfolio Refresh sync, so in
-    practice this lags a fresh sync by, at most, that one classify step,
-    not by anything this function does differently from My CSP's own
-    logic. A manually relabeled trade (either direction -- typed away
-    from "CSP", or typed onto a shape that doesn't look like one) is
-    honored either way, same as My CSP. `company_type_by_symbol` is
-    passed as `{}` since bucket (stock/index/other) is irrelevant to this
-    check."""
+    live LTP fetch needed just to answer this). `overrides`/`trade_meta`
+    are passed straight through to `group_into_trades`, same shape as
+    every other call site. `company_type_by_symbol` is passed as `{}`
+    since bucket (stock/index/other) is irrelevant to this check."""
     trades = group_into_trades(holding_legs + position_legs, overrides, trade_meta, company_type_by_symbol={})
-    symbols: set[str] = set()
+    types_by_symbol: dict[str, set[str]] = {}
     for t in trades:
-        if not is_csp_trade_type(t["trade_type"]):
-            continue
         for leg in t["legs"]:
-            if leg.get("symbol"):
-                symbols.add(leg["symbol"])
-    return symbols
+            symbol = leg.get("symbol")
+            if symbol:
+                types_by_symbol.setdefault(symbol, set()).add(t["trade_type"])
+    return {symbol: " + ".join(sorted(types)) for symbol, types in types_by_symbol.items()}
 
 
 def compute_positions_view(positions: list[dict]) -> list[dict]:

@@ -14,7 +14,7 @@ from src.repositories import fetch_log_repo, fo_repo, settings_repo, snapshot_re
 from src.services.market_calendar import get_market_state
 from src.services.threshold_override import apply_user_thresholds
 from src.utils.formatting import direction_arrow, format_inr, format_pct, pass_fail_icon
-from src.utils.portfolio_page import ensure_cache_bust, load_csp_symbols
+from src.utils.portfolio_page import ensure_cache_bust, load_trade_types_by_symbol
 from src.utils.refresh_bar import render_stock_refresh_button
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.timezones import now_ist
@@ -30,13 +30,13 @@ inject_global_styles(user_settings.theme)  # re-inject with the user's actual th
 
 ensure_cache_bust()
 try:
-    csp_symbols = load_csp_symbols(client, user_id, st.session_state["portfolio_cache_bust"])
+    trade_types_by_symbol = load_trade_types_by_symbol(client, user_id, st.session_state["portfolio_cache_bust"])
 except (APIError, ValidationError):
     # portfolio_holdings/positions not provisioned yet (migration 0012), or
     # a malformed saved row -- degrade to "no flags" rather than crashing
     # the whole screener over a column that's a bonus on top of the core
     # screener data anyway.
-    csp_symbols = set()
+    trade_types_by_symbol = {}
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -447,12 +447,12 @@ for _, r in filtered.iterrows():
     display_rows.append(
         {
             "Stock": r["symbol"],
-            # "Has the user already taken a CSP on this stock?" -- a
-            # blank rather than a ❌ for "no", matching Momentum/52W's own
-            # convention of only marking the affirmative case, since most
-            # rows won't have one and a ❌ on every other row would be
-            # noisier than informative.
-            "CSP Taken": "✅" if r["symbol"] in csp_symbols else "",
+            # "Has the user already taken any trade on this stock?" --
+            # names the trade type if so (Holding/CSP/Portfolio CC/...),
+            # blank rather than a placeholder for "no", matching
+            # Momentum/52W's own convention of only marking the
+            # affirmative case, since most rows won't have one.
+            "Trade Taken": trade_types_by_symbol.get(r["symbol"], ""),
             "LTP": ltp_cell,
             "52W High": f"{format_inr(r['week_52_high'])} {pass_fail_icon(r['criterion_52w_high'])}" if pd.notna(r["week_52_high"]) else "N/A",
             "52W Low": f"{format_inr(r['week_52_low'])} {pass_fail_icon(r['criterion_52w_low'])}" if pd.notna(r["week_52_low"]) else "N/A",
