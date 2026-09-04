@@ -1474,7 +1474,7 @@ style) doesn't fit. Six column groups per row:
    "⚠️" `trade_type_mismatch` marker My Trades uses), **Total P&L**
    (`group_into_trades`' own sum across every leg), **Option P&L** (the
    same sum, but Position legs only -- the option legs' own contribution
-   on its own, separate from the stock).
+   on its own, separate from the stock), **Margin Required** (see below).
 2. **Stock Holding** -- **Stock Avg Price**/**Stock Qty**/**Stock
    Invested**/**Stock LTP** (summed across lots/brokers if the same
    underlying is split more than one way within a trade, same convention
@@ -1512,6 +1512,28 @@ P&L/Stop Loss/Credit -- that per-leg premium-decay-ratchet math
 rebuild's spec; Analyse Trade's own per-leg version of the same math
 (see My CSP above) is untouched and still computes independently for any
 short option leg, regardless of what this page shows.
+
+**Margin Required**, added later per an explicit user request (after
+confirming live that Dhan actually exposes this): `DhanProvider.get_margin_for_legs`
+calls Dhan's own combined margin-calculator endpoint (`POST
+/v2/margincalculator/multi`) against the trade's own option Position
+legs only -- not the Holding leg, since a CNC-held stock isn't itself
+margin-relevant -- and shows its `totalMargin`. Needs a connected Dhan
+account (Settings > Data Provider = Dhan); shows `"N/A"` otherwise, or
+if the live call fails (expired token, a leg Dhan's F&O instrument
+master can't resolve) -- same degrade-gracefully convention every other
+live-Dhan figure in this app already uses, via
+`portfolio_page.load_trade_margin`. Confirmed live against this
+account's own 4 real Portfolio-prefixed trades before shipping --
+Dhan's response uses different field names than its own docs describe
+(`exposure` not `exposure_margin`, `hedgeBenefit` not `hedge_benefit`,
+etc.), and the endpoint 400s with `"dhanClientId is required"` unless
+that field is repeated in the request **body**, not just the
+`client-id`/`access-token` headers every other Dhan v2 call relies on
+alone. Also confirmed live: a real two-leg naked Strangle got
+`hedgeBenefit: 0.0` -- don't expect Dhan to apply a margin discount to
+every multi-leg trade shown here, only genuinely offsetting structures
+(untested).
 
 ### Other Stock Holdings (`pages/15_Other_Stock_Holdings.py`)
 

@@ -12,7 +12,8 @@ src/services/portfolio_service.py).
 One row per Trade (not one row per leg, unlike the old My CC table --
 a Trade here can carry up to 4 option legs at once, not just a single
 short call), with six column blocks:
-1. Trade Details -- Underlying, Trade Type, Total P&L, Option P&L.
+1. Trade Details -- Underlying, Trade Type, Total P&L, Option P&L,
+   Margin Required.
 2. Stock Holding -- Avg Price/Qty/Invested/LTP/Momentum, aggregated
    across the trade's own Holding leg(s) same as the old My CC did.
 3-6. PE Sell / PE Buy / CE Sell / CE Buy Leg -- Strike/Expiry/Avg
@@ -26,7 +27,18 @@ specific (Analyse Trade's own per-leg version still computes it
 independently for any short option leg) and doesn't generalize cleanly
 to a 4-leg spread (whose "target" or "stop" would it be?); the explicit
 spec for this rebuild only asked for the six blocks above, so nothing
-beyond them was invented here."""
+beyond them was invented here.
+
+**Margin Required** (added later, per an explicit user request after
+confirming Dhan actually exposes this) is the one live, Dhan-only
+figure on this page: `DhanProvider.get_margin_for_legs` calls Dhan's
+own combined margin-calculator endpoint
+(`POST /v2/margincalculator/multi`) against the trade's own option
+Position legs (not the Holding leg -- a CNC-held stock isn't itself
+margin-relevant) and shows its `totalMargin`. Needs a connected Dhan
+account (Data Provider = Dhan); shows "N/A" otherwise, or if the call
+fails (expired token, an unresolvable leg) -- same degrade-gracefully
+convention every other live-Dhan figure in this app already uses."""
 from __future__ import annotations
 
 import pandas as pd
@@ -36,7 +48,7 @@ from pydantic import ValidationError
 
 from src.calculations.classification import criterion_b
 from src.models.enums import OptionType
-from src.repositories import settings_repo
+from src.repositories import portfolio_repo, settings_repo
 from src.services import portfolio_service
 from src.utils.formatting import format_inr, pass_fail_icon
 from src.utils.portfolio_page import (
@@ -49,6 +61,7 @@ from src.utils.portfolio_page import (
     load_positions,
     load_returns_and_pe,
     load_trade_groups,
+    load_trade_margin,
     load_trade_meta,
     slug,
 )
@@ -74,10 +87,24 @@ st.caption(
     'Analyse Trade. These are exactly the Trades that pair a stock holding with option legs, so the holding\'s '
     "own numbers are shown alongside up to 4 option legs (PE Sell/PE Buy/CE Sell/CE Buy) -- blank where a trade "
     "has no leg of that shape. Go to My Trades, select a trade, click \"Analyse Trade\", and rename its Trade "
-    "Type to start with \"Portfolio \" to have it show up here."
+    "Type to start with \"Portfolio \" to have it show up here. \"Margin Required\" is Dhan's own combined "
+    "margin-calculator figure for the trade's option legs (Data Provider = Dhan only; \"N/A\" otherwise)."
 )
 
 ensure_cache_bust()
+
+# Margin Required needs a live Dhan call per trade (Dhan's own margin
+# calculator, not stored data) -- only possible with a connected Dhan
+# account. `dhan_connection` stays None for a yfinance_bhavcopy account
+# or an unconnected Dhan one, and every trade's Margin Required column
+# just shows "N/A" in that case rather than attempting a call with no
+# credentials.
+dhan_connection = None
+if user_settings.data_provider == "dhan":
+    try:
+        dhan_connection = portfolio_repo.get_broker_connection(client, user_id, "Dhan")
+    except APIError:
+        dhan_connection = None
 
 try:
     saved_holdings = load_holdings(client, user_id, st.session_state["portfolio_cache_bust"])
@@ -152,7 +179,9 @@ def _slot_legs(position_legs: list[dict]) -> dict[str, list[dict]]:
     return slots
 
 
-def _render_portfolio_trades_table(*, title: str, trades: list[dict], key_suffix: str, portfolio_name: str) -> None:
+def _render_portfolio_trades_table(
+    *, title: str, trades: list[dict], key_suffix: str, portfolio_name: str, dhan_connection
+) -> None:
     st.markdown(f"**{title}**")
     if not trades:
         st.caption("None.")
@@ -194,6 +223,7 @@ def _render_portfolio_trades_table(*, title: str, trades: list[dict], key_suffix
                 "stock_avg_price": stock_avg_price,
                 "stock_symbol": stock_symbol,
                 "slots": slots,
+                "position_legs": position_legs,
             }
         )
 
@@ -220,11 +250,43 @@ def _render_portfolio_trades_table(*, title: str, trades: list[dict], key_suffix
         return_20d = rp["return_20d"] if rp else None
         stock_ltp = ltp_by_symbol.get(stock_symbol) if stock_symbol else None
 
+        # Dhan's own combined margin-calculator figure (get_margin_for_legs)
+        # for this trade's own option legs -- only possible with a
+        # connected Dhan account; every other case (yfinance_bhavcopy,
+        # unconnected, no resolvable legs, an expired token) shows "N/A"
+        # rather than a number, same "degrade, don't crash" convention
+        # every other live-Dhan-dependent figure on this page already uses.
+        margin_required = None
+        if dhan_connection is not None:
+            legs_key = tuple(
+                (
+                    leg["symbol"],
+                    leg["expiry_date"].isoformat() if leg["expiry_date"] else None,
+                    leg["strike_price"],
+                    str(leg["option_type"]) if leg["option_type"] else None,
+                    leg["qty"],
+                    leg["avg_price"],
+                )
+                for leg in row["position_legs"]
+                if leg.get("symbol") and leg.get("option_type") is not None
+            )
+            if legs_key:
+                margin_result = load_trade_margin(
+                    client,
+                    dhan_connection.client_id,
+                    dhan_connection.access_token,
+                    legs_key,
+                    st.session_state["portfolio_cache_bust"],
+                )
+                if margin_result:
+                    margin_required = margin_result.get("totalMargin")
+
         table_row = {
             "Underlying": t["underlying_label"],
             "Trade Type": t["trade_type"] + (" ⚠️" if t["trade_type_mismatch"] else ""),
             "Total P&L": t["total_pnl"],
             "Option P&L": t["option_pnl"],
+            "Margin Required": format_inr(margin_required) if margin_required is not None else "N/A",
             "Stock Avg Price": row["stock_avg_price"],
             "Stock Qty": row["holding_qty"],
             "Stock Invested": row["total_investment"],
@@ -282,6 +344,7 @@ def _render_portfolio_trades_tab(
     trade_groups_for_portfolio: list,
     trade_meta_for_portfolio: list,
     company_type_by_symbol: dict,
+    dhan_connection,
 ) -> None:
     legs = build_trade_legs(
         client, user_id, st.session_state["portfolio_cache_bust"], holdings_for_portfolio, positions_for_portfolio
@@ -302,9 +365,18 @@ def _render_portfolio_trades_tab(
     index_trades = [t for t in portfolio_trades if t["bucket"] == "index"]
     other_trades = [t for t in portfolio_trades if t["bucket"] == "other"]
 
-    _render_portfolio_trades_table(title="Stock Trades", trades=stock_trades, key_suffix="stock", portfolio_name=portfolio_name)
-    _render_portfolio_trades_table(title="Index Trades", trades=index_trades, key_suffix="index", portfolio_name=portfolio_name)
-    _render_portfolio_trades_table(title="Other Trades", trades=other_trades, key_suffix="other", portfolio_name=portfolio_name)
+    _render_portfolio_trades_table(
+        title="Stock Trades", trades=stock_trades, key_suffix="stock", portfolio_name=portfolio_name,
+        dhan_connection=dhan_connection,
+    )
+    _render_portfolio_trades_table(
+        title="Index Trades", trades=index_trades, key_suffix="index", portfolio_name=portfolio_name,
+        dhan_connection=dhan_connection,
+    )
+    _render_portfolio_trades_table(
+        title="Other Trades", trades=other_trades, key_suffix="other", portfolio_name=portfolio_name,
+        dhan_connection=dhan_connection,
+    )
 
 
 portfolio_names = sorted({h.portfolio_name for h in saved_holdings} | {p.portfolio_name for p in saved_positions})
@@ -325,4 +397,5 @@ else:
                 [g for g in saved_trade_groups if g.portfolio_name == name],
                 [m for m in saved_trade_meta if m.portfolio_name == name],
                 company_type_by_symbol,
+                dhan_connection,
             )

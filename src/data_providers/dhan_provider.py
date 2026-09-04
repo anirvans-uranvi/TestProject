@@ -797,3 +797,80 @@ class DhanProvider(PriceDataProvider):
             for security_id, contract in security_id_to_contract.items()
             if security_id in prices_by_security_id
         }
+
+    def get_margin_for_legs(self, legs: list[dict]) -> dict | None:
+        """Combined margin required (`POST /v2/margincalculator/multi`)
+        for a set of option legs -- e.g. one Trade's own Position legs on
+        My Portfolio Trades, so the page can show what Dhan would
+        actually block for holding that trade, hedge benefit included
+        where Dhan applies one.
+
+        Each leg dict needs `symbol`/`expiry_date`/`strike_price`/
+        `option_type`/`qty` (signed: negative = short/SELL, positive =
+        long/BUY) plus `avg_price` -- the same shape `build_trade_legs`/
+        `compute_positions_view` already produce, so a caller can pass a
+        trade's own Position legs straight through with no reshaping.
+        `avg_price` (the price this account actually holds the leg at) is
+        what's sent as each scrip's `price` -- Dhan's calculator only
+        needs a price to size the SPAN/exposure scenario, not to value
+        the position against a live quote. `productType` is hardcoded to
+        `"MARGIN"` -- this app doesn't track a position's actual product
+        type, and every real F&O position checked live on this account
+        was `MARGIN` anyway.
+
+        Resolves each leg's security_id + exchange segment (NSE_FNO/
+        BSE_FNO) via the same FO instrument master `get_fo_quotes` above
+        already uses -- a leg that doesn't resolve (an expired/delisted
+        strike, a schema-drift miss) is silently skipped rather than
+        aborting the whole calculation, same convention `get_fo_quotes`
+        uses for a live-price batch. Returns `None` if `legs` is empty or
+        none of them resolve.
+
+        **Response shape confirmed live, not what Dhan's own docs
+        describe** (different key casing entirely):
+        `{"clientId", "totalMargin", "spanMargin", "exposure",
+        "equityMargin", "foMargin", "commodity", "currency",
+        "hedgeBenefit", "userFundLimit", "insufficientFund"}`. Also
+        confirmed live: this endpoint 400s with `"dhanClientId is
+        required"` unless `dhanClientId` is repeated in the **request
+        body** itself, not just the `client-id`/`access-token` headers
+        every other v2 endpoint relies on alone -- `self._headers`
+        already covers the headers, `dhanClientId` is added to the body
+        below. `hedgeBenefit` was `0.0` for a real two-leg naked Strangle
+        (two same-underlying short legs, confirmed live) -- don't assume
+        Dhan applies a nonzero benefit for every multi-leg trade; a
+        genuinely offsetting structure may behave differently, untested
+        here."""
+        if not legs:
+            return None
+        master = _load_fo_instrument_master(self._supabase_client)
+        exchange_by_security_id = dict(zip(master["security_id"], master["exchange"]))
+        scrip_list = []
+        for leg in legs:
+            try:
+                security_id = resolve_fo_security_id(
+                    leg["symbol"], leg["expiry_date"], leg["strike_price"], leg["option_type"], self._supabase_client
+                )
+            except ProviderError:
+                continue
+            segment = "BSE_FNO" if exchange_by_security_id.get(security_id) == "BSE" else "NSE_FNO"
+            qty = leg["qty"]
+            scrip_list.append(
+                {
+                    "exchangeSegment": segment,
+                    "transactionType": "SELL" if qty < 0 else "BUY",
+                    "quantity": abs(int(qty)),
+                    "productType": "MARGIN",
+                    "securityId": security_id,
+                    "price": leg["avg_price"],
+                }
+            )
+        if not scrip_list:
+            return None
+        payload = {
+            "dhanClientId": self._client_id,
+            "includePosition": False,
+            "includeOrder": False,
+            "scripList": scrip_list,
+        }
+        return self._request("POST", f"{BASE_URL}/margincalculator/multi", json=payload)

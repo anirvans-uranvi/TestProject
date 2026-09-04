@@ -928,3 +928,120 @@ class TestGetFoQuotes:
 
         with pytest.raises(ProviderError, match="zero"):
             provider.get_fo_quotes([("RELIANCE", date(2026, 8, 27), 3000.0, "CE")])
+
+
+class TestGetMarginForLegs:
+    """POST /v2/margincalculator/multi -- combined margin for one Trade's
+    own option legs on My Portfolio Trades. Response shape and the
+    dhanClientId-in-body requirement were both confirmed live against a
+    real account, not just Dhan's docs (see the method's own docstring)."""
+
+    def _leg(self, *, symbol, strike_price, option_type, qty, avg_price):
+        return {
+            "symbol": symbol,
+            "expiry_date": date(2026, 8, 27),
+            "strike_price": strike_price,
+            "option_type": option_type,
+            "qty": qty,
+            "avg_price": avg_price,
+        }
+
+    def test_builds_scrip_list_and_sends_dhan_client_id_in_body(self, monkeypatch):
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
+        captured = {}
+
+        def fake_request(method, url, json=None, headers=None, timeout=None):
+            captured["method"] = method
+            captured["url"] = url
+            captured["json"] = json
+            return _FakeResponse(200, json_data={"clientId": "CID1", "totalMargin": 12345.0, "hedgeBenefit": 0.0})
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
+        legs = [
+            self._leg(symbol="RELIANCE", strike_price=2900.0, option_type="PE", qty=-75, avg_price=10.15),
+            self._leg(symbol="RELIANCE", strike_price=3000.0, option_type="CE", qty=75, avg_price=8.5),
+        ]
+
+        result = provider.get_margin_for_legs(legs)
+
+        assert result == {"clientId": "CID1", "totalMargin": 12345.0, "hedgeBenefit": 0.0}
+        assert captured["method"] == "POST"
+        assert captured["url"].endswith("/margincalculator/multi")
+        assert captured["json"]["dhanClientId"] == "CID1"
+        assert captured["json"]["includePosition"] is False
+        assert captured["json"]["includeOrder"] is False
+        scrips = {s["securityId"]: s for s in captured["json"]["scripList"]}
+        assert scrips["50003"]["transactionType"] == "SELL"
+        assert scrips["50003"]["quantity"] == 75
+        assert scrips["50003"]["price"] == 10.15
+        assert scrips["50003"]["exchangeSegment"] == "NSE_FNO"
+        assert scrips["50003"]["productType"] == "MARGIN"
+        assert scrips["50002"]["transactionType"] == "BUY"
+        assert scrips["50002"]["quantity"] == 75
+
+    def test_bse_listed_leg_gets_bse_fno_segment(self, monkeypatch):
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
+        captured = {}
+
+        def fake_request(method, url, json=None, headers=None, timeout=None):
+            captured["json"] = json
+            return _FakeResponse(200, json_data={"totalMargin": 999.0})
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
+        legs = [self._leg(symbol="SENSEX", strike_price=81000.0, option_type="CE", qty=-10, avg_price=350.0)]
+
+        provider.get_margin_for_legs(legs)
+
+        assert captured["json"]["scripList"][0]["exchangeSegment"] == "BSE_FNO"
+
+    def test_unresolvable_leg_is_skipped_not_fatal(self, monkeypatch):
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
+        captured = {}
+
+        def fake_request(method, url, json=None, headers=None, timeout=None):
+            captured["json"] = json
+            return _FakeResponse(200, json_data={"totalMargin": 500.0})
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
+        legs = [
+            self._leg(symbol="RELIANCE", strike_price=3000.0, option_type="CE", qty=-75, avg_price=8.5),
+            self._leg(symbol="RELIANCE", strike_price=9999.0, option_type="CE", qty=-75, avg_price=1.0),  # no such strike
+        ]
+
+        result = provider.get_margin_for_legs(legs)
+
+        assert result == {"totalMargin": 500.0}
+        assert len(captured["json"]["scripList"]) == 1
+
+    def test_all_legs_unresolvable_returns_none_without_a_request(self, monkeypatch):
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
+
+        def fake_request(*args, **kwargs):
+            raise AssertionError("should not make a request when nothing resolved")
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
+        legs = [self._leg(symbol="RELIANCE", strike_price=9999.0, option_type="CE", qty=-75, avg_price=1.0)]
+
+        assert provider.get_margin_for_legs(legs) is None
+
+    def test_empty_legs_returns_none_without_a_request(self, monkeypatch):
+        def fake_request(*args, **kwargs):
+            raise AssertionError("should not make a request for an empty leg list")
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        provider = DhanProvider(client_id="CID1", access_token="TOKEN1")
+
+        assert provider.get_margin_for_legs([]) is None
+
+    def test_401_raises_dhan_auth_error(self, monkeypatch):
+        monkeypatch.setattr(dhan_provider.pd, "read_csv", lambda *a, **k: _FO_MASTER_FIXTURE)
+        monkeypatch.setattr(httpx, "request", lambda *a, **k: _FakeResponse(401, text="expired"))
+        provider = DhanProvider(client_id="CID1", access_token="EXPIRED")
+        legs = [self._leg(symbol="RELIANCE", strike_price=3000.0, option_type="CE", qty=-75, avg_price=8.5)]
+
+        with pytest.raises(DhanAuthError):
+            provider.get_margin_for_legs(legs)

@@ -220,6 +220,49 @@ def load_live_dhan_prices(
     return {symbol: quote.latest_price for symbol, quote in quotes.items()}
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def load_trade_margin(
+    _client, client_id: str, access_token: str, legs_key: tuple[tuple, ...], _cache_bust: int
+) -> dict | None:
+    """Combined margin required (`DhanProvider.get_margin_for_legs`) for
+    one Trade's own option legs -- My Portfolio Trades' "Margin Required"
+    column. Only meaningful for an account with Dhan connected (same
+    already-saved `client_id`/`access_token` `load_live_dhan_prices`
+    above reuses); the caller shows "N/A" when there's no Dhan
+    connection at all rather than calling this.
+
+    `legs_key` is a tuple of `(symbol, expiry_date_iso, strike_price,
+    option_type, qty, avg_price)` tuples -- plain hashable primitives,
+    not the leg dicts `get_margin_for_legs` itself wants, so this
+    function's own cache key stays stable and cheap to hash (Streamlit's
+    cache_data would otherwise need to hash a list of dicts on every
+    call). Rebuilt into the dict shape right before calling through.
+
+    Returns `None` on any provider error (expired token, a leg Dhan's
+    F&O instrument master doesn't resolve, network) -- same "degrade
+    to blank, don't crash the page over one column" convention
+    `load_live_dhan_prices` above already uses."""
+    if not legs_key:
+        return None
+    legs = [
+        {
+            "symbol": symbol,
+            "expiry_date": date.fromisoformat(expiry_iso),
+            "strike_price": strike_price,
+            "option_type": option_type,
+            "qty": qty,
+            "avg_price": avg_price,
+        }
+        for symbol, expiry_iso, strike_price, option_type, qty, avg_price in legs_key
+    ]
+    try:
+        return DhanProvider(
+            client_id=client_id, access_token=access_token, supabase_client=_client
+        ).get_margin_for_legs(legs)
+    except (DhanAuthError, ProviderError):
+        return None
+
+
 def load_live_broker_prices(_client, user_id: str, symbols: tuple[str, ...], cache_bust: int) -> dict[str, float]:
     """Live equity LTPs from this account's connected Dhan broker
     (Settings' "Data Provider" section, src/utils/data_provider_settings.py)

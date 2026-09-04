@@ -2945,11 +2945,12 @@ bucket split as My Trades.
 Six column groups per row, built by `_render_portfolio_trades_table`:
 1. **Trade Details** -- `Underlying`/`Trade Type` (same "⚠️"
    `trade_type_mismatch` suffix My Trades uses)/`Total P&L`/`Option
-   P&L`. The latter two both come straight off `group_into_trades`'
-   own per-trade dict (`total_pnl`/`option_pnl` -- `option_pnl` is a new
-   field added specifically for this page: the same sum as `total_pnl`,
-   but restricted to Position legs, so the option side's own
-   contribution is visible separately from the stock's).
+   P&L`/`Margin Required` (see below). `Total P&L`/`Option P&L` both come
+   straight off `group_into_trades`' own per-trade dict
+   (`total_pnl`/`option_pnl` -- `option_pnl` is a new field added
+   specifically for this page: the same sum as `total_pnl`, but
+   restricted to Position legs, so the option side's own contribution is
+   visible separately from the stock's).
 2. **Stock Holding** -- `Stock Avg Price`/`Stock Qty`/`Stock
    Invested`/`Stock LTP` (summed qty, investment-weighted avg price
    across the trade's own Holding leg(s), same aggregation the old My CC
@@ -2995,6 +2996,57 @@ wasn't part of the explicit spec for this rebuild, so nothing was
 invented to replace it — Analyse Trade's own independent per-leg version
 of the same math (see above) is completely unaffected and still computes
 for any short option leg regardless of what this page shows.
+
+**`Margin Required`, added later per an explicit user request** (after
+first confirming live that Dhan actually exposes this at all --
+`GET`/`POST` research done before any code, same discipline as every
+other Dhan integration here): `DhanProvider.get_margin_for_legs`
+(`src/data_providers/dhan_provider.py`) calls Dhan's own
+`POST /v2/margincalculator/multi` against the trade's own option
+Position legs only (built by filtering `t["legs"]` to `leg_type ==
+"Position"` -- the Holding leg is excluded, since a CNC-held stock isn't
+itself margin-relevant) and shows the response's `totalMargin`.
+
+- Each leg's Dhan `security_id` isn't stored anywhere (`PortfolioPosition`
+  never persists it -- only used transiently during
+  `dhan_positions_from_api` parsing), so it's resolved fresh per render
+  via `resolve_fo_security_id` against the FO instrument master, exactly
+  the same resolution `get_fo_quotes` already does -- including its own
+  NSE_FNO/BSE_FNO exchange-segment lookup (SENSEX/BANKEX resolve
+  cross-exchange, same real bug class `get_fo_quotes` already fixed).
+  `productType` is hardcoded `"MARGIN"` -- this app doesn't track a
+  position's actual product type, and every real F&O position checked
+  live on this account was `MARGIN` anyway. `price` per leg is that
+  leg's own `avg_price` (what the account actually holds it at), not a
+  fresh LTP -- Dhan's calculator only needs a price to size the
+  SPAN/exposure scenario.
+- A leg that doesn't resolve is silently skipped (same convention
+  `get_fo_quotes` uses); `None` (-> `"N/A"` in the UI) if none resolve,
+  the trade has no Dhan connection at all, or the live call itself fails
+  (expired token, network) -- `portfolio_page.load_trade_margin` wraps
+  the call in the same `except (DhanAuthError, ProviderError): return
+  None` degrade `load_live_dhan_prices` already uses, keyed on a plain
+  hashable tuple of the legs' own natural fields (not the leg dicts
+  themselves, to keep Streamlit's cache-data hashing cheap).
+- Needs a connected Dhan account (`data_provider == "dhan"` and a saved
+  `broker_connections` row) -- `dhan_connection` is fetched once at the
+  top of the page and threaded through to every table/row; `None` for a
+  `yfinance_bhavcopy` account or an unconnected Dhan one, and every row
+  just shows `"N/A"` rather than attempting a call with no credentials.
+- **Two real findings from live verification before shipping this** (not
+  documented by Dhan, or documented wrong): the response's field names
+  differ entirely from what Dhan's own docs describe (`exposure` not
+  `exposure_margin`, `foMargin` not `fo_margin`, `hedgeBenefit` not
+  `hedge_benefit`, `insufficientFund` not `insufficient_balance`, plus an
+  undocumented `userFundLimit`), and the endpoint 400s with
+  `"dhanClientId is required"` unless that field is repeated in the
+  request **body** — the `client-id`/`access-token` headers every other
+  v2 endpoint in this class relies on alone aren't enough here. Also: a
+  real two-leg naked Strangle (HINDZINC, this account) came back with
+  `hedgeBenefit: 0.0` — two same-underlying short legs don't get any
+  margin offset from Dhan, so don't expect a nonzero benefit for every
+  multi-leg trade shown on this page; a genuinely risk-offsetting
+  structure might behave differently, untested.
 
 **Other Stock Holdings (`pages/15_Other_Stock_Holdings.py`)** — new page,
 added alongside the "Wheel Strategy" restructure (see "Streamlit app"
