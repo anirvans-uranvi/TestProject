@@ -59,16 +59,18 @@ def _load_latest_fo_trade_date(_client, _cache_bust: int, source_prefix: str | N
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_dashboard_fo_metrics(_client, _cache_bust: int):
-    """The precomputed 5% CSP / 5% CC cache (`dashboard_fo_metrics`,
+    """The precomputed CSP (term-scaled 5%/7%/10% OTM, see
+    `fo_service.csp_otm_for_rows`) / 5% CC cache (`dashboard_fo_metrics`,
     migration 0011) -- up to 3 rows per symbol (near/next/far expiry),
     kept current by every refresh path (see
     `fo_service.recompute_dashboard_metrics` and its TypeScript port in
     `supabase/functions/_shared/dashboardMetrics.ts`) instead of pulling
     every open option leg (thousands of rows) and recomputing the
     nearest-strike search here on every page load. Raw rows, not grouped
-    by symbol -- the page derives the "Options month" dropdown's choices
-    from the distinct expiry_dates present, then filters to whichever
-    month is selected."""
+    by symbol -- the page groups them into `metrics_by_symbol_expiry`
+    below and shows all 3 tiers at once (no month picker -- removed on
+    request; every NSE stock option shares one expiry calendar, so all 3
+    tiers are meaningful simultaneously for every row)."""
     return fo_repo.get_dashboard_fo_metrics(_client)
 
 
@@ -145,15 +147,13 @@ if user_settings.data_provider != "yfinance_bhavcopy":
         df["latest_price"] = df.apply(lambda r: live_prices.get(r["symbol"], r["latest_price"]), axis=1)
 
 # ---------------------------------------------------------------------
-# F&O-derived columns (5% CSP, 5% CC) -- read from the precomputed
-# dashboard_fo_metrics cache (migration 0011) rather than recomputed
-# here; see _load_dashboard_fo_metrics's docstring. Up to 3 rows per
-# symbol (near/next/far expiry) come back here; the "Options month"
-# selectbox further below (alongside "Sort By") picks which expiry's
-# rows actually populate the two columns -- a pure re-render over
-# already-cached data, no new fetch. Degrades to "N/A" in both columns,
-# not a crash, if migration 0007/0011 hasn't been applied yet -- same
-# APIError-catching pattern as pages/5_Options.py.
+# F&O-derived columns (near/next/far CSP, at 5%/7%/10% OTM respectively)
+# -- read from the precomputed dashboard_fo_metrics cache (migration
+# 0011) rather than recomputed here; see _load_dashboard_fo_metrics's
+# docstring. Up to 3 rows per symbol (near/next/far expiry) come back
+# here and all 3 are shown at once below (no month picker). Degrades to
+# "N/A" in every tier, not a crash, if migration 0007/0011 hasn't been
+# applied yet -- same APIError-catching pattern as pages/5_Options.py.
 # ---------------------------------------------------------------------
 try:
     dashboard_fo_metrics_rows = _load_dashboard_fo_metrics(client, st.session_state["dashboard_cache_bust"])
@@ -339,86 +339,72 @@ with clear_col:
 # Expiry dates come back from Supabase as plain "YYYY-MM-DD" strings
 # (get_dashboard_fo_metrics returns raw dict rows, not a parsed model) --
 # sorting/equality-comparing them as strings works fine (ISO format sorts
-# chronologically), and format_func below only parses one for display.
+# chronologically).
 #
 # dashboard_fo_metrics_rows spans every symbol with F&O data, which
 # includes the seeded Index rows (NIFTY, BANKNIFTY, BANKEX, ...) used
 # for the BSE index-options feed (bse_fo_provider is index-only, see
 # migration 0019 era). Pooling expiries across ALL of those would leak
-# an index's own expiry (e.g. BANKEX's BSE Aug expiry) into this
-# dropdown even though no Nifty 50 STOCK actually has data for that
+# an index's own expiry (e.g. BANKEX's BSE Aug expiry) into these
+# columns even though no Nifty 50 STOCK actually has data for that
 # month -- restrict to expiries that belong to a symbol actually shown
-# in the screener below.
+# in the screener below. Confirmed with the user: every NSE stock
+# option shares the same monthly expiry calendar, so these (up to) 3
+# dates apply uniformly to every row below -- no per-symbol branching
+# needed, and no dropdown either (all 3 now show at once).
 _screener_symbols = set(df["symbol"])
-available_expiries = sorted(
+_csp_expiries = sorted(
     {
         r["expiry_date"]
         for r in dashboard_fo_metrics_rows
         if r.get("expiry_date") and r.get("symbol") in _screener_symbols
     }
-)
-if available_expiries:
-    if st.session_state.get("dashboard_options_month") not in available_expiries:
-        st.session_state["dashboard_options_month"] = available_expiries[0]
-    selected_month = st.selectbox(
-        "Options month",
-        available_expiries,
-        key="dashboard_options_month",
-        # Full date, not just "Aug 2026" -- these are pooled *exact* dates
-        # (available_expiries is a set of real expiry_date values, not
-        # month buckets), so two entries landing in the same month would
-        # otherwise render as indistinguishable duplicates -- e.g. a data
-        # issue surfacing a stray expiry a few days off the real one
-        # would be invisible until this showed the day too.
-        format_func=lambda d: date.fromisoformat(d).strftime("%b %Y (%d-%b-%y)"),
-        help="Which monthly options expiry feeds the 5% CSP / 5% CC columns below.",
-    )
-else:
-    selected_month = None
-    st.selectbox("Options month", ["N/A"], disabled=True)
+)[:3]
+_csp_month_labels = [date.fromisoformat(e).strftime("%b") for e in _csp_expiries]
 
-metrics_by_symbol = (
-    {r["symbol"]: r for r in dashboard_fo_metrics_rows if r["expiry_date"] == selected_month}
-    if selected_month is not None
-    else {}
-)
+metrics_by_symbol_expiry = {(r["symbol"], r["expiry_date"]): r for r in dashboard_fo_metrics_rows}
 
 # ---------------------------------------------------------------------
 # Live F&O override (Dhan only, migration 0032) -- "Market Data Refresh"
-# also live-prices the exact CSP leg cached above for a Dhan-provider
-# account (see src/utils/refresh_bar.py's _dhan_fo_universe); recompute
-# csp_pct from the live premium using the same formula
-# fo_service.csp_5pct_for_rows already documents
-# (csp_pct = put_price / strike * 100) -- only the premium itself is
-# live, the cached strike/spot are unchanged. CC's own equivalent
-# (cc_strike/cc_pct, still cached in dashboard_fo_metrics for
+# also live-prices the exact CSP legs cached above for a Dhan-provider
+# account (see src/utils/refresh_bar.py's _dhan_fo_universe, which
+# already loops every cached row -- all 3 expiries, not just one, so no
+# change was needed there for this); recompute csp_pct from the live
+# premium using the same formula fo_service.csp_otm_for_rows already
+# documents (csp_pct = put_price / strike * 100) -- only the premium
+# itself is live, the cached strike/spot are unchanged. CC's own
+# equivalent (cc_strike/cc_pct, still cached in dashboard_fo_metrics for
 # pages/5_Options.py's own "5% CC" section) is no longer read here --
 # this screener dropped its "5% CC" column entirely (CC decisions moved
 # to the "Other Stock Holdings" page instead, see fo_service's
 # covered_call_for_holding).
 # ---------------------------------------------------------------------
 live_fo_premiums: dict = {}
-if user_settings.data_provider == "dhan" and metrics_by_symbol:
+if user_settings.data_provider == "dhan" and dashboard_fo_metrics_rows:
     fo_contracts = []
-    for m in metrics_by_symbol.values():
-        expiry = date.fromisoformat(m["expiry_date"])
-        if m.get("csp_strike") is not None:
-            fo_contracts.append((m["symbol"], expiry, float(m["csp_strike"]), "PE"))
+    for m in dashboard_fo_metrics_rows:
+        if m.get("csp_strike") is not None and m.get("expiry_date"):
+            fo_contracts.append((m["symbol"], date.fromisoformat(m["expiry_date"]), float(m["csp_strike"]), "PE"))
     live_fo_premiums = snapshot_repo.get_user_live_fo_prices(client, user_id, fo_contracts)
 
 
-def _csp_pct(symbol: str) -> float | None:
-    m = metrics_by_symbol.get(symbol)
+def _csp_tier(symbol: str, expiry: str) -> tuple[float | None, float | None, float | None]:
+    """(strike, csp_pct, spot) for one (symbol, expiry) tier, live-priced
+    the same way the old single flat column was -- (None, None, None) if
+    nothing's cached for this symbol/expiry at all. `spot` is the same
+    spot the cached strike was actually selected against (from this same
+    dashboard_fo_metrics row), not necessarily today's freshest screener
+    price -- kept consistent with the strike so "% from ATM" reflects
+    the real relationship between the two, not two different moments."""
+    m = metrics_by_symbol_expiry.get((symbol, expiry))
     if not m or m.get("csp_strike") is None:
-        return (m or {}).get("csp_pct")
-    key = (symbol, date.fromisoformat(m["expiry_date"]), float(m["csp_strike"]), "PE")
+        return None, None, None
+    strike = float(m["csp_strike"])
+    key = (symbol, date.fromisoformat(expiry), strike, "PE")
     live_price = live_fo_premiums.get(key)
-    if live_price is not None:
-        return live_price / m["csp_strike"] * 100
-    return m.get("csp_pct")
+    pct = (live_price / strike * 100) if live_price is not None else m.get("csp_pct")
+    return strike, pct, m.get("spot")
 
-
-filtered["csp_5pct"] = filtered["symbol"].map(_csp_pct)
 
 filtered = filtered.sort_values("symbol", ascending=True, na_position="last")
 
@@ -444,28 +430,35 @@ for _, r in filtered.iterrows():
     ):
         as_of = pd.Timestamp(r["snapshot_date"]).strftime("%d %b %Y")
         ltp_cell += f" (as of {as_of})"
-    display_rows.append(
-        {
-            "Stock": r["symbol"],
-            # "Has the user already taken any trade on this stock?" --
-            # names the trade type if so (Holding/CSP/Portfolio CC/...),
-            # blank rather than a placeholder for "no", matching
-            # Momentum/52W's own convention of only marking the
-            # affirmative case, since most rows won't have one.
-            "Trade Taken": trade_types_by_symbol.get(r["symbol"], ""),
-            "LTP": ltp_cell,
-            "52W High": f"{format_inr(r['week_52_high'])} {pass_fail_icon(r['criterion_52w_high'])}" if pd.notna(r["week_52_high"]) else "N/A",
-            "52W Low": f"{format_inr(r['week_52_low'])} {pass_fail_icon(r['criterion_52w_low'])}" if pd.notna(r["week_52_low"]) else "N/A",
-            "1D": f"{direction_arrow(r['return_1d'])} {format_pct(r['return_1d'])}",
-            "5D": f"{direction_arrow(r['return_5d'])} {format_pct(r['return_5d'])}",
-            "20D": f"{direction_arrow(r['return_20d'])} {format_pct(r['return_20d'])}",
-            "Momentum": pass_fail_icon(r["criterion_b"]),
-            "5% CSP": format_pct(r["csp_5pct"], signed=False) if pd.notna(r["csp_5pct"]) else "N/A",
-            "Dividend": f"{format_pct(r['ttm_dividend_yield'], signed=False)} {pass_fail_icon(r['criterion_a'])}",
-            "PEG": f"{r['peg_ratio']:.2f} {pass_fail_icon(r['criterion_c'])}" if pd.notna(r["peg_ratio"]) else "N/A",
-            "Fundamentals": pass_fail_icon(criterion_fundamentals(r["criterion_a"], r["criterion_c"])),
-        }
-    )
+    display_row = {
+        "Stock": r["symbol"],
+        # "Has the user already taken any trade on this stock?" --
+        # names the trade type if so (Holding/CSP/Portfolio CC/...),
+        # blank rather than a placeholder for "no", matching
+        # Momentum/52W's own convention of only marking the
+        # affirmative case, since most rows won't have one.
+        "Trade Taken": trade_types_by_symbol.get(r["symbol"], ""),
+        "Dividend": f"{format_pct(r['ttm_dividend_yield'], signed=False)} {pass_fail_icon(r['criterion_a'])}",
+        "PEG": f"{r['peg_ratio']:.2f} {pass_fail_icon(r['criterion_c'])}" if pd.notna(r["peg_ratio"]) else "N/A",
+        "Fundamentals": pass_fail_icon(criterion_fundamentals(r["criterion_a"], r["criterion_c"])),
+        "LTP": ltp_cell,
+        "52W High": f"{format_inr(r['week_52_high'])} {pass_fail_icon(r['criterion_52w_high'])}" if pd.notna(r["week_52_high"]) else "N/A",
+        "52W Low": f"{format_inr(r['week_52_low'])} {pass_fail_icon(r['criterion_52w_low'])}" if pd.notna(r["week_52_low"]) else "N/A",
+        "1D": f"{direction_arrow(r['return_1d'])} {format_pct(r['return_1d'])}",
+        "5D": f"{direction_arrow(r['return_5d'])} {format_pct(r['return_5d'])}",
+        "20D": f"{direction_arrow(r['return_20d'])} {format_pct(r['return_20d'])}",
+        "Momentum": pass_fail_icon(r["criterion_b"]),
+    }
+    for name, expiry in zip(_csp_month_labels, _csp_expiries):
+        strike, pct, tier_spot = _csp_tier(r["symbol"], expiry)
+        if strike is not None and tier_spot:
+            pct_from_atm = (strike / tier_spot - 1) * 100
+            strike_cell = f"{format_inr(strike, decimals=0)} ({pct_from_atm:+.2f}%)"
+        else:
+            strike_cell = "N/A"
+        display_row[f"{name} CSP Strike"] = strike_cell
+        display_row[f"{name} CSP ROI"] = format_pct(pct, signed=False) if pct is not None else "N/A"
+    display_rows.append(display_row)
 
 table_df = pd.DataFrame(display_rows)
 if table_df.empty:

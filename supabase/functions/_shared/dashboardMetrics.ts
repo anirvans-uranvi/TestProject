@@ -81,13 +81,64 @@ export interface CspResult {
  * filtered to one symbol + one expiry (any CE legs mixed in are
  * ignored). "5% CSP": the premium for the strike nearest 5% below spot,
  * as a percentage of that strike, preferring the freshest-dated strikes
- * (see freshestRows). Returns null if there's no priceable PE strike. */
+ * (see freshestRows). Returns null if there's no priceable PE strike.
+ * Still used unchanged by the Streamlit Options page's own "5% CSP"
+ * section (Python-side only, no TypeScript caller) -- kept here, and
+ * still exported/tested, purely for parity with that Python function
+ * staying alive; dashboardMetricsRows below calls cspOtm instead. */
 export function cspFivePct(peRows: OptionLegRow[], spot: number, expiryDate: string): CspResult | null {
   const nearRows = peRows.filter((r) => r.optionType === "PE");
   if (nearRows.length === 0) return null;
 
   const target = spot * 0.95;
   const bestRow = nearestByStrike(freshestRows(nearRows), target);
+  const strike = bestRow.strikePrice;
+  const putPrice = legPrice(bestRow);
+  const cspPct = putPrice !== null && strike ? (putPrice / strike) * 100 : null;
+
+  return { strike, putPrice, cspPct, spot, expiryDate, putTradeDate: bestRow.tradeDate };
+}
+
+function lowestStrike<T extends { strikePrice: number }>(rows: T[]): T {
+  return rows.reduce((best, r) => (r.strikePrice < best.strikePrice ? r : best));
+}
+
+function highestOf<T extends { strikePrice: number }>(rows: T[]): T {
+  return rows.reduce((best, r) => (r.strikePrice > best.strikePrice ? r : best));
+}
+
+/** Mirrors fo_service.py::csp_otm_for_rows -- a CSP strike/ROI pick for
+ * an arbitrary OTM target `pct` (not fixed at 5% like cspFivePct above),
+ * used by dashboardMetricsRows for the Screener for CSP page's
+ * term-scaled near/next/far columns (5%/7%/10%). `peRows` should already
+ * be filtered to one symbol + one expiry.
+ *
+ * Selection rule is deliberately not cspFivePct's "nearest either side"
+ * -- confirmed with the user: picks the **highest strike that is still
+ * <= target** (`target = spot * (1 - pct/100)`), i.e. the nearest strike
+ * *below* the target. Mirrors ccFivePct's floor-filter exactly, flipped
+ * to the put side (`<=` instead of `>=`, highest of the qualifying
+ * candidates instead of lowest). Falls back to the single **lowest**
+ * available strike if none qualify -- the symmetric mirror of
+ * ccFivePct's fallback-to-highest. Prefers freshest-dated strikes (see
+ * freshestRows). Returns null if there's no priceable PE strike.
+ *
+ * Real bug caught by its own test suite: `target = spot * (1 -
+ * pct/100)` is a floating-point value that can land a hair below a
+ * strike it's mathematically meant to exactly equal (confirmed:
+ * `1000 * (1 - 7/100) === 929.9999999999999`, not `930`) -- a bare
+ * `strikePrice <= target` then wrongly excludes that strike. CSP_OTM_EPS
+ * absorbs that drift; real strike intervals are always far larger. */
+const CSP_OTM_EPS = 1e-6;
+
+export function cspOtm(peRows: OptionLegRow[], spot: number, pct: number, expiryDate: string): CspResult | null {
+  const nearRows = peRows.filter((r) => r.optionType === "PE");
+  if (nearRows.length === 0) return null;
+
+  const target = spot * (1 - pct / 100);
+  const freshest = freshestRows(nearRows);
+  const otmEnough = freshest.filter((r) => r.strikePrice <= target + CSP_OTM_EPS);
+  const bestRow = otmEnough.length > 0 ? highestOf(otmEnough) : lowestStrike(freshest);
   const strike = bestRow.strikePrice;
   const putPrice = legPrice(bestRow);
   const cspPct = putPrice !== null && strike ? (putPrice / strike) * 100 : null;
@@ -167,17 +218,30 @@ export interface DashboardMetricsRow {
   ccTradeDate: string | null;
 }
 
+const CSP_OTM_PCT_BY_RANK = [5.0, 7.0, 10.0]; // near, next, far -- see dashboardMetricsRows
+
 /** Mirrors fo_service.py::dashboard_metrics_rows -- for each symbol with
- * a spot price and open option legs, computes "5% CSP" / "5% CC" for
- * each of that symbol's **up to 3 nearest distinct expiries**
- * (near/next/far) and emits one flat row per (symbol, expiryDate). A
- * symbol with no spot or no option legs gets zero rows (there's no
- * expiryDate to key a row on); a symbol with fewer than 3 expiries just
- * gets fewer rows. cspPct/ccPct are null independently of each other
- * when either calculation has no priceable result for that specific
- * expiry. ccFivePct's assignmentProfitPct is deliberately NOT cached
- * here -- the Dashboard only ever displays ccPct; the Options screen's
- * "Assignment Profit" figure is computed live instead.
+ * a spot price and open option legs, computes CSP (via cspOtm) / "5% CC"
+ * (via ccFivePct, unchanged) for each of that symbol's **up to 3
+ * nearest distinct expiries** (near/next/far) and emits one flat row per
+ * (symbol, expiryDate). A symbol with no spot or no option legs gets
+ * zero rows (there's no expiryDate to key a row on); a symbol with fewer
+ * than 3 expiries just gets fewer rows. cspPct/ccPct are null
+ * independently of each other when either calculation has no priceable
+ * result for that specific expiry. ccFivePct's assignmentProfitPct is
+ * deliberately NOT cached here -- the Dashboard only ever displays
+ * ccPct; the Options screen's "Assignment Profit" figure is computed
+ * live instead.
+ *
+ * **CSP's OTM target is rank-based, not flat 5% for every expiry** --
+ * confirmed with the user: CSP_OTM_PCT_BY_RANK = [5, 7, 10], indexed by
+ * each expiry's own rank (0=near, 1=next, 2=far) among that symbol's
+ * sorted expiries, via cspOtm (nearest-strike-*below*-target, not
+ * cspFivePct's nearest-either-side -- see cspOtm's own docstring). ccPct/
+ * ccStrike are unaffected -- CC's computation stays the original flat
+ * 5%/floor-filter ccFivePct, since CC is no longer displayed on the
+ * Streamlit Dashboard at all (only tracked here for the Python side's
+ * refresh_bar.py::_dhan_fo_universe live-quote-refresh bookkeeping).
  *
  * BSE-sourced legs (source starting with "bse_fo_bhavcopy") are excluded
  * entirely -- BSE's F&O feed is index-options only, and this cache backs
@@ -185,10 +249,10 @@ export interface DashboardMetricsRow {
  * to any screener row) or a pre-restriction stale stock contract that
  * happens to still be open because its own expiry hasn't passed yet.
  * Confirmed live: a stock symbol's stale BSE monthly expiry, a few days
- * off its real NSE one, produced a second same-month entry in the
- * Dashboard's "Options month" dropdown. Rows without a source (older
- * fixtures, or the mock provider's single "mock_fo" source) pass through
- * unaffected. */
+ * off its real NSE one, produced a second same-month entry in what used
+ * to be the Dashboard's "Options month" dropdown (since removed -- all 3
+ * expiries now show at once). Rows without a source (older fixtures, or
+ * the mock provider's single "mock_fo" source) pass through unaffected. */
 export function dashboardMetricsRows(
   optionRows: OptionLegRow[],
   spotBySymbol: Record<string, number | null>,
@@ -210,9 +274,10 @@ export function dashboardMetricsRows(
       .sort()
       .slice(0, 3);
 
-    for (const expiry of expiries) {
+    expiries.forEach((expiry, rank) => {
       const expiryRows = legs.filter((r) => r.expiryDate === expiry);
-      const csp = cspFivePct(expiryRows, spot, expiry);
+      const pct = CSP_OTM_PCT_BY_RANK[rank];
+      const csp = cspOtm(expiryRows, spot, pct, expiry);
       const cc = ccFivePct(expiryRows, spot, expiry);
 
       rows.push({
@@ -228,7 +293,7 @@ export function dashboardMetricsRows(
         ccPct: cc?.ccPct ?? null,
         ccTradeDate: cc?.tradeDate ?? null,
       });
-    }
+    });
   }
   return rows;
 }

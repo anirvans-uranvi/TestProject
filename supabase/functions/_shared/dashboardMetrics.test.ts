@@ -6,7 +6,7 @@
 // checks the TypeScript port against the same behavior contract as the
 // Python original.
 import { assert, assertAlmostEquals, assertEquals } from "jsr:@std/assert@1";
-import { ccFivePct, cspFivePct, dashboardMetricsRows, type OptionLegRow } from "./dashboardMetrics.ts";
+import { ccFivePct, cspFivePct, cspOtm, dashboardMetricsRows, type OptionLegRow } from "./dashboardMetrics.ts";
 
 function leg(overrides: Partial<OptionLegRow>): OptionLegRow {
   return {
@@ -73,6 +73,88 @@ Deno.test("cspFivePct: no trade_date at all falls back to pure nearest-strike", 
   ];
   const result = cspFivePct(rows, 1000.0, "2026-07-28");
   assertEquals(result?.strike, 950.0);
+});
+
+// --- cspOtm ----------------------------------------------------------------
+// Mirrors tests/test_fo_service.py's TestCspOtmForRows.
+
+Deno.test("cspOtm: picks the highest strike still <= target, not merely nearest", () => {
+  // spot 1000, pct=5 -> target 950 -- exact match, both selection rules
+  // would agree here (covered separately below where they diverge).
+  const rows = [
+    leg({ strikePrice: 900.0, lastPrice: 5.0 }),
+    leg({ strikePrice: 950.0, lastPrice: 25.0 }),
+  ];
+  const result = cspOtm(rows, 1000.0, 5.0, "2026-07-28");
+  assertEquals(result?.strike, 950.0);
+  assertEquals(result?.putPrice, 25.0);
+  assertAlmostEquals(result!.cspPct!, (25.0 / 950.0) * 100);
+});
+
+Deno.test("cspOtm: nearest-below diverges from nearest-either-side when the closer strike is above target", () => {
+  // spot 1000, pct=5 -> target 950. Strike 960 is nearer in absolute
+  // distance (10 vs 30) but sits ABOVE target -- less than 5% OTM --
+  // so it must lose to 920, the nearest strike that's still <= target.
+  const rows = [
+    leg({ strikePrice: 960.0, lastPrice: 28.0 }),
+    leg({ strikePrice: 920.0, lastPrice: 12.0 }),
+  ];
+  const result = cspOtm(rows, 1000.0, 5.0, "2026-07-28");
+  assertEquals(result?.strike, 920.0);
+  assertEquals(result?.putPrice, 12.0);
+});
+
+Deno.test("cspOtm: falls back to lowest available strike when none qualify", () => {
+  // target 950, but every listed strike is above it -- none clear "at
+  // least 5% OTM", so the lowest available strike is the closest
+  // approximation.
+  const rows = [
+    leg({ strikePrice: 980.0, lastPrice: 35.0 }),
+    leg({ strikePrice: 1000.0, lastPrice: 50.0 }),
+  ];
+  const result = cspOtm(rows, 1000.0, 5.0, "2026-07-28");
+  assertEquals(result?.strike, 980.0);
+});
+
+Deno.test("cspOtm: a wider pct produces a lower strike", () => {
+  const rows = [
+    leg({ strikePrice: 900.0, lastPrice: 5.0 }),
+    leg({ strikePrice: 930.0, lastPrice: 12.0 }),
+    leg({ strikePrice: 950.0, lastPrice: 25.0 }),
+    leg({ strikePrice: 970.0, lastPrice: 40.0 }),
+  ];
+  assertEquals(cspOtm(rows, 1000.0, 5.0, "2026-07-28")?.strike, 950.0);
+  assertEquals(cspOtm(rows, 1000.0, 7.0, "2026-07-28")?.strike, 930.0);
+  assertEquals(cspOtm(rows, 1000.0, 10.0, "2026-07-28")?.strike, 900.0);
+});
+
+Deno.test("cspOtm: echoes back the expiryDate argument, not a row field", () => {
+  const rows = [leg({ strikePrice: 950.0, lastPrice: 25.0, expiryDate: "2026-08-25" })];
+  const result = cspOtm(rows, 1000.0, 5.0, "2026-08-25");
+  assertEquals(result?.expiryDate, "2026-08-25");
+});
+
+Deno.test("cspOtm: no PE rows returns null", () => {
+  const rows = [leg({ optionType: "CE", strikePrice: 950.0, lastPrice: 60.0 })];
+  assertEquals(cspOtm(rows, 1000.0, 5.0, "2026-07-28"), null);
+});
+
+Deno.test("cspOtm: empty rows returns null", () => {
+  assertEquals(cspOtm([], 1000.0, 5.0, "2026-07-28"), null);
+});
+
+Deno.test("cspOtm: prefers freshest trade_date over pure nearest-below-target", () => {
+  // spot 1000, pct=5 -> target 950. Strike 950 is the literal
+  // nearest-below match but hasn't traded since 2026-07-01 (illiquid);
+  // strike 920 is farther but is the only strike from the freshest
+  // trade_date (2026-07-20), so it must win instead.
+  const rows = [
+    leg({ strikePrice: 950.0, lastPrice: 999.0, tradeDate: "2026-07-01" }),
+    leg({ strikePrice: 920.0, lastPrice: 12.0, tradeDate: "2026-07-20" }),
+  ];
+  const result = cspOtm(rows, 1000.0, 5.0, "2026-07-28");
+  assertEquals(result?.strike, 920.0);
+  assertEquals(result?.putTradeDate, "2026-07-20");
 });
 
 // --- ccFivePct -------------------------------------------------------------
@@ -262,4 +344,31 @@ Deno.test("dashboardMetricsRows: BSE-sourced legs excluded even with _edge suffi
 Deno.test("dashboardMetricsRows: rows without a source pass through unaffected", () => {
   const result = dashboardMetricsRows(rowsForExpiry("2026-07-28"), { RELIANCE: 1000.0 });
   assertEquals(result.length, 1);
+});
+
+Deno.test("dashboardMetricsRows: CSP's OTM target is rank-based (5%/7%/10%), not flat 5% for every expiry", () => {
+  // Same 4 PE strikes (900/930/950/970) at each of 3 expiries -- spot
+  // 1000 -> near (5%) should land on 950, next (7%) on 930, far (10%)
+  // on 900, confirming each expiry's own rank picks a different target,
+  // not the same flat 5% cspFivePct/csp_5pct_for_rows would use.
+  function rowsWithFourStrikes(expiryDate: string): OptionLegRow[] {
+    return [
+      leg({ optionType: "CE", strikePrice: 1050.0, lastPrice: 15.0, expiryDate }),
+      leg({ optionType: "PE", strikePrice: 900.0, lastPrice: 5.0, expiryDate }),
+      leg({ optionType: "PE", strikePrice: 930.0, lastPrice: 12.0, expiryDate }),
+      leg({ optionType: "PE", strikePrice: 950.0, lastPrice: 25.0, expiryDate }),
+      leg({ optionType: "PE", strikePrice: 970.0, lastPrice: 40.0, expiryDate }),
+    ];
+  }
+  const rows = [
+    ...rowsWithFourStrikes("2026-07-28"),
+    ...rowsWithFourStrikes("2026-08-25"),
+    ...rowsWithFourStrikes("2026-09-29"),
+  ];
+  const result = dashboardMetricsRows(rows, { RELIANCE: 1000.0 });
+  assertEquals(result.length, 3);
+  const byExpiry = Object.fromEntries(result.map((r) => [r.expiryDate, r]));
+  assertEquals(byExpiry["2026-07-28"].cspStrike, 950.0); // near, 5%
+  assertEquals(byExpiry["2026-08-25"].cspStrike, 930.0); // next, 7%
+  assertEquals(byExpiry["2026-09-29"].cspStrike, 900.0); // far, 10%
 });

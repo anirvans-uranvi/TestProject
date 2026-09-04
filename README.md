@@ -464,8 +464,8 @@ regardless of which page triggered the refresh.
     disambiguate from the other two), still the only one that widens the
     equity/ETF universe with every tracked ETF and refetches live LTP for
     every futures/option contract this account's own portfolio holds plus
-    the exact CSP/CC option legs the Dashboard's 5% CSP column and the
-    Options page's own 5% CC section use (`_dhan_fo_universe`,
+    the exact CSP/CC option legs the Screener for CSP page's CSP columns
+    and the Options page's own 5% CC section use (`_dhan_fo_universe`,
     `DhanProvider.get_fo_quotes`, migration `0032`)
     -- not the full option chain for every strike/expiry, just what the
     Screener and the account's own positions actually reference.
@@ -601,9 +601,9 @@ As its last step, this function also recomputes the Dashboard's
 `dashboard_fo_metrics` cache (a TypeScript port of the same calculation
 `fo_service.py` uses, in `supabase/functions/_shared/dashboardMetrics.ts`
 -- see [Futures & Options data](#futures--options-fo-data)) so a changed
-spot price shows up in the Dashboard's 5% CSP column and the Options
-page's own 5% CC section immediately, without waiting for the next
-scheduled recompute.
+spot price shows up in the Screener for CSP page's CSP columns and the
+Options page's own 5% CC section immediately, without waiting for the
+next scheduled recompute.
 
 **Deploying the Edge Function** (one-time setup, requires the Supabase
 CLI -- Edge Functions are genuinely easier to develop/deploy with proper
@@ -729,14 +729,16 @@ TypeScript module as `manual-refresh` above.
 ## Futures & Options (F&O) data
 
 The **Options** page (`pages/5_Options.py`) shows, per stock, the futures
-term structure and a full calculation breakdown for the Dashboard's two
-options-derived screener columns — **5% CSP** and **5% CC** — showing the
-actual strikes, premiums, and trade dates used, not just the final
-percentage -- both **5% CSP** and **5% CC** are shown as a near/next/far
-month table (CC's table also carries "Net Investment" and "Assignment
-Profit" columns the Dashboard doesn't). Open it by selecting a row in the
-Dashboard's table and clicking "Open in Options", or via the "View F&O /
-options" button on Stock Detail.
+term structure and a full calculation breakdown for its own **5% CSP**
+and **5% CC** sections — showing the actual strikes, premiums, and trade
+dates used, not just the final percentage -- both are shown as a
+near/next/far month table (CC's table also carries "Net Investment" and
+"Assignment Profit" columns CSP doesn't). These are flat-5%,
+nearest-either-side calculations (`csp_5pct_for_rows`/`cc_5pct_for_rows`)
+kept unchanged and separate from the Screener for CSP page's own
+rank-based 5%/7%/10% CSP columns described below. Open it by selecting a
+row in the Screener table and clicking "Open in Options", or via the
+"View F&O / options" button on Stock Detail.
 
 **5% CC** is a covered-call yield: sell 1 lot of the OTM call whose
 strike is the *lowest one still at or above* 5% above spot (not merely
@@ -752,7 +754,8 @@ premium ÷ (strike − spot) × 100) on request, which itself had replaced an
 even earlier, more complex "5% ITM PMCC" (poor-man's-covered-call, three
 option legs). The table originally only showed the nearest expiry's
 numbers before being extended to all three months to match 5% CSP's
-table.
+table (this page's own 5% CSP table, not the Screener's newer per-tier
+columns).
 
 If you hold this stock in one of your own saved portfolios, a third
 **"Portfolio CC"** table appears below 5% CC (silently absent otherwise)
@@ -776,23 +779,34 @@ portfolio that holds it, each showing its own qty/avg price plus
 Strike/Premium/Trade Date/Invested Amount/CC ROI/CC Assignment ROI for
 the near, next, and far monthly expiries.
 
-The Dashboard's own **5% CSP** column (its "5% CC" sibling column was
-dropped per an explicit user request once the "Other Stock Holdings"
-page's own per-holding covered-call trigger took over that role -- the
-underlying cache still computes/stores `cc_pct` too, just unused by this
-particular page now, see below) reads from a small precomputed cache
-table (`dashboard_fo_metrics`, migration `0011`, keyed by `(symbol,
-expiry_date)` -- up to 3 rows per symbol, near/next/far) instead of
-recalculating across every open option contract on every page load --
-every refresh path (the cron script, `fetch_fo_data.py`, and Stock Data
-Refresh/Bhavcopy Refresh below) recomputes all 3 months as its last
-step, so it's never more than one refresh out of date. An **"Options
-month" dropdown** lets you pick which of the 3 cached months feeds that
-column -- purely a re-render over already-cached rows, no new fetch --
-shown as `"Aug 2026 (25-Aug-26)"`, the full date alongside the month, not
-just the month (see below for why). The dropdown's choices are
+The Screener for CSP page's own CSP columns (its old flat "5% CSP"/"5%
+CC" pair was replaced with **six** columns per an explicit user
+request -- `{Month} CSP Strike`/`{Month} CSP ROI` for each of near/next/
+far, no month picker; "5% CC" was already dropped earlier once the
+"Other Stock Holdings" page's own per-holding covered-call trigger took
+over that role, and CC's cache computation is otherwise unaffected) read
+from a small precomputed cache table (`dashboard_fo_metrics`, migration
+`0011`, keyed by `(symbol, expiry_date)` -- up to 3 rows per symbol,
+near/next/far) instead of recalculating across every open option
+contract on every page load -- every refresh path (the cron script,
+`fetch_fo_data.py`, and Stock Data Refresh/Bhavcopy Refresh below)
+recomputes all 3 months as its last step, so it's never more than one
+refresh out of date. Confirmed with the user: every NSE stock option
+shares the same monthly expiry calendar, so all 3 cached expiries apply
+uniformly to every screener row -- the column headers use each expiry's
+own literal month name (e.g. "Sep CSP Strike"), not a generic
+"Near/Next/Far" label. **Each tier targets a different OTM %, not a flat
+5% for all three**: near = 5%, next = 7%, far = 10%
+(`fo_service.csp_otm_for_rows`, a new function -- `pages/5_Options.py`'s
+own separate "5% CSP" section is untouched, still flat 5%/nearest-either-
+side). Strike selection is also different from that original: the
+**nearest strike below the target** (not nearest either side) -- the
+strike cell shows that strike plus its actual signed `%` from spot in
+parentheses, e.g. `"₹1,230 (-5.57%)"`; the ROI cell shows the same
+premium-over-strike yield the old column used. The choices are still
 restricted to expiries that belong to a symbol actually shown in the
-screener below (Nifty 50 stocks).
+screener below (Nifty 50 stocks) -- same reasoning the old dropdown's
+filter had (an index-only expiry could otherwise leak in).
 
 **Stock option data is always NSE-only, never BSE -- a hard, database-
 level guarantee (migration `0031_stock_options_nse_only.sql`),
@@ -944,9 +958,9 @@ per-portfolio design), and it governs two things at once:
    bhavcopy-sourced regardless of this setting. **Dhan only** (migration
    `0032`), Stock & Option Data Refresh separately live-prices the
    *specific* F&O contracts that actually matter to this account: every
-   futures/option position it holds, and the cached 5% CSP/5% CC legs
-   (`dashboard_fo_metrics`) the Dashboard's 5% CSP column and the
-   Options page's own 5% CC section respectively read from -- see
+   futures/option position it holds, and the cached CSP/CC legs
+   (`dashboard_fo_metrics`) the Screener for CSP page's CSP columns and
+   the Options page's own 5% CC section respectively read from -- see
    [On-demand refresh](#on-demand-refresh-the-refresh-bar) below.
 2. **Where your holdings/positions come from.** Picking Dhan
    reveals a credential form and a "Sync now" button right there in

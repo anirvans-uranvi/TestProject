@@ -209,6 +209,100 @@ class TestCsp5PctForRows:
         assert result["put_trade_date"] == "2026-07-20"
 
 
+class TestCspOtmForRows:
+    """csp_otm_for_rows -- a CSP strike/ROI pick for an arbitrary OTM
+    target `pct`, used by dashboard_metrics_rows for the Screener for
+    CSP page's term-scaled near/next/far columns (5%/7%/10%). Unlike
+    csp_5pct_for_rows's "nearest either side," this picks the nearest
+    strike *below* the target -- mirrors TestCc5PctForRows's floor-filter
+    cases, flipped to the put side."""
+
+    def test_picks_highest_strike_still_at_or_below_target(self):
+        # spot 1000, pct=5 -> target 950 -- exact match, both selection
+        # rules would agree here (divergence covered separately below).
+        rows = [
+            {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 900.0, "expiry_date": "2026-07-28", "last_price": 5.0},
+            {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 950.0, "expiry_date": "2026-07-28", "last_price": 25.0},
+        ]
+        result = fo_service.csp_otm_for_rows(rows, spot=1000.0, pct=5.0, expiry_date="2026-07-28")
+        assert result["strike"] == 950.0
+        assert result["put_price"] == 25.0
+        assert abs(result["csp_pct"] - (25.0 / 950.0 * 100)) < 1e-9
+
+    def test_diverges_from_nearest_either_side_when_closer_strike_is_above_target(self):
+        # spot 1000, pct=5 -> target 950. Strike 960 is nearer in
+        # absolute distance (10 vs 30) but sits ABOVE target -- less than
+        # 5% OTM -- so it must lose to 920, the nearest strike still <=
+        # target.
+        rows = [
+            {"option_type": "PE", "strike_price": 960.0, "last_price": 28.0},
+            {"option_type": "PE", "strike_price": 920.0, "last_price": 12.0},
+        ]
+        result = fo_service.csp_otm_for_rows(rows, spot=1000.0, pct=5.0, expiry_date="2026-07-28")
+        assert result["strike"] == 920.0
+        assert result["put_price"] == 12.0
+
+    def test_falls_back_to_lowest_available_strike_when_none_qualify(self):
+        # target 950, but every listed strike is above it -- none clear
+        # "at least 5% OTM" -- so the lowest available strike is the
+        # closest approximation, mirroring cc_5pct_for_rows's own
+        # fallback-to-highest.
+        rows = [
+            {"option_type": "PE", "strike_price": 980.0, "last_price": 35.0},
+            {"option_type": "PE", "strike_price": 1000.0, "last_price": 50.0},
+        ]
+        result = fo_service.csp_otm_for_rows(rows, spot=1000.0, pct=5.0, expiry_date="2026-07-28")
+        assert result["strike"] == 980.0
+
+    def test_wider_pct_produces_a_lower_strike(self):
+        rows = [
+            {"option_type": "PE", "strike_price": 900.0, "last_price": 5.0},
+            {"option_type": "PE", "strike_price": 930.0, "last_price": 12.0},
+            {"option_type": "PE", "strike_price": 950.0, "last_price": 25.0},
+            {"option_type": "PE", "strike_price": 970.0, "last_price": 40.0},
+        ]
+        assert fo_service.csp_otm_for_rows(rows, spot=1000.0, pct=5.0, expiry_date="2026-07-28")["strike"] == 950.0
+        assert fo_service.csp_otm_for_rows(rows, spot=1000.0, pct=7.0, expiry_date="2026-07-28")["strike"] == 930.0
+        assert fo_service.csp_otm_for_rows(rows, spot=1000.0, pct=10.0, expiry_date="2026-07-28")["strike"] == 900.0
+
+    def test_echoes_back_the_expiry_date_argument_not_a_row_field(self):
+        rows = [{"option_type": "PE", "strike_price": 950.0, "expiry_date": "2026-08-25", "last_price": 25.0}]
+        result = fo_service.csp_otm_for_rows(rows, spot=1000.0, pct=5.0, expiry_date="2026-08-25")
+        assert result["expiry_date"] == "2026-08-25"
+
+    def test_no_pe_rows_returns_none(self):
+        rows = [{"option_type": "CE", "strike_price": 950.0, "last_price": 60.0}]
+        assert fo_service.csp_otm_for_rows(rows, spot=1000.0, pct=5.0, expiry_date="2026-07-28") is None
+
+    def test_empty_rows_returns_none(self):
+        assert fo_service.csp_otm_for_rows([], spot=1000.0, pct=5.0, expiry_date="2026-07-28") is None
+
+    def test_prefers_freshest_trade_date_over_pure_nearest_below_target(self):
+        # spot 1000, pct=5 -> target 950. Strike 950 is the literal
+        # nearest-below match but hasn't traded since 2026-07-01
+        # (illiquid); strike 920 is farther but is the only strike from
+        # the freshest trade_date (2026-07-20), so it must win instead.
+        rows = [
+            {"option_type": "PE", "strike_price": 950.0, "last_price": 999.0, "trade_date": "2026-07-01"},
+            {"option_type": "PE", "strike_price": 920.0, "last_price": 12.0, "trade_date": "2026-07-20"},
+        ]
+        result = fo_service.csp_otm_for_rows(rows, spot=1000.0, pct=5.0, expiry_date="2026-07-28")
+        assert result["strike"] == 920.0
+        assert result["put_trade_date"] == "2026-07-20"
+
+    def test_float_drift_does_not_wrongly_exclude_a_strike_that_exactly_equals_target(self):
+        # Real bug, caught by this exact case: 1000 * (1 - 7/100) ==
+        # 929.9999999999999 in floating point, not 930.0 -- a bare
+        # `strike <= target` wrongly excluded strike 930 here before
+        # _CSP_OTM_EPS was added.
+        rows = [
+            {"option_type": "PE", "strike_price": 900.0, "last_price": 5.0},
+            {"option_type": "PE", "strike_price": 930.0, "last_price": 12.0},
+        ]
+        result = fo_service.csp_otm_for_rows(rows, spot=1000.0, pct=7.0, expiry_date="2026-07-28")
+        assert result["strike"] == 930.0
+
+
 class TestCc5PctMap:
     EXPIRY = "2026-07-28"
 
@@ -556,11 +650,13 @@ class TestCoveredCallForHolding:
 class TestDashboardMetricsRows:
     """dashboard_metrics_rows fans out per symbol over its up to 3
     nearest distinct expiries (near/next/far), computing
-    csp_5pct_for_rows + cc_5pct_for_rows (both already covered above)
-    once per expiry, and returns one flat row per (symbol, expiry) --
-    the shape dashboard_fo_metrics (migration 0011) stores. These tests
-    focus on the fan-out/merge, not re-deriving the underlying
-    strike-selection math."""
+    csp_otm_for_rows (rank-based pct, see below) + cc_5pct_for_rows
+    (unchanged, both already covered above) once per expiry, and returns
+    one flat row per (symbol, expiry) -- the shape dashboard_fo_metrics
+    (migration 0011) stores. These tests focus on the fan-out/merge, not
+    re-deriving the underlying strike-selection math -- except for the
+    rank-based-pct test below, which specifically confirms near/next/far
+    each get a different OTM target rather than a flat 5% for all three."""
 
     def _rows_for_expiry(self, symbol, expiry):
         return [
@@ -649,3 +745,25 @@ class TestDashboardMetricsRows:
         # accidentally excluded.
         result = fo_service.dashboard_metrics_rows(self._rows_for_expiry("RELIANCE", "2026-07-28"), {"RELIANCE": 1000.0})
         assert len(result) == 1
+
+    def test_csp_otm_target_is_rank_based_not_flat_5pct_for_every_expiry(self):
+        # Same 4 PE strikes (900/930/950/970) at each of 3 expiries --
+        # spot 1000 -> near (5%) should land on 950, next (7%) on 930,
+        # far (10%) on 900, confirming each expiry's own rank picks a
+        # different target, not the same flat 5% csp_5pct_for_rows would.
+        def _rows(expiry):
+            return [
+                {"symbol": "RELIANCE", "option_type": "CE", "strike_price": 1050.0, "expiry_date": expiry, "last_price": 15.0},
+                {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 900.0, "expiry_date": expiry, "last_price": 5.0},
+                {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 930.0, "expiry_date": expiry, "last_price": 12.0},
+                {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 950.0, "expiry_date": expiry, "last_price": 25.0},
+                {"symbol": "RELIANCE", "option_type": "PE", "strike_price": 970.0, "expiry_date": expiry, "last_price": 40.0},
+            ]
+
+        rows = _rows("2026-07-28") + _rows("2026-08-25") + _rows("2026-09-29")
+        result = fo_service.dashboard_metrics_rows(rows, {"RELIANCE": 1000.0})
+        assert len(result) == 3
+        by_expiry = {r["expiry_date"]: r for r in result}
+        assert by_expiry["2026-07-28"]["csp_strike"] == 950.0  # near, 5%
+        assert by_expiry["2026-08-25"]["csp_strike"] == 930.0  # next, 7%
+        assert by_expiry["2026-09-29"]["csp_strike"] == 900.0  # far, 10%

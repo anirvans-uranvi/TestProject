@@ -208,6 +208,73 @@ def csp_5pct_for_rows(pe_rows: list[dict], spot: float, expiry_date) -> dict | N
     }
 
 
+# Absorbs float drift in `spot * (1 - pct/100)` landing a hair below a
+# strike it's meant to exactly equal -- see csp_otm_for_rows' own
+# docstring for the confirmed real case this guards against.
+_CSP_OTM_EPS = 1e-6
+
+
+def csp_otm_for_rows(pe_rows: list[dict], spot: float, pct: float, expiry_date) -> dict | None:
+    """Pure: a CSP strike/ROI pick for an arbitrary OTM target `pct`
+    (not fixed at 5% the way `csp_5pct_for_rows` is), used by
+    `dashboard_metrics_rows` for the Screener for CSP page's term-scaled
+    near/next/far columns (5%/7%/10%) -- a separate function, not a
+    parameterized `csp_5pct_for_rows`, since `pages/5_Options.py`'s own
+    "5% CSP" section still uses the original fixed-5%/nearest-either-side
+    behavior unchanged. `pe_rows` should already be filtered to one
+    symbol + one expiry (any CE legs mixed in are ignored).
+
+    Selection rule is deliberately **not** `csp_5pct_for_rows`'s "nearest
+    either side" -- confirmed with the user: picks the **highest strike
+    that is still <= target** (`target = spot * (1 - pct/100)`), i.e. the
+    nearest strike *below* the target rather than whichever is closer in
+    absolute distance (which could round up to a strike *above* target,
+    selling a put less OTM than intended). Mirrors `cc_5pct_for_rows`'s
+    floor-filter exactly, just flipped to the put side (a put gets more
+    OTM as strikes go *down*, so the qualifying filter is `<=` and the
+    best candidate is the *highest* of those, not the lowest). Falls back
+    to the single **lowest** available strike if none qualify (spot is
+    very close to the lowest listed strike, or the chain is unusually
+    thin) -- the symmetric mirror of `cc_5pct_for_rows`'s
+    fallback-to-highest. Prefers strikes with the freshest available
+    `trade_date` among the candidates (see `_freshest_rows`).
+
+    Returns the same shape `csp_5pct_for_rows` does: `{"strike",
+    "put_price", "csp_pct", "spot", "expiry_date", "put_trade_date"}`, or
+    `None` if there's no priceable PE strike in `pe_rows`.
+
+    **Real bug caught by its own test suite**: `target = spot * (1 -
+    pct/100)` is a floating-point value that can land a hair below a
+    strike it's mathematically meant to exactly equal (confirmed:
+    `1000 * (1 - 7/100) == 929.9999999999999` in Python, not `930.0`) --
+    a bare `strike <= target` then wrongly excludes that strike as "not
+    OTM enough" by a fraction of a rupee. `_CSP_OTM_EPS` absorbs that
+    drift; real strike intervals (₹0.50 and up) are always far larger, so
+    this can't wrongly include a genuinely-too-high strike."""
+    near_rows = [r for r in pe_rows if str(r.get("option_type")) == "PE" and r.get("strike_price") is not None]
+    if not near_rows:
+        return None
+    target = spot * (1 - pct / 100)
+    freshest = _freshest_rows(near_rows)
+    otm_enough = [r for r in freshest if _num(r["strike_price"]) <= target + _CSP_OTM_EPS]
+    best_row = (
+        max(otm_enough, key=lambda r: _num(r["strike_price"]))
+        if otm_enough
+        else min(freshest, key=lambda r: _num(r["strike_price"]))
+    )
+    strike = _num(best_row["strike_price"])
+    put_price = _num(best_row.get("last_price")) or _num(best_row.get("close")) or _num(best_row.get("settlement_price"))
+    csp_pct = (put_price / strike * 100) if (put_price is not None and strike) else None
+    return {
+        "strike": strike,
+        "put_price": put_price,
+        "csp_pct": csp_pct,
+        "spot": spot,
+        "expiry_date": expiry_date,
+        "put_trade_date": best_row.get("trade_date"),
+    }
+
+
 def cc_5pct_map(call_rows: list[dict], spot_by_symbol: dict[str, float | None]) -> dict[str, dict]:
     """Pure: for each symbol's CE legs (from
     `fo_repo.get_all_open_options(OptionType.CE)`, every symbol/expiry
@@ -510,30 +577,45 @@ def covered_call_for_holding(
     }
 
 
+_CSP_OTM_PCT_BY_RANK = [5.0, 7.0, 10.0]  # near, next, far -- see dashboard_metrics_rows
+
+
 def dashboard_metrics_rows(option_rows: list[dict], spot_by_symbol: dict[str, float | None]) -> list[dict]:
     """Pure: for each symbol with a spot price and open option legs,
-    computes "5% CSP" / "5% CC" (via `csp_5pct_for_rows` /
-    `cc_5pct_for_rows`, the same already-tested calculations the
-    Dashboard has always used) for each of that symbol's **up to 3
+    computes CSP (via `csp_otm_for_rows`) / "5% CC" (via
+    `cc_5pct_for_rows`, unchanged) for each of that symbol's **up to 3
     nearest distinct expiries** -- near/next/far, the same term-structure
     shape `pages/5_Options.py`'s Futures section and CSP table already
     use -- and returns one flat row per **(symbol, expiry)**, shaped for
     `dashboard_fo_metrics` (see migration
-    0011_dashboard_cc_5pct.sql). This lets the Dashboard offer a month
-    dropdown that just selects which already-cached row to display, with
-    no live recomputation on selection.
+    0011_dashboard_cc_5pct.sql). This lets the Screener for CSP page show
+    all 3 expiries' CSP figures at once with no live recomputation.
+
+    **CSP's OTM target is rank-based, not flat 5% for every expiry** --
+    confirmed with the user: `_CSP_OTM_PCT_BY_RANK = [5.0, 7.0, 10.0]`,
+    indexed by each expiry's own rank (0=near, 1=next, 2=far) among that
+    symbol's sorted expiries, via `csp_otm_for_rows` (a nearest-strike-
+    *below*-target selection, not `csp_5pct_for_rows`'s original
+    nearest-either-side -- see that function's own docstring for why a
+    separate function exists rather than parameterizing the original).
+    `cc_pct`/`cc_strike` are entirely unaffected by this -- CC's
+    computation is still the original flat 5%/floor-filter
+    `cc_5pct_for_rows`, since CC is no longer displayed on the Dashboard
+    at all (only tracked here for `refresh_bar.py::_dhan_fo_universe`'s
+    live-quote-refresh bookkeeping).
 
     A symbol with no spot price or no option data gets zero rows (there's
     no `expiry_date` to key a row on, and the column is `not null`) --
-    the Dashboard's lookup for that symbol at any selected month then
-    simply finds nothing, which it already treats as "N/A". A symbol with
-    fewer than 3 expiries just gets fewer rows. `csp_pct`/`cc_pct` are
-    `None` independently of each other when either calculation has no
-    priceable result for that specific expiry (e.g. no CE strike that
-    month). `cc_5pct_for_rows`'s `assignment_profit_pct` is deliberately
-    NOT cached here -- the Dashboard only ever displays `cc_pct`; the
-    Options screen's "Assignment Profit" figure is computed live instead
-    (see `pages/5_Options.py`).
+    the Dashboard's lookup for that symbol then simply finds nothing for
+    that tier, which it already treats as "N/A". A symbol with fewer than
+    3 expiries just gets fewer rows (and therefore fewer populated
+    tiers). `csp_pct`/`cc_pct` are `None` independently of each other
+    when either calculation has no priceable result for that specific
+    expiry (e.g. no CE strike that month). `cc_5pct_for_rows`'s
+    `assignment_profit_pct` is deliberately NOT cached here -- the
+    Dashboard only ever displays `cc_pct`; the Options screen's
+    "Assignment Profit" figure is computed live instead (see
+    `pages/5_Options.py`).
 
     BSE-sourced legs (`source` starting with "bse_fo_bhavcopy", see
     `bse_fo_provider.py`) are excluded entirely -- BSE's F&O feed is
@@ -572,9 +654,10 @@ def dashboard_metrics_rows(option_rows: list[dict], spot_by_symbol: dict[str, fl
         if not legs:
             continue
         expiries = sorted({r.get("expiry_date") for r in legs if r.get("expiry_date")})[:3]
-        for expiry in expiries:
+        for rank, expiry in enumerate(expiries):
             expiry_rows = [r for r in legs if r.get("expiry_date") == expiry]
-            csp = csp_5pct_for_rows(expiry_rows, spot, expiry)
+            pct = _CSP_OTM_PCT_BY_RANK[rank]
+            csp = csp_otm_for_rows(expiry_rows, spot, pct, expiry)
             cc = cc_5pct_for_rows(expiry_rows, spot, expiry)
             rows.append(
                 {

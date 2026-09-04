@@ -592,21 +592,49 @@ log line is `F&O ingest complete: ...`) before assuming it's a data bug.
   `csp_5pct_for_rows(pe_rows, spot, expiry_date)` compute "5% CSP", and
   `cc_5pct_map(call_rows, spot_by_symbol)` / `cc_5pct_for_rows(ce_rows,
   spot, expiry_date)` compute "5% CC" — the single implementation shared
-  by the Options screen's "5% CSP"/"5% CC" breakdown sections (see below)
-  and, via `dashboard_metrics_rows`/`recompute_dashboard_metrics` below,
-  the Dashboard's two F&O-derived columns. Each restricts to a symbol's
+  by the Options screen's own "5% CSP"/"5% CC" breakdown sections (see
+  below) and, via `dashboard_metrics_rows`/`recompute_dashboard_metrics`
+  below, the Dashboard cache's CC leg. **`csp_5pct_for_rows` itself is no
+  longer what feeds the Dashboard cache's CSP leg** — that now comes from
+  a separate, newer function, `csp_otm_for_rows` (below); `csp_5pct_for_rows`/
+  `csp_5pct_map` are kept alive solely for the Options screen's own
+  flat-5% section, unchanged by that split. Each restricts to a symbol's
   own nearest available expiry and returns not just the final percentage
   but every intermediate value used to get there (strike, premium, spot,
-  expiry, `trade_date`) — needed by the Options screen's breakdown;
-  `csp_5pct_for_rows`/`cc_5pct_for_rows` are the single-expiry cores
-  `csp_5pct_map`/`cc_5pct_map` delegate to, used directly by the Options
-  screen (CSP) or the Dashboard's cache (both) to compute a near/next/far
-  month row each (the same term-structure shape the Futures section
-  already uses), one call per expiry. Both prefer strikes with the
-  freshest available `trade_date` over a purely-nearest-strike match
-  (`_freshest_rows`) — `strike ≈ target` can still be a contract that
-  hasn't traded in weeks if it's illiquid, while a neighboring strike
-  keeps updating daily.
+  expiry, `trade_date`) — needed by the Options screen's breakdown; both
+  prefer strikes with the freshest available `trade_date` over a
+  purely-nearest-strike match (`_freshest_rows`) — `strike ≈ target` can
+  still be a contract that hasn't traded in weeks if it's illiquid, while
+  a neighboring strike keeps updating daily.
+
+  **`csp_otm_for_rows(pe_rows, spot, pct, expiry_date)`** is the function
+  that actually feeds the Dashboard cache's CSP leg today. It's a sibling
+  of `csp_5pct_for_rows`, not a modification of it — same return shape
+  (`strike`, `put_price`, `csp_pct`, `spot`, `expiry_date`,
+  `put_trade_date`), same freshest-`trade_date` preference, but two
+  differences driven by an explicit user request: the OTM percentage is a
+  caller-supplied `pct` rather than a hardcoded 5%, and strike selection
+  is a **floor filter** (mirroring `cc_5pct_for_rows`'s floor filter,
+  flipped to the put side) — among strikes at or below
+  `target = spot * (1 - pct/100)` (with a `1e-6` epsilon tolerance, see
+  "A float-drift bug" below), it picks the **highest** one (the nearest
+  strike *below* target, not nearest either side), falling back to the
+  single lowest available strike if none qualify. `csp_5pct_for_rows`
+  instead does a plain nearest-by-absolute-distance match with no
+  floor -- the two functions deliberately answer different questions
+  ("the CSP strike closest to 5% OTM in either direction" vs. "the CSP
+  strike that guarantees at least this much OTM cushion").
+
+  **A float-drift bug**: `spot * (1 - pct / 100)` can land a hair below
+  the value it's mathematically meant to exactly equal — e.g.
+  `1000 * (1 - 7 / 100) == 929.9999999999999` in both Python and
+  JavaScript/Deno — which silently broke a bare `strike <= target`
+  boundary check (a strike that should exactly qualify got wrongly
+  excluded). Fixed with a small epsilon tolerance
+  (`_CSP_OTM_EPS`/`CSP_OTM_EPS = 1e-6`), matching this codebase's
+  established float-tolerance convention (`_FIFO_EPS`, `_EPS` used
+  elsewhere) — caught by actually running the TypeScript test suite via
+  `deno test`, not just hand-verifying it.
 
   **"5% CC" (covered call)** is deliberately simple: sell 1 lot of the
   OTM call whose strike is the **lowest one still at or above 5% above
@@ -641,15 +669,24 @@ log line is `F&O ingest complete: ...`) before assuming it's a data bug.
 - `dashboard_metrics_rows(option_rows, spot_by_symbol)` / `recompute_dashboard_metrics(client)`
   — the Dashboard's precomputed-cache write path (`dashboard_fo_metrics`,
   migration `0011`). For each symbol with a spot price and open option
-  legs, `dashboard_metrics_rows` calls `csp_5pct_for_rows` +
-  `cc_5pct_for_rows` once per each of that symbol's **up to 3 nearest
-  distinct expiries** (adding no new strike-selection math of its own),
-  emitting one flat row per **(symbol, expiry)** — `cc_5pct_for_rows`'s
-  `assignment_profit_pct` is deliberately not cached here, since the
-  Dashboard only ever displays `cc_pct`; `recompute_dashboard_metrics`
-  reads spot from `latest_screener_view` + open option legs from
-  `latest_option_chain_view`, calls it, and upserts the whole table. See
-  "Dashboard cache" below for why this exists and every path that calls it.
+  legs, `dashboard_metrics_rows` calls `csp_otm_for_rows` + `cc_5pct_for_rows`
+  once per each of that symbol's **up to 3 nearest distinct expiries**
+  (`expiries = sorted(...)[:3]`, unchanged), emitting one flat row per
+  **(symbol, expiry)**. **Each of the 3 ranked expiry slots targets a
+  different OTM % for the CSP leg, not a flat 5%**:
+  `_CSP_OTM_PCT_BY_RANK = [5.0, 7.0, 10.0]` — the nearest expiry uses 5%,
+  the next uses 7%, the farthest uses 10% (`pct =
+  _CSP_OTM_PCT_BY_RANK[rank]` inside the `enumerate(expiries)` loop,
+  passed straight through to `csp_otm_for_rows`). The CC leg
+  (`cc_5pct_for_rows`) is completely unaffected by this change — still
+  flat 5% for all 3 expiries. `cc_5pct_for_rows`'s `assignment_profit_pct`
+  is deliberately not cached here, since the Dashboard only ever displays
+  `cc_pct`; `recompute_dashboard_metrics` reads spot from
+  `latest_screener_view` + open option legs from `latest_option_chain_view`,
+  calls it, and upserts the whole table. No migration was needed for the
+  rank-based pct change — same two DB columns (`csp_strike`/`csp_pct`),
+  just a different meaning per ranked row. See "Dashboard cache" below
+  for why this exists and every path that calls it.
 - `scripts/fetch_fo_data.py` — service-role backfill, `--exchange nse`
   (default) or `--exchange bse` selects `nse_fo_provider`/`bse_fo_provider`
   from a small `_PROVIDERS` dict (`--days 60` default, `--date`, `--mock`
@@ -704,11 +741,27 @@ other Dashboard column already was (`daily_screener_snapshots`):
 `dashboard_fo_metrics` holds up to 3 small rows per symbol -- one per
 near/next/far monthly expiry -- keyed by **(symbol, expiry_date)**
 (`fo_service.dashboard_metrics_rows`/`recompute_dashboard_metrics`), and
-the Dashboard just reads them (`fo_repo.get_dashboard_fo_metrics`). This
-is what backs the Dashboard's **"Options month" dropdown** (next to "Sort
-By"): picking a different month is a pure re-render over already-cached
-rows filtered to that `expiry_date` -- no new fetch, no recomputation.
-Every refresh path that can change spot price or F&O data recomputes the
+the Dashboard just reads them (`fo_repo.get_dashboard_fo_metrics`).
+
+The Dashboard originally showed one "Options month" dropdown (next to
+"Sort By") and a single flat "5% CSP" column, re-rendering over the
+already-cached rows filtered to whichever `expiry_date` was picked --
+no new fetch, no recomputation needed to switch months. **That dropdown
+was removed by request**: the page now shows all 3 cached expiries
+**simultaneously**, as 6 columns (`{Month} CSP Strike`/`{Month} CSP ROI`
+for each of near/next/far, headed by the expiry's own literal month name
+since every NSE stock option shares one expiry calendar -- no per-symbol
+misalignment to worry about) rather than one flat "5% CSP" pair behind a
+picker. `pages/1_Dashboard.py` builds `metrics_by_symbol_expiry =
+{(symbol, expiry_date): row}` from every cached row (instead of the old
+`metrics_by_symbol` keyed by symbol alone, filtered to one selected
+month) and renders all 3 tiers per stock in one pass; the CSP strike
+cell also shows the strike's own signed `%` distance from spot in
+parentheses (`(strike / spot - 1) * 100`), e.g. `"₹1,230 (-5.57%)"`.
+Because `refresh_bar.py::_dhan_fo_universe`'s live-quote override
+already iterated every cached row (not just one "selected month") before
+this change, it needed **no code change at all** to correctly live-quote
+all 3 tiers. Every refresh path that can change spot price or F&O data recomputes the
 whole cache (all 3 months, every symbol) as its last step, so it's
 correct immediately after any refresh finishes rather than on some
 separate schedule:
@@ -987,9 +1040,10 @@ option_type)` -- `option_type='EQ'` (default) for the pre-existing equity/
 ETF rows, `'FUT'`/`'CE'`/`'PE'` for the new F&O rows, sharing one table
 rather than adding a second. `pages/1_Dashboard.py` then recomputes
 `csp_pct`/`cc_pct` from the live premium using the exact same formulas
-`fo_service.csp_5pct_for_rows`/`cc_5pct_for_rows` already document (`put_price
+`fo_service.csp_otm_for_rows`/`cc_5pct_for_rows` already document (`put_price
 / strike * 100`, `premium / spot * 100`) -- only the premium is live, the
-cached strike/spot are left as-is. `src/utils/portfolio_page.py::load_positions`
+cached strike/spot are left as-is; the lookup is now by `(symbol, expiry_date)`
+rather than by symbol alone, since all 3 tiers are live-quoted at once. `src/utils/portfolio_page.py::load_positions`
 applies the same override to every position leg's own `ltp` (clearing
 `ltp_as_of` on a live hit, same "never stale" rule the equity override
 already follows), which is what makes My Positions/My Trades/My CSP/
@@ -1001,7 +1055,9 @@ TypeScript port) only ever *upserted* -- `dashboard_metrics_rows` emits a
 symbol's *current* up-to-3 nearest expiries each run, but a month that
 just expired simply stops being emitted; nothing ever deleted its old
 cached row. Left unchecked, the Dashboard's "Options month" dropdown
-(built from every distinct `expiry_date` still present in the table)
+(**since removed** — see "Dashboard cache" above for the current
+dropdown-free, 3-tier design; this narrative predates that change) —
+built from every distinct `expiry_date` still present in the table --
 kept offering already-expired months forever -- confirmed live: the
 dropdown still listed "Jul 2026" a day after that expiry had passed,
 even though the Options screen (which reads live contracts, gated on
@@ -1048,7 +1104,8 @@ section above) alongside the 50 Nifty50 stocks -- so `dashboard_fo_metrics`
 can carry rows for those index symbols too, sourced from the BSE
 index-options feed (`bse_fo_provider`, restricted to index options only
 -- see "BSE F&O provider" below). The Dashboard's "Options month"
-dropdown originally built its choices from every distinct `expiry_date`
+dropdown (since removed, see "Dashboard cache" above) originally built
+its choices from every distinct `expiry_date`
 across the **whole** `dashboard_fo_metrics` table, with no symbol
 filter -- so an index's own BSE expiry (e.g. BANKEX's, which need not
 line up with any NSE monthly stock-options expiry) leaked into the
@@ -1347,11 +1404,121 @@ page's own `st.set_page_config(page_title=..., page_icon=...)` call
 
   **Metric cards**: seven buttons in a row (`st.columns(7)`) — `Total stocks`, `🟢 Green`/`🟠 Amber`/`🔴 Red` (each sets the status filter to just that one status), and `Yield > threshold`/`All momentum +ve`/`PEG ≤ threshold` (each sets `criterion_filter` instead). There is deliberately no `Unavailable` button — the status itself is still fully selectable via the sidebar's Status multiselect and still counts toward `ALL_STATUSES`, but it wasn't considered a useful one-click quick filter and was dropped to declutter the row (a purely cosmetic trim, not a behavior change to filtering).
 
-  **Screener table columns**, left to right: `Stock` (the NSE ticker symbol, e.g. `ADANIENT` — not the full company name; no separate `#`/`Symbol` key -- see below for why), **`Trade Taken`** (`portfolio_service.trade_type_by_symbol`/`portfolio_page.load_trade_types_by_symbol` — names *any* existing Trade's own `trade_type` for this symbol across every portfolio, blank if none at all; same "only mark the affirmative case" convention `Momentum`/`52W High`/`52W Low` already use, rather than a noisier placeholder on every other row. Originally shipped as a narrower "CSP Taken" ✅/blank flag (`is_csp_trade_type`-filtered), then broadened on request to show the trade type of *any* Trade — a plain stock Holding counts too (shows `"Holding"`), not just an existing options trade, since that's equally relevant context for a wheel-strategy decision. If the same symbol is split across more than one Trade (rare — only via a manual split in Analyse Trade), every distinct type is joined with `" + "`, sorted — confirmed live against a real account: `NIFTY` showed `"Batman + Hedged + Protective Put"`, three separately-named Trades all touching that one symbol), `LTP` (latest price — renamed from "Latest price" for column-width economy), `52W High`/`52W Low` (value + `pass_fail_icon` for `criterion_52w_high`/`criterion_52w_low` — display-only proximity checks, **not** part of Green/Amber/Red; see `classification.py` above), `1D`/`5D`/`20D` (arrow + percentage only), `Momentum` (a single `pass_fail_icon(criterion_b)` — despite the name it's specifically criterion B, not a combined view), the F&O-derived `5% CSP` column (see below -- its `5% CC` sibling was dropped entirely per an explicit user request, see below), and `Dividend`/`PEG`/`Fundamentals` last (`Dividend` — renamed from "Dividend yield" — and `PEG` each carry a `pass_fail_icon` for criteria A and C respectively; `Fundamentals` is `pass_fail_icon(criterion_fundamentals(criterion_a, criterion_c))`, i.e. A or C, and is what actually feeds the overall Green/Amber/Red status alongside Momentum — see `classification.py` above). `PE` (`pe_ratio`) is **not** shown on this table — it's a fundamentals input, not one of A/B/C/Fundamentals, and stayed too noisy for the Dashboard; it's still shown on Stock Detail's pass/fail scorecard and Fundamentals panel. There used to be a third F&O-derived column, the near-month future's price (header e.g. `Jul Future`, backed by `fo_service.near_month_futures_map`/`near_month_column_label`) — it was dropped on request, and those two now-unused `fo_service` functions (and their tests) were deleted along with it rather than left as dead code; futures data is no longer fetched on this page at all (only options, for the `5% CSP` column below).
+  **Screener table columns**, left to right (this order is itself a
+  later change, per explicit request -- `Dividend`/`PEG`/`Fundamentals`
+  used to sit at the far right, after `Momentum`): `Stock` (the NSE
+  ticker symbol, e.g. `ADANIENT` — not the full company name; no
+  separate `#`/`Symbol` key -- see below for why), **`Trade Taken`**
+  (`portfolio_service.trade_type_by_symbol`/`portfolio_page.load_trade_types_by_symbol`
+  — names *any* existing Trade's own `trade_type` for this symbol across
+  every portfolio, blank if none at all; same "only mark the affirmative
+  case" convention `Momentum`/`52W High`/`52W Low` already use, rather
+  than a noisier placeholder on every other row. Originally shipped as a
+  narrower "CSP Taken" ✅/blank flag (`is_csp_trade_type`-filtered), then
+  broadened on request to show the trade type of *any* Trade — a plain
+  stock Holding counts too (shows `"Holding"`), not just an existing
+  options trade, since that's equally relevant context for a
+  wheel-strategy decision. If the same symbol is split across more than
+  one Trade (rare — only via a manual split in Analyse Trade), every
+  distinct type is joined with `" + "`, sorted — confirmed live against a
+  real account: `NIFTY` showed `"Batman + Hedged + Protective Put"`,
+  three separately-named Trades all touching that one symbol),
+  `Dividend`/`PEG`/`Fundamentals` (moved here, immediately after `Trade
+  Taken`, per explicit request -- `Dividend` — renamed from "Dividend
+  yield" — and `PEG` each carry a `pass_fail_icon` for criteria A and C
+  respectively; `Fundamentals` is
+  `pass_fail_icon(criterion_fundamentals(criterion_a, criterion_c))`,
+  i.e. A or C, and is what actually feeds the overall Green/Amber/Red
+  status alongside Momentum — see `classification.py` above), `LTP`
+  (latest price — renamed from "Latest price" for column-width economy),
+  `52W High`/`52W Low` (value + `pass_fail_icon` for
+  `criterion_52w_high`/`criterion_52w_low` — display-only proximity
+  checks, **not** part of Green/Amber/Red; see `classification.py`
+  above), `1D`/`5D`/`20D` (arrow + percentage only), `Momentum` (a single
+  `pass_fail_icon(criterion_b)` — despite the name it's specifically
+  criterion B, not a combined view), then the six F&O-derived
+  **`{Month} CSP Strike`**/**`{Month} CSP ROI`** columns, one pair per
+  near/next/far expiry (see below) -- its old flat `5% CC` column was
+  dropped entirely per an explicit earlier user request (see below),
+  well before this rank-based CSP redesign. `PE` (`pe_ratio`) is **not**
+  shown on this table — it's a fundamentals input, not one of
+  A/B/C/Fundamentals, and stayed too noisy for the Dashboard; it's still
+  shown on Stock Detail's pass/fail scorecard and Fundamentals panel.
+  There used to be a third F&O-derived column, the near-month future's
+  price (header e.g. `Jul Future`, backed by
+  `fo_service.near_month_futures_map`/`near_month_column_label`) — it
+  was dropped on request, and those two now-unused `fo_service`
+  functions (and their tests) were deleted along with it rather than
+  left as dead code; futures data is no longer fetched on this page at
+  all (only options, for the CSP columns below).
 
-  **The "5% CSP" column** (between `Momentum` and `Dividend` -- its "5% CC" sibling was dropped entirely per an explicit user request, see below) comes from a *separate* data source than the rest of the table — `dashboard_fo_metrics` (migration `0011`), the Dashboard's precomputed F&O cache, not `latest_screener_view` — joined in by symbol after filtering, rather than being part of `ScreenerRow`. `_load_dashboard_fo_metrics` returns the *raw* row list (up to 3 per symbol, one per near/next/far expiry); an **"Options month" selectbox** lists the distinct `expiry_date`s actually present (formatted `"%b %Y"`, e.g. "Jul 2026") and defaults to the nearest one via `st.session_state["dashboard_options_month"]`. Picking a month is a pure re-render over already-cached rows -- `filtered["csp_5pct"]` is built by filtering `dashboard_fo_metrics_rows` to that one `expiry_date` and mapping by symbol, no new fetch or recomputation triggered. This page only ever reads the final `csp_pct` key out of each row (the cache row itself still carries `cc_strike`/`cc_pct` too -- `recompute_dashboard_metrics`/`dashboard_fo_metrics` weren't touched by the column's removal, only this page's own display of it; the Options page's own "5% CC" section still reads the same cache); see the Futures & Options section's "Dashboard cache" paragraph above for the full pipeline (`fo_service.dashboard_metrics_rows`/`recompute_dashboard_metrics`, and every refresh path that keeps it current) and `csp_5pct_for_rows`/`cc_5pct_for_rows`'s docs for the underlying formulas, the latter of which is now used directly only by the Options screen's own "5% CSP"/"5% CC" breakdown sections (unchanged, live, for a single symbol):
-  - **`5% CSP`** — a cash-secured-put yield: for the strike nearest 5% below spot (the screener's `latest_price`, not the option chain's `underlying_price`, kept consistent both here and on the Options screen — see the bug note on `5_Options.py` below), the selected expiry's put premium as a percentage of that strike (`put_price / strike * 100`). **Deliberately not divided by exchange margin** — SPAN margin isn't available from NSE as a simple downloadable per-contract figure (it's a licensed CME Group multi-scenario risk calculation, confirmed via a live search of NSE's actual report index turning up nothing), so this uses the strike itself (the full notional a cash-secured-put seller sets aside) as the yield's denominator instead; `strike * lot_size` cancels out of both the premium and this ratio, so lot size never needs to appear in the formula at all.
-  - **`5% CC`** — a covered-call yield: sell 1 lot of the lowest call strike still at or above 5% above spot (a floor filter, not a nearest-match -- see `fo_service.py`'s bullet above), expressed as a percentage of **gross investment** (spot, the cost of buying 1 share) -- `premium / spot * 100`. No longer shown on the Dashboard at all (its column was dropped entirely per an explicit user request once "Other Stock Holdings" took over the covered-call-decision role with a different, per-holding formula -- see the Portfolio pages section below) -- the Options screen's own "5% CC" section is now the only place `cc_pct` renders, additionally showing "Net Investment" and "Assignment Profit" -- `(strike / net_investment - 1) * 100`, where `net_investment = spot - premium`. This replaced an earlier three-leg "5% ITM PMCC" (poor-man's-covered-call) calculation on request; see `fo_service.py`'s bullet above for what that used to compute.
+  **The six `{Month} CSP Strike`/`{Month} CSP ROI` columns** come from a
+  *separate* data source than the rest of the table — `dashboard_fo_metrics`
+  (migration `0011`), the Dashboard's precomputed F&O cache, not
+  `latest_screener_view` — joined in by `(symbol, expiry_date)` after
+  filtering, rather than being part of `ScreenerRow`. `_load_dashboard_fo_metrics`
+  returns the *raw* row list (up to 3 per symbol, one per near/next/far
+  expiry); `_csp_expiries = sorted({expiry_date for rows belonging to a
+  screener symbol})[:3]` picks the 3 shared expiry dates once (no
+  per-symbol branching -- confirmed with the user that every NSE stock
+  option shares one expiry calendar), and `_csp_month_labels` turns each
+  into its own literal month abbreviation (`date.fromisoformat(e).strftime("%b")`,
+  e.g. `"Sep"`) for the column headers -- **not** a generic "Near/Next/Far"
+  label, and **there is no month picker of any kind** — all 3 tiers
+  render simultaneously, replacing an earlier design with a single flat
+  `5% CSP` column and an "Options month" selectbox next to "Sort By"
+  (`st.session_state["dashboard_options_month"]`) that let you view one
+  cached expiry at a time; that dropdown and its underlying
+  `metrics_by_symbol` (keyed by symbol alone) were both removed per an
+  explicit user request. `metrics_by_symbol_expiry = {(symbol,
+  expiry_date): row}` replaces it, covering all 3 tiers for every symbol
+  at once. See the Futures & Options section's "Dashboard cache"
+  paragraph above for the full pipeline (`fo_service.dashboard_metrics_rows`/`recompute_dashboard_metrics`,
+  and every refresh path that keeps it current) and `csp_otm_for_rows`'s
+  docs for the underlying formula and its rank-based 5%/7%/10% OTM
+  target (`_csp_tier(symbol, expiry)` resolves each tier's `(strike,
+  csp_pct, spot)`, applying the same live-premium override described
+  below):
+  - **`{Month} CSP Strike`** — the strike itself, plus its **signed % distance
+    from that tier's own spot** in parentheses, e.g. `"₹1,230 (-5.57%)"`
+    (`(strike / spot - 1) * 100` -- negative since a CSP strike sits
+    below spot), or `"N/A"` if no strike resolved for that tier. The
+    strike is the **nearest strike below** the tier's OTM target — a
+    floor filter (`csp_otm_for_rows`), not a nearest-either-side match —
+    falling back to the lowest available strike if none qualify.
+  - **`{Month} CSP ROI`** — a cash-secured-put yield: the selected
+    expiry's put premium as a percentage of that strike (`put_price /
+    strike * 100`), same formula the old flat `5% CSP` column always
+    used, or `"N/A"` if no strike resolved. **Deliberately not divided by
+    exchange margin** — SPAN margin isn't available from NSE as a simple
+    downloadable per-contract figure (it's a licensed CME Group
+    multi-scenario risk calculation, confirmed via a live search of
+    NSE's actual report index turning up nothing), so this uses the
+    strike itself (the full notional a cash-secured-put seller sets
+    aside) as the yield's denominator instead; `strike * lot_size`
+    cancels out of both the premium and this ratio, so lot size never
+    needs to appear in the formula at all.
+  - **Each tier's OTM target is different, not a flat 5% for all
+    three**: near = 5%, next = 7%, far = 10%
+    (`_CSP_OTM_PCT_BY_RANK`/`CSP_OTM_PCT_BY_RANK`) -- see
+    `csp_otm_for_rows`'s bullet in the Futures & Options section above
+    for the full rationale and the float-drift bug this rank-based
+    redesign surfaced and fixed.
+  - The old flat **`5% CC`** column: a covered-call yield (sell 1 lot of
+    the lowest call strike still at or above 5% above spot, expressed as
+    a percentage of gross investment) — dropped entirely from the
+    Dashboard per an explicit, earlier and unrelated user request, once
+    "Other Stock Holdings" took over the covered-call-decision role with
+    a different, per-holding formula (see the Portfolio pages section
+    below). The Options screen's own "5% CC" section is the only place
+    `cc_pct` still renders directly, additionally showing "Net
+    Investment" and "Assignment Profit" — `(strike / net_investment - 1)
+    * 100`, where `net_investment = spot - premium`. This replaced an
+    earlier three-leg "5% ITM PMCC" (poor-man's-covered-call)
+    calculation on request; see `fo_service.py`'s bullet above for what
+    that used to compute. The CC leg is still computed and cached in
+    `dashboard_fo_metrics` for every tier (unaffected by any of the CSP
+    changes above) — it's simply never displayed on this page.
 
   **A real bug this surfaced**: `fo_repo.get_all_open_options()` initially had no pagination, and PostgREST caps a single response at a server-configured max (1000 rows on this project) regardless of how many rows actually match — against live data (~5,053 open PE legs across 50 symbols) this silently truncated to exactly 1000 rows, and whichever symbols fell outside that window (most of the universe, including RELIANCE/TCS/HDFCBANK) were missing from the 5% CSP column with **no error anywhere** — confirmed live (`PE rows: 1000` before, `5053` after). Fixed by a generic `fo_repo._paginate(query_builder, page_size=1000)` helper that `get_all_open_futures()`/`get_all_open_options()` go through, looping `.range()` calls until a page comes back short (this is still exercised by `recompute_dashboard_metrics`, which calls `get_all_open_options()` at refresh time, and by its TypeScript port's own paginated fetch). `tests/test_fo_repo.py` covers the pagination boundary cases (multi-page accumulation, an exact-multiple-of-page-size input not looping forever, empty results).
 
