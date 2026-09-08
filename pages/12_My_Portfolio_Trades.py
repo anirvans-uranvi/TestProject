@@ -9,6 +9,11 @@ changes the position's real risk profile, which is exactly what
 classify_trade_type's "Portfolio " prefix already flags (see
 src/services/portfolio_service.py).
 
+**Stock bucket only** -- this page originally also showed Index Trades
+and Other Trades tables (the same shape/bucket split every other Trades
+page uses); those were removed entirely per an explicit user request, so
+this page now shows only stock-based Portfolio trades.
+
 One row per Trade (not one row per leg, unlike the old My CC table --
 a Trade here can carry up to 4 option legs at once, not just a single
 short call), with six column blocks:
@@ -361,20 +366,13 @@ def _render_portfolio_trades_tab(
     trades = portfolio_service.group_into_trades(legs, overrides_by_leg, trade_meta_by_id, company_type_by_symbol)
     portfolio_trades = [t for t in trades if portfolio_service.is_portfolio_trade_type(t["trade_type"])]
 
+    # Stock bucket only -- Index Trades/Other Trades sections removed per
+    # an explicit user request; this page now shows only stock-based
+    # Portfolio trades.
     stock_trades = [t for t in portfolio_trades if t["bucket"] == "stock"]
-    index_trades = [t for t in portfolio_trades if t["bucket"] == "index"]
-    other_trades = [t for t in portfolio_trades if t["bucket"] == "other"]
 
     _render_portfolio_trades_table(
         title="Stock Trades", trades=stock_trades, key_suffix="stock", portfolio_name=portfolio_name,
-        dhan_connection=dhan_connection,
-    )
-    _render_portfolio_trades_table(
-        title="Index Trades", trades=index_trades, key_suffix="index", portfolio_name=portfolio_name,
-        dhan_connection=dhan_connection,
-    )
-    _render_portfolio_trades_table(
-        title="Other Trades", trades=other_trades, key_suffix="other", portfolio_name=portfolio_name,
         dhan_connection=dhan_connection,
     )
 

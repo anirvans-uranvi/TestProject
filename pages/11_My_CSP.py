@@ -20,6 +20,7 @@ from src.utils.portfolio_page import (
     load_positions,
     load_returns_and_pe,
     load_trade_groups,
+    load_trade_margin,
     load_trade_meta,
     slug,
 )
@@ -44,11 +45,24 @@ st.caption(
     '"Analyse Trade", and rename its Trade Type to "CSP" to have it show up here. Set each leg\'s Trade Date '
     'on that same "Analyse Trade" page to unlock Target P&L; Stop Loss ratchets up automatically as P&L% '
     "improves and is saved on every visit. Target P&L changes every day to reflect whether there has been "
-    "higher-than-average decay in the option premium, but it never crosses 95% of Max Credit. P&L shows a "
-    "✅ once it clears Target P&L, or a ❌ once it falls through Stop Loss."
+    "higher-than-average decay in the option premium, but it never crosses 95% of Credit. P&L shows a "
+    "✅ once it clears Target P&L, or a ❌ once it falls through Stop Loss. \"Cash Commitment\" (Strike × Qty) "
+    "is the cash set aside against assignment. \"Margin\" is Dhan's own margin-calculator figure for the leg "
+    "(Data Provider = Dhan only; \"N/A\" otherwise)."
 )
 
 ensure_cache_bust()
+
+# Margin needs a live Dhan call per leg (Dhan's own margin calculator,
+# not stored data) -- only possible with a connected Dhan account. Same
+# "N/A unless Dhan is connected" convention My Portfolio Trades' own
+# Margin Required column already uses.
+dhan_connection = None
+if user_settings.data_provider == "dhan":
+    try:
+        dhan_connection = portfolio_repo.get_broker_connection(client, user_id, "Dhan")
+    except APIError:
+        dhan_connection = None
 
 try:
     saved_holdings = load_holdings(client, user_id, st.session_state["portfolio_cache_bust"])
@@ -115,7 +129,7 @@ def _fmt_ltp(ltp: float | None, ltp_as_of) -> str:
 
 
 def _fmt_target_pnl(target_pnl: float | None, max_credit: float | None) -> str:
-    """"₹4,275.00 (85.00%)" -- Target P&L with what % of Max Credit it
+    """"₹4,275.00 (85.00%)" -- Target P&L with what % of Credit it
     represents in parentheses, or an em dash before a Trade Date is set
     (Target P&L itself is None then)."""
     if target_pnl is None:
@@ -151,6 +165,7 @@ def _render_csp_tab(
     trade_meta_for_portfolio: list,
     position_meta_for_portfolio: list,
     company_type_by_symbol: dict,
+    dhan_connection,
 ) -> None:
     legs = build_trade_legs(
         client, user_id, st.session_state["portfolio_cache_bust"], holdings_for_portfolio, positions_for_portfolio
@@ -209,10 +224,39 @@ def _render_csp_tab(
         existing_stop_loss = leg_meta.stop_loss if leg_meta else None
 
         max_credit = portfolio_service.csp_max_credit(leg["avg_price"], leg["qty"])
+        cash_commitment = portfolio_service.csp_cash_commitment(leg["strike_price"], leg["qty"])
         target_pnl = portfolio_service.csp_target_pnl(max_credit, trade_date, leg["expiry_date"])
         new_stop_loss = portfolio_service.csp_stop_loss(existing_stop_loss, max_credit, leg["pnl_pct"])
         if new_stop_loss is not None and (existing_stop_loss is None or abs(new_stop_loss - existing_stop_loss) > 1e-9):
             portfolio_repo.set_position_stop_loss(client, user_id, portfolio_name, leg["broker"], leg["raw_name"], new_stop_loss)
+
+        # Dhan's own margin-calculator figure for this one leg -- only
+        # possible with a connected Dhan account; every other case
+        # (yfinance_bhavcopy, unconnected, no resolvable leg, an expired
+        # token) shows "N/A", same convention My Portfolio Trades' own
+        # Margin Required column uses (get_margin_for_legs accepts any
+        # number of legs, so a single-leg list works the same way).
+        margin = None
+        if dhan_connection is not None and leg.get("symbol") and leg.get("option_type") is not None:
+            leg_key = (
+                (
+                    leg["symbol"],
+                    leg["expiry_date"].isoformat() if leg["expiry_date"] else None,
+                    leg["strike_price"],
+                    str(leg["option_type"]),
+                    leg["qty"],
+                    leg["avg_price"],
+                ),
+            )
+            margin_result = load_trade_margin(
+                client,
+                dhan_connection.client_id,
+                dhan_connection.access_token,
+                leg_key,
+                st.session_state["portfolio_cache_bust"],
+            )
+            if margin_result:
+                margin = margin_result.get("totalMargin")
 
         table_rows.append(
             {
@@ -222,7 +266,9 @@ def _render_csp_tab(
                 "Strike": leg["strike_price"],
                 "Qty": leg["qty"],
                 "Avg Price": leg["avg_price"],
-                "Max Credit": max_credit,
+                "Cash Commitment": cash_commitment,
+                "Credit": max_credit,
+                "Margin": format_inr(margin) if margin is not None else "N/A",
                 "LTP": _fmt_ltp(leg["ltp"], leg.get("ltp_as_of")),
                 "P&L": _fmt_pnl(leg["pnl"], leg["pnl_pct"], target_pnl, new_stop_loss),
                 "Target P&L": _fmt_target_pnl(target_pnl, max_credit),
@@ -241,6 +287,38 @@ def _render_csp_tab(
             }
         )
 
+    # Total row -- per an explicit user request, sums only Cash Commitment
+    # and Credit (the two "how much am I on the hook for" columns); every
+    # other column is left blank rather than a misleading sum/average
+    # (summing Strike or averaging 1D% across unrelated underlyings isn't
+    # meaningful). Appended after the per-leg rows, not sortable away from
+    # the bottom since st.dataframe's own column-header sort would move it
+    # -- acceptable here since this table has no sort-by-column control in
+    # the first place, unlike the Dashboard's screener.
+    table_rows.append(
+        {
+            "Trade Date": None,
+            "Underlying": "Total",
+            "Expiry": None,
+            "Strike": None,
+            "Qty": None,
+            "Avg Price": None,
+            "Cash Commitment": sum(r["Cash Commitment"] for r in table_rows if r["Cash Commitment"] is not None),
+            "Credit": sum(r["Credit"] for r in table_rows if r["Credit"] is not None),
+            "Margin": "",
+            "LTP": "",
+            "P&L": "",
+            "Target P&L": "",
+            "Stop Loss": None,
+            "Breakeven": "",
+            "LTP Underlying": None,
+            "Momentum": "",
+            "1D": None,
+            "5D": None,
+            "20D": None,
+        }
+    )
+
     st.dataframe(
         pd.DataFrame(table_rows),
         use_container_width=True,
@@ -249,7 +327,8 @@ def _render_csp_tab(
         column_config={
             "Qty": st.column_config.NumberColumn(format="%+,.0f"),
             "Avg Price": st.column_config.NumberColumn(format="₹%,.2f"),
-            "Max Credit": st.column_config.NumberColumn(format="₹%,.2f"),
+            "Cash Commitment": st.column_config.NumberColumn(format="₹%,.2f"),
+            "Credit": st.column_config.NumberColumn(format="₹%,.2f"),
             "LTP Underlying": st.column_config.NumberColumn(format="₹%,.2f"),
             "1D": st.column_config.NumberColumn(format="%+.2f%%"),
             "5D": st.column_config.NumberColumn(format="%+.2f%%"),
@@ -278,4 +357,5 @@ else:
                 [m for m in saved_trade_meta if m.portfolio_name == name],
                 [m for m in saved_position_meta if m.portfolio_name == name],
                 company_type_by_symbol,
+                dhan_connection,
             )

@@ -687,6 +687,17 @@ def csp_max_credit(avg_price: float | None, qty: float | None) -> float | None:
     return avg_price * abs(qty)
 
 
+def csp_cash_commitment(strike_price: float | None, qty: float | None) -> float | None:
+    """My CSP's "Cash Commitment" column -- the cash a cash-secured-put
+    seller sets aside against assignment: `strike_price * abs(qty)`.
+    `abs()` for the same reason `csp_max_credit` uses it (`qty` is
+    signed, negative for a short position, but a cash commitment is
+    inherently a positive amount). `None` when either input is missing."""
+    if strike_price is None or qty is None:
+        return None
+    return strike_price * abs(qty)
+
+
 def csp_target_pnl(
     max_credit: float | None, trade_date: date | None, expiry_date: date | None, as_of: date | None = None
 ) -> float | None:

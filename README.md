@@ -1390,9 +1390,20 @@ and are silently skipped. Columns, left to right:
 - **Underlying**, **Expiry**, **Strike**, **Qty** (signed -- negative is
   short), **Avg Price** -- the same fields My Positions shows for an
   option leg.
-- **Max Credit** -- `Avg Price * |Qty|`, the total premium collected for
-  the leg (what Target P&L and Stop Loss are both expressed as a
-  fraction of).
+- **Cash Commitment** -- `Strike * |Qty|`, the cash a cash-secured-put
+  seller sets aside against assignment (`portfolio_service.csp_cash_commitment`).
+  Summed in the table's own **Total** row (see below).
+- **Credit** -- `Avg Price * |Qty|`, the total premium collected for the
+  leg (what Target P&L and Stop Loss are both expressed as a fraction
+  of; internally still `csp_max_credit`, renamed on this page's display
+  only to match Analyse Trade's own "Credit" column, which already used
+  this name). Summed in the table's own **Total** row (see below).
+- **Margin** -- Dhan's own margin-calculator figure
+  (`DhanProvider.get_margin_for_legs`, called with this single leg) for
+  the position -- same live figure, same "N/A unless Dhan is connected"
+  degrade, as My Portfolio Trades' own "Margin Required" column (see
+  below); confirmed live against a real account's own CSP leg before
+  shipping.
 - **LTP** -- shows `"(as of <date>)"` next to the price when it came
   from this app's own end-of-day F&O data rather than a live broker
   quote (`portfolio_positions.ltp_as_of`, migration `0026`) -- most
@@ -1407,31 +1418,30 @@ and are silently skipped. Columns, left to right:
   through Stop Loss -- no marker at all when neither threshold is
   crossed (including whenever Target P&L/Stop Loss themselves aren't
   computable yet, e.g. no Trade Date).
-- **Target P&L** -- `max(Max Credit * 0.5, min(Max Credit * 0.95, Max
-  Credit * (Duration Held / Duration to Expiry) * 1.2))`, where
-  `Duration to Expiry = Expiry - Trade Date`, and `Duration Held = Today
-  - Trade Date`, shown with what % of Max Credit it represents in
-  parentheses, e.g. `"₹4,275.00 (85.00%)"`. Changes every day as
-  `Duration Held` grows -- the `* 1.2` runs the target 20% faster than
-  plain linear, reflecting that theta decay tends to accelerate as
-  expiry nears (a "higher than average decay" expectation, not a
-  straight-line one) -- but it's capped so it never crosses 95% of Max
-  Credit no matter how long the position is held, even well past expiry
-  (chasing the last 5% isn't worth the assignment/gamma risk of holding
-  to the very end). It's also floored at 50% of Max Credit, so early in
-  a trade (before the time-decay term catches up) the target never sinks
-  below half the premium collected. A rule-of-thumb gauge, not a precise
-  pricing model. Blank until Trade Date is set (no duration to compute
-  against).
+- **Target P&L** -- `max(Credit * 0.5, min(Credit * 0.95, Credit *
+  (Duration Held / Duration to Expiry) * 1.2))`, where `Duration to
+  Expiry = Expiry - Trade Date`, and `Duration Held = Today - Trade
+  Date`, shown with what % of Credit it represents in parentheses, e.g.
+  `"₹4,275.00 (85.00%)"`. Changes every day as `Duration Held` grows --
+  the `* 1.2` runs the target 20% faster than plain linear, reflecting
+  that theta decay tends to accelerate as expiry nears (a "higher than
+  average decay" expectation, not a straight-line one) -- but it's
+  capped so it never crosses 95% of Credit no matter how long the
+  position is held, even well past expiry (chasing the last 5% isn't
+  worth the assignment/gamma risk of holding to the very end). It's also
+  floored at 50% of Credit, so early in a trade (before the time-decay
+  term catches up) the target never sinks below half the premium
+  collected. A rule-of-thumb gauge, not a precise pricing model. Blank
+  until Trade Date is set (no duration to compute against).
 - **Stop Loss** -- ratchets up automatically as the position becomes
   more profitable, and is saved on every visit so it never resets: a
-  brand-new leg (nothing saved yet) starts at `-Max Credit` (willing to
-  give back the full premium collected before stopping out); once P&L%
-  clears 25% the stop moves up to at least breakeven (₹0); once P&L%
-  clears 50% it moves up to at least half the max credit locked in.
-  Never moves down -- if P&L% later drops back below a threshold it just
-  crossed, the stop stays where it already ratcheted to. Doesn't need a
-  Trade Date (Max Credit and P&L% are enough).
+  brand-new leg (nothing saved yet) starts at `-Credit` (willing to give
+  back the full premium collected before stopping out); once P&L% clears
+  25% the stop moves up to at least breakeven (₹0); once P&L% clears 50%
+  it moves up to at least half the credit locked in. Never moves down --
+  if P&L% later drops back below a threshold it just crossed, the stop
+  stays where it already ratcheted to. Doesn't need a Trade Date (Credit
+  and P&L% are enough).
 - **Breakeven** -- the CSP breakeven price (`Strike - Avg Price`, the
   premium collected) followed by how far that sits from the underlying's
   current price in parentheses (`(Breakeven / LTP Underlying - 1)` as a
@@ -1460,6 +1470,12 @@ and are silently skipped. Columns, left to right:
   a plain percentage, not converted to a rupee amount, since there's no
   "value" of the underlying itself to apply it to.
 
+A **Total** row is appended at the bottom of the table, summing only
+**Cash Commitment** and **Credit** (the two "how much am I on the hook
+for" figures) -- every other column is left blank rather than a
+misleading sum or average (summing Strike, or averaging 1D% across
+unrelated underlyings, isn't meaningful).
+
 Trade Date/Target P&L/Stop Loss are saved to a new table,
 `portfolio_position_meta` (migration `0025`), keyed by the leg's natural
 identity `(portfolio_name, broker, raw_name)`. Like the other Portfolio
@@ -1478,8 +1494,11 @@ common is a stock holding sitting alongside the option legs, which is
 exactly what the "Portfolio " prefix flags (see "Trade Type is
 auto-classified for a new trade" below).
 
-Same Stock/Index/Other bucket split as My Trades, but **one row per
-Trade**, not per leg -- a Trade here can carry up to 4 option legs at
+**Stock bucket only** -- this page originally split into the same
+Stock/Index/Other bucket tabs My Trades uses; the Index Trades and Other
+Trades sections were removed entirely per an explicit user request, so
+this page now shows only stock-based Portfolio trades. One row per
+**Trade**, not per leg -- a Trade here can carry up to 4 option legs at
 once, not just a single short call, so a flat per-leg table (My CSP's
 style) doesn't fit. Six column groups per row:
 

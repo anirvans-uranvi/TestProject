@@ -300,6 +300,22 @@ class TestCspMaxCredit:
         assert portfolio_service.csp_max_credit(45.0, None) is None
 
 
+class TestCspCashCommitment:
+    def test_short_position_uses_absolute_qty(self):
+        # A short put's qty is negative (this app's convention) -- cash
+        # commitment is still a positive amount.
+        assert portfolio_service.csp_cash_commitment(23500.0, -75.0) == 1_762_500.0
+
+    def test_long_position(self):
+        assert portfolio_service.csp_cash_commitment(23500.0, 75.0) == 1_762_500.0
+
+    def test_none_strike_price_is_none(self):
+        assert portfolio_service.csp_cash_commitment(None, -75.0) is None
+
+    def test_none_qty_is_none(self):
+        assert portfolio_service.csp_cash_commitment(23500.0, None) is None
+
+
 class TestCspTargetPnl:
     def test_before_cap_uses_the_accelerated_linear_target(self):
         # 50% of the way through -- accelerated target (1.2x pace) is

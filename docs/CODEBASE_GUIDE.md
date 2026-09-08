@@ -1305,13 +1305,16 @@ guided **"Wheel Strategy"** journey (the section login lands in, via
 candidate (Screener for CSP) → track running CSPs (My Current CSPs) →
 see stocks assigned into holdings with option overlays (My Portfolio
 Trades) → see plain holdings with a covered-call trigger (Other Stock
-Holdings, new) → everything else (Other Trades), plus the hidden Analyse
-Trade -- alongside a standalone **"Index Options"** section (new,
-strangle ideas on the 4 major indices). "Market" (Equity/Options) stays
-its own section unchanged, per the user's explicit choice not to fold it
-elsewhere. "My Portfolio" keeps Holdings/Positions and picks up
-`7_My_Trades.py` ("All Trades", no longer sharing a section with the
-CSP/Portfolio-Trades/Other-Trades family it used to). "Trade History"
+Holdings), plus the hidden Analyse Trade -- alongside a standalone
+**"Index Options"** section (new, strangle ideas on the 4 major
+indices). (A fifth step, "everything else" / Other Trades
+(`13_My_Other_Trades.py`), was in this journey too until it was deleted
+entirely per an explicit user request -- see the Portfolio pages
+section below.) "Market" (Equity/Options) stays its own section
+unchanged, per the user's explicit choice not to fold it elsewhere. "My
+Portfolio" keeps Holdings/Positions and picks up `7_My_Trades.py` ("All
+Trades", no longer sharing a section with the CSP/Portfolio-Trades
+family it used to). "Trade History"
 gets its own top-level section (was nested under "My Portfolio" before)
 -- the user named it as a distinct item in their own list, and it
 already didn't share `build_trade_legs`/`group_into_trades` or the
@@ -2783,15 +2786,52 @@ since this page first shipped)**: `Trade Date`, then what My Positions
 already shows (`Underlying`/`Expiry`/`Strike`/`Qty`/`Avg Price` --
 **`Instrument` dropped on request**, redundant with
 `Underlying`/`Expiry`/`Strike` for a single-leg CSP and just ate table
-width), then `Max Credit`, `LTP`, `P&L`, `Target P&L`, `Stop Loss`,
-`Breakeven`, `LTP Underlying`, `Momentum`, `1D`, `5D`, `20D`. `Trade
-Date` leads (everything else on the row can depend on it); `Max Credit`
-sits right after `Avg Price` on request (it's `Avg Price * |Qty|`, so
-reads naturally as "what Avg Price actually adds up to"); `Target
-P&L`/`Stop Loss` sit right after `P&L` since they're the other
-P&L-shaped numbers; `Momentum` sits just before `1D`/`5D`/`20D` (the
-returns it's computed from) — see the dict literal in `_render_csp_tab`
-for the exact order, which `pd.DataFrame` preserves as column order.
+width), then `Cash Commitment`, `Credit`, `Margin`, `LTP`, `P&L`,
+`Target P&L`, `Stop Loss`, `Breakeven`, `LTP Underlying`, `Momentum`,
+`1D`, `5D`, `20D`. `Trade Date` leads (everything else on the row can
+depend on it); `Cash Commitment`/`Credit` sit right after `Avg Price` on
+request (they're both `<something> * |Qty|`, so read naturally as "what
+Strike/Avg Price actually add up to"); `Target P&L`/`Stop Loss` sit
+right after `P&L` since they're the other P&L-shaped numbers; `Momentum`
+sits just before `1D`/`5D`/`20D` (the returns it's computed from) — see
+the dict literal in `_render_csp_tab` for the exact order, which
+`pd.DataFrame` preserves as column order.
+
+**`Cash Commitment`/`Credit`/`Margin`, and a `Total` row, added later
+per an explicit user request:**
+- **`Cash Commitment`** — `portfolio_service.csp_cash_commitment(strike_price,
+  qty)`, a new sibling function right next to `csp_max_credit`: `strike_price
+  * abs(qty)`, the cash a cash-secured-put seller sets aside against
+  assignment. Same `abs()` reasoning as `csp_max_credit` (`qty` is
+  signed, negative for a short leg, but a cash commitment is inherently
+  positive).
+- **`Credit`** — the column header the old `Max Credit` column was
+  renamed to, on request, to match Analyse Trade's own "Credit" column
+  (see below), which already used this name for the exact same value.
+  The underlying function/variable stays `csp_max_credit`/`max_credit`
+  unchanged — only this page's own column label and its caption's
+  wording changed, not the calculation, its persistence, or any other
+  page's naming.
+- **`Margin`** — Dhan's own margin-calculator figure
+  (`DhanProvider.get_margin_for_legs`, called with a **single-element**
+  leg list for this one leg) via `portfolio_page.load_trade_margin`
+  (already built for My Portfolio Trades' "Margin Required" column,
+  reused as-is here since `get_margin_for_legs` accepts any number of
+  legs) — same "N/A unless a Dhan connection resolves" degrade, gated on
+  `user_settings.data_provider == "dhan"` and
+  `portfolio_repo.get_broker_connection(client, user_id, "Dhan")`
+  succeeding, mirroring My Portfolio Trades' own `dhan_connection` setup
+  exactly. Confirmed live against a real account's own CSP leg (SBIN,
+  short PE) before shipping.
+- **`Total` row** — appended after the per-leg rows, summing only
+  `Cash Commitment` and `Credit` (`sum(... if ... is not None)` over the
+  already-built `table_rows`); every other column is left blank (`None`
+  for a `NumberColumn`-configured column so it renders empty rather than
+  `0`/`NaN`, `""` for a plain string column) rather than a misleading
+  sum or average — summing `Strike`, or averaging `1D`/`5D`/`20D` across
+  unrelated underlyings, isn't meaningful. Computed inline in the page,
+  not a `portfolio_service` function, since it's pure aggregation over
+  already-computed row dicts, not a new financial calculation.
 
 **Analyse Trade's own legs table was later rebuilt to match these
 columns** (`Trade Date`/`Underlying`/`Expiry`/`Strike`/`Qty`/`Avg
@@ -2875,7 +2915,9 @@ against `new_stop_loss` — the freshly ratcheted value about to be shown
 in the `Stop Loss` column and upserted this render — not the
 `existing_stop_loss` read from the database, so the marker always
 agrees with what's actually displayed. Similarly, **`Target P&L` now
-shows what % of `Max Credit` it represents in parentheses**,
+shows what % of `Credit` it represents in parentheses** (the docstring
+and column header both say `Credit` since the rename above; the
+parameter/variable stays `max_credit`),
 `_fmt_target_pnl(target_pnl, max_credit)` → `"₹4,275.00 (85.00%)"`, an
 em dash before Trade Date is set. Both `_fmt_pnl`/`_fmt_target_pnl` are
 page-local (not unit-tested, matching `_fmt_breakeven`/`_fmt_ltp`
@@ -3108,8 +3150,19 @@ Portfolio Strangle, Portfolio Jade Lizard, Portfolio Twisted Sister,
 Portfolio IC, or a hand-typed label using the same convention. Unlike
 the old design (one row per short-call Position leg -- a Covered Call
 only ever has one), this renders **one row per Trade**, since a Trade
-here can carry up to 4 option legs at once. Same Stock/Index/Other
-bucket split as My Trades.
+here can carry up to 4 option legs at once.
+
+**Stock bucket only, per an explicit later request** — the page
+originally split into the same Stock/Index/Other bucket tabs My Trades
+uses (`_render_portfolio_trades_tab` rendering three
+`_render_portfolio_trades_table` calls, one per bucket); the Index
+Trades and Other Trades sections were removed entirely, leaving a
+single `stock_trades = [t for t in portfolio_trades if t["bucket"] ==
+"stock"]` filter and one `_render_portfolio_trades_table` call. The
+`_render_portfolio_trades_table` function itself is unchanged --
+`title`/`key_suffix` are still parameters (now always `"Stock
+Trades"`/`"stock"`) since removing them for a single call site wasn't
+worth losing the function's own generality.
 
 Six column groups per row, built by `_render_portfolio_trades_table`:
 1. **Trade Details** -- `Underlying`/`Trade Type` (same "⚠️"
