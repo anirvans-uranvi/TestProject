@@ -300,20 +300,54 @@ class TestCspMaxCredit:
         assert portfolio_service.csp_max_credit(45.0, None) is None
 
 
-class TestCspCashCommitment:
+class TestCspCashNeeded:
     def test_short_position_uses_absolute_qty(self):
         # A short put's qty is negative (this app's convention) -- cash
-        # commitment is still a positive amount.
-        assert portfolio_service.csp_cash_commitment(23500.0, -75.0) == 1_762_500.0
+        # needed is still a positive amount.
+        assert portfolio_service.csp_cash_needed(23500.0, -75.0) == 1_762_500.0
 
     def test_long_position(self):
-        assert portfolio_service.csp_cash_commitment(23500.0, 75.0) == 1_762_500.0
+        assert portfolio_service.csp_cash_needed(23500.0, 75.0) == 1_762_500.0
 
     def test_none_strike_price_is_none(self):
-        assert portfolio_service.csp_cash_commitment(None, -75.0) is None
+        assert portfolio_service.csp_cash_needed(None, -75.0) is None
 
     def test_none_qty_is_none(self):
-        assert portfolio_service.csp_cash_commitment(23500.0, None) is None
+        assert portfolio_service.csp_cash_needed(23500.0, None) is None
+
+
+class TestCspMarginRoi:
+    def test_positive_pnl(self):
+        assert portfolio_service.csp_margin_roi(5000.0, 100000.0) == 5.0
+
+    def test_negative_pnl(self):
+        assert portfolio_service.csp_margin_roi(-2000.0, 100000.0) == -2.0
+
+    def test_none_pnl_is_none(self):
+        assert portfolio_service.csp_margin_roi(None, 100000.0) is None
+
+    def test_none_margin_is_none(self):
+        assert portfolio_service.csp_margin_roi(5000.0, None) is None
+
+    def test_zero_margin_is_none(self):
+        assert portfolio_service.csp_margin_roi(5000.0, 0.0) is None
+
+
+class TestCspCashRoi:
+    def test_positive_pnl(self):
+        assert portfolio_service.csp_cash_roi(5000.0, 1_000_000.0) == 0.5
+
+    def test_negative_pnl(self):
+        assert portfolio_service.csp_cash_roi(-2000.0, 1_000_000.0) == -0.2
+
+    def test_none_pnl_is_none(self):
+        assert portfolio_service.csp_cash_roi(None, 1_000_000.0) is None
+
+    def test_none_cash_needed_is_none(self):
+        assert portfolio_service.csp_cash_roi(5000.0, None) is None
+
+    def test_zero_cash_needed_is_none(self):
+        assert portfolio_service.csp_cash_roi(5000.0, 0.0) is None
 
 
 class TestCspTargetPnl:

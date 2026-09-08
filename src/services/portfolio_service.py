@@ -687,15 +687,35 @@ def csp_max_credit(avg_price: float | None, qty: float | None) -> float | None:
     return avg_price * abs(qty)
 
 
-def csp_cash_commitment(strike_price: float | None, qty: float | None) -> float | None:
-    """My CSP's "Cash Commitment" column -- the cash a cash-secured-put
+def csp_cash_needed(strike_price: float | None, qty: float | None) -> float | None:
+    """My CSP's "Cash Needed" column -- the cash a cash-secured-put
     seller sets aside against assignment: `strike_price * abs(qty)`.
     `abs()` for the same reason `csp_max_credit` uses it (`qty` is
-    signed, negative for a short position, but a cash commitment is
+    signed, negative for a short position, but cash needed is
     inherently a positive amount). `None` when either input is missing."""
     if strike_price is None or qty is None:
         return None
     return strike_price * abs(qty)
+
+
+def csp_margin_roi(pnl: float | None, margin: float | None) -> float | None:
+    """My CSP's "Margin ROI" column -- P&L as a percentage of the Dhan
+    margin blocked for the leg (`pnl / margin * 100`). `None` (-> N/A)
+    when either input is missing, or `margin` is 0 (division by zero --
+    shouldn't happen for a real margin figure, but a leg Dhan couldn't
+    resolve has no margin to begin with)."""
+    if pnl is None or margin is None or margin == 0:
+        return None
+    return pnl / margin * 100
+
+
+def csp_cash_roi(pnl: float | None, cash_needed: float | None) -> float | None:
+    """My CSP's "Cash ROI" column -- P&L as a percentage of the cash
+    needed for the leg (`pnl / cash_needed * 100`, see `csp_cash_needed`).
+    `None` (-> N/A) when either input is missing, or `cash_needed` is 0."""
+    if pnl is None or cash_needed is None or cash_needed == 0:
+        return None
+    return pnl / cash_needed * 100
 
 
 def csp_target_pnl(

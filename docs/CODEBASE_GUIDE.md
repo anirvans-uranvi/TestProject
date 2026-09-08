@@ -2786,25 +2786,34 @@ since this page first shipped)**: `Trade Date`, then what My Positions
 already shows (`Underlying`/`Expiry`/`Strike`/`Qty`/`Avg Price` --
 **`Instrument` dropped on request**, redundant with
 `Underlying`/`Expiry`/`Strike` for a single-leg CSP and just ate table
-width), then `Cash Commitment`, `Credit`, `Margin`, `LTP`, `P&L`,
-`Target P&L`, `Stop Loss`, `Breakeven`, `LTP Underlying`, `Momentum`,
-`1D`, `5D`, `20D`. `Trade Date` leads (everything else on the row can
-depend on it); `Cash Commitment`/`Credit` sit right after `Avg Price` on
-request (they're both `<something> * |Qty|`, so read naturally as "what
-Strike/Avg Price actually add up to"); `Target P&L`/`Stop Loss` sit
-right after `P&L` since they're the other P&L-shaped numbers; `Momentum`
-sits just before `1D`/`5D`/`20D` (the returns it's computed from) — see
-the dict literal in `_render_csp_tab` for the exact order, which
-`pd.DataFrame` preserves as column order.
+width), then `Cash Needed`, `Credit`, `Margin`, `LTP`, `P&L`, `Margin
+ROI`, `Cash ROI`, `Target P&L`, `Stop Loss`, `Breakeven`, `LTP
+Underlying`, `Momentum`, `1D`, `5D`, `20D`. `Trade Date` leads
+(everything else on the row can depend on it); `Cash Needed`/`Credit`
+sit right after `Avg Price` on request (they're both `<something> *
+|Qty|`, so read naturally as "what Strike/Avg Price actually add up
+to"); `Margin ROI`/`Cash ROI` sit right after `P&L` on request (they're
+both P&L expressed as a percentage of something, so read naturally right
+next to the raw P&L figure); `Target P&L`/`Stop Loss` sit right after
+those since they're the other P&L-shaped numbers; `Momentum` sits just
+before `1D`/`5D`/`20D` (the returns it's computed from) — see the dict
+literal in `_render_csp_tab` for the exact order, which `pd.DataFrame`
+preserves as column order.
 
-**`Cash Commitment`/`Credit`/`Margin`, and a `Total` row, added later
-per an explicit user request:**
-- **`Cash Commitment`** — `portfolio_service.csp_cash_commitment(strike_price,
-  qty)`, a new sibling function right next to `csp_max_credit`: `strike_price
-  * abs(qty)`, the cash a cash-secured-put seller sets aside against
-  assignment. Same `abs()` reasoning as `csp_max_credit` (`qty` is
-  signed, negative for a short leg, but a cash commitment is inherently
-  positive).
+**`Cash Needed`/`Credit`/`Margin`, and a `Total` row, added later per an
+explicit user request:**
+- **`Cash Needed`** — `portfolio_service.csp_cash_needed(strike_price,
+  qty)`, a new sibling function right next to `csp_max_credit`:
+  `strike_price * abs(qty)`, the cash a cash-secured-put seller sets
+  aside against assignment. Same `abs()` reasoning as `csp_max_credit`
+  (`qty` is signed, negative for a short leg, but cash needed is
+  inherently positive). **Originally shipped as `csp_cash_commitment`/
+  "Cash Commitment"**, renamed to `csp_cash_needed`/"Cash Needed" on
+  request in an almost-immediate follow-up (the function itself, not
+  just its display label, since it had no other caller yet to keep in
+  sync with — unlike `csp_max_credit`, which stayed named as-is when its
+  own column was renamed to `Credit`, precisely because it already had
+  other callers).
 - **`Credit`** — the column header the old `Max Credit` column was
   renamed to, on request, to match Analyse Trade's own "Credit" column
   (see below), which already used this name for the exact same value.
@@ -2824,14 +2833,49 @@ per an explicit user request:**
   exactly. Confirmed live against a real account's own CSP leg (SBIN,
   short PE) before shipping.
 - **`Total` row** — appended after the per-leg rows, summing only
-  `Cash Commitment` and `Credit` (`sum(... if ... is not None)` over the
-  already-built `table_rows`); every other column is left blank (`None`
-  for a `NumberColumn`-configured column so it renders empty rather than
-  `0`/`NaN`, `""` for a plain string column) rather than a misleading
-  sum or average — summing `Strike`, or averaging `1D`/`5D`/`20D` across
-  unrelated underlyings, isn't meaningful. Computed inline in the page,
-  not a `portfolio_service` function, since it's pure aggregation over
+  `Cash Needed` and `Credit` (`sum(... if ... is not None)` over the
+  already-built `table_rows`); every other column is left blank —
+  literally `""` for *every* column, `NumberColumn`-configured ones
+  included, not just the plain string ones. **An earlier version used
+  `None` for the `NumberColumn` columns** (`Qty`/`Avg Price`/`Stop
+  Loss`/`LTP Underlying`/`1D`/`5D`/`20D`, and later `Margin ROI`/`Cash
+  ROI`) on the theory that `None` renders as an empty cell the way it
+  does elsewhere on this page — but once mixed into a `pd.DataFrame`
+  column that also holds real numbers (making the column's dtype
+  `object`), Streamlit's grid rendered that `None` as the literal text
+  `"None"` instead of blank, confirmed live and fixed on request by
+  using `""` uniformly instead. Left blank rather than a misleading sum
+  or average either way — summing `Strike`, or averaging
+  `1D`/`5D`/`20D`/`Margin ROI`/`Cash ROI` across unrelated underlyings,
+  isn't meaningful. Computed inline in the page, not a
+  `portfolio_service` function, since it's pure aggregation over
   already-computed row dicts, not a new financial calculation.
+
+**`Margin ROI`/`Cash ROI`, and dropping `P&L`'s own percentage, added
+later per an explicit user request:**
+- **`_fmt_pnl` lost its `pnl_pct` parameter and parenthesized
+  percentage** — it used to render `"₹1,234.56 (+12.34%)"` (P&L% against
+  `Credit`, implicitly); now it renders just `"₹1,234.56"`, with the same
+  ✅/❌ marker logic unchanged (that logic already compared raw `pnl`
+  against `target_pnl`/`stop_loss`, not the percentage, so dropping the
+  percentage needed no change to the marker itself). The call site
+  dropped the now-unused `leg["pnl_pct"]` argument to match.
+- **`portfolio_service.csp_margin_roi(pnl, margin)`** — `pnl / margin *
+  100`. `None` (→ "N/A" via the column's own blank-for-`None`
+  `NumberColumn` rendering) when either input is `None`, or `margin` is
+  `0`. Reads the same raw `margin` float `_render_csp_tab` already
+  computed for the `Margin` column (before that value gets
+  `format_inr`-ed into a display string), so no second Dhan call is
+  made.
+- **`portfolio_service.csp_cash_roi(pnl, cash_needed)`** — `pnl /
+  cash_needed * 100`, same `None`/zero-guard shape as `csp_margin_roi`.
+  Unlike `Margin ROI`, this is always computable once the leg itself
+  resolves a strike/qty — `Cash Needed` has no Dhan-connection
+  dependency the way `Margin` does.
+- Both are plain `NumberColumn(format="%+.2f%%")` columns (same format
+  string `1D`/`5D`/`20D` already use), not preformatted strings — no
+  helper function needed the way `_fmt_pnl`/`_fmt_target_pnl` are, since
+  there's no marker/parenthetical to build, just a signed percentage.
 
 **Analyse Trade's own legs table was later rebuilt to match these
 columns** (`Trade Date`/`Underlying`/`Expiry`/`Strike`/`Qty`/`Avg
@@ -2903,16 +2947,25 @@ underlying, not something that varies leg to leg, so repeating it as four
 more columns on every leg row was redundant once there was somewhere
 better to put it.
 
-**`P&L%` was folded into `P&L` itself, on request** — there's no
-separate `P&L%` column anymore. `_fmt_pnl(pnl, pnl_pct, target_pnl,
-stop_loss)` renders one combined cell, `"₹1,234.56 (+12.34%)"`, the same
-"value (pct%)" shape `Breakeven`/`Target P&L` already use — and prefixes
-it with **✅** once `pnl > target_pnl` or **❌** once `pnl < stop_loss`
-(both `>`/`<`, not `>=`/`<=`), no marker at all when neither threshold
-is crossed, including whenever `target_pnl`/`stop_loss` themselves
-aren't computable yet (no Trade Date, no saved Stop Loss row). Compares
-against `new_stop_loss` — the freshly ratcheted value about to be shown
-in the `Stop Loss` column and upserted this render — not the
+**`P&L%` was folded into `P&L` itself, on request, then dropped from
+`P&L` again later (see the `Margin ROI`/`Cash ROI` bullets above) — there
+is, and never was again after this point, a separate `P&L%` column.**
+`_fmt_pnl` originally took `(pnl, pnl_pct, target_pnl, stop_loss)` and
+rendered one combined cell, `"₹1,234.56 (+12.34%)"`, the same "value
+(pct%)" shape `Breakeven`/`Target P&L` already use; it now takes just
+`(pnl, target_pnl, stop_loss)` and renders `"₹1,234.56"` with no
+percentage at all, `pnl_pct` having become redundant once `Margin
+ROI`/`Cash ROI` took over showing P&L as a percentage — of two more
+specific things (margin blocked, cash needed) than the implicit
+"percentage of Credit" `pnl_pct` used to mean. In both versions,
+`_fmt_pnl` prefixes the cell with **✅** once `pnl > target_pnl` or **❌**
+once `pnl < stop_loss` (both `>`/`<`, not `>=`/`<=`), no marker at all
+when neither threshold is crossed, including whenever
+`target_pnl`/`stop_loss` themselves aren't computable yet (no Trade
+Date, no saved Stop Loss row) — this marker logic was never tied to
+`pnl_pct` at all, so removing the percentage needed no change here.
+Compares against `new_stop_loss` — the freshly ratcheted value about to
+be shown in the `Stop Loss` column and upserted this render — not the
 `existing_stop_loss` read from the database, so the marker always
 agrees with what's actually displayed. Similarly, **`Target P&L` now
 shows what % of `Credit` it represents in parentheses** (the docstring

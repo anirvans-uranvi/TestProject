@@ -1390,9 +1390,11 @@ and are silently skipped. Columns, left to right:
 - **Underlying**, **Expiry**, **Strike**, **Qty** (signed -- negative is
   short), **Avg Price** -- the same fields My Positions shows for an
   option leg.
-- **Cash Commitment** -- `Strike * |Qty|`, the cash a cash-secured-put
-  seller sets aside against assignment (`portfolio_service.csp_cash_commitment`).
-  Summed in the table's own **Total** row (see below).
+- **Cash Needed** -- `Strike * |Qty|`, the cash a cash-secured-put
+  seller sets aside against assignment (`portfolio_service.csp_cash_needed`,
+  named "Cash Commitment" on a very short-lived earlier version of this
+  column, renamed again almost immediately on request). Summed in the
+  table's own **Total** row (see below).
 - **Credit** -- `Avg Price * |Qty|`, the total premium collected for the
   leg (what Target P&L and Stop Loss are both expressed as a fraction
   of; internally still `csp_max_credit`, renamed on this page's display
@@ -1411,13 +1413,20 @@ and are silently skipped. Columns, left to right:
   lacks the separate "Data APIs" subscription), which otherwise
   silently shows a stale close with nothing distinguishing it from a
   live tick.
-- **P&L** -- the leg's own P&L with its P&L% in parentheses, e.g.
-  `"₹1,234.56 (+12.34%)"` (a combined value+percentage cell, same shape
-  as Breakeven below -- there's no separate P&L% column). Prefixed with
-  **✅** once P&L has cleared Target P&L, or **❌** once it's fallen
-  through Stop Loss -- no marker at all when neither threshold is
-  crossed (including whenever Target P&L/Stop Loss themselves aren't
-  computable yet, e.g. no Trade Date).
+- **P&L** -- the leg's own P&L, e.g. `"₹1,234.56"`. Prefixed with **✅**
+  once P&L has cleared Target P&L, or **❌** once it's fallen through
+  Stop Loss -- no marker at all when neither threshold is crossed
+  (including whenever Target P&L/Stop Loss themselves aren't computable
+  yet, e.g. no Trade Date). **No longer carries a parenthesized P&L%** --
+  that was dropped per an explicit user request once the two ROI columns
+  below took over showing a percentage view of P&L.
+- **Margin ROI** -- `P&L / Margin * 100` (`portfolio_service.csp_margin_roi`)
+  -- P&L as a percentage of the Dhan margin blocked for the leg. `N/A`
+  whenever Margin itself is (no Dhan connection, or an unresolvable leg).
+- **Cash ROI** -- `P&L / Cash Needed * 100` (`portfolio_service.csp_cash_roi`)
+  -- P&L as a percentage of the cash needed for the leg. Unlike Margin
+  ROI, this is always computable once the leg itself resolves (Cash
+  Needed doesn't depend on a live Dhan connection).
 - **Target P&L** -- `max(Credit * 0.5, min(Credit * 0.95, Credit *
   (Duration Held / Duration to Expiry) * 1.2))`, where `Duration to
   Expiry = Expiry - Trade Date`, and `Duration Held = Today - Trade
@@ -1471,10 +1480,14 @@ and are silently skipped. Columns, left to right:
   "value" of the underlying itself to apply it to.
 
 A **Total** row is appended at the bottom of the table, summing only
-**Cash Commitment** and **Credit** (the two "how much am I on the hook
-for" figures) -- every other column is left blank rather than a
-misleading sum or average (summing Strike, or averaging 1D% across
-unrelated underlyings, isn't meaningful).
+**Cash Needed** and **Credit** (the two "how much am I on the hook
+for" figures) -- every other column is left blank (an empty string, not
+`None` -- an early version of this row used `None` for every other
+column, which rendered as the literal text "None" once mixed into a
+column that also holds real numbers/strings; fixed on request) rather
+than a misleading sum or average (summing Strike, or averaging
+1D%/Margin ROI/Cash ROI across unrelated underlyings, isn't
+meaningful).
 
 Trade Date/Target P&L/Stop Loss are saved to a new table,
 `portfolio_position_meta` (migration `0025`), keyed by the leg's natural

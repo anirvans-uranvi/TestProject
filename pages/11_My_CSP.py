@@ -46,9 +46,10 @@ st.caption(
     'on that same "Analyse Trade" page to unlock Target P&L; Stop Loss ratchets up automatically as P&L% '
     "improves and is saved on every visit. Target P&L changes every day to reflect whether there has been "
     "higher-than-average decay in the option premium, but it never crosses 95% of Credit. P&L shows a "
-    "✅ once it clears Target P&L, or a ❌ once it falls through Stop Loss. \"Cash Commitment\" (Strike × Qty) "
+    "✅ once it clears Target P&L, or a ❌ once it falls through Stop Loss. \"Cash Needed\" (Strike × Qty) "
     "is the cash set aside against assignment. \"Margin\" is Dhan's own margin-calculator figure for the leg "
-    "(Data Provider = Dhan only; \"N/A\" otherwise)."
+    "(Data Provider = Dhan only; \"N/A\" otherwise). \"Margin ROI\"/\"Cash ROI\" are P&L as a percentage of "
+    "Margin/Cash Needed respectively."
 )
 
 ensure_cache_bust()
@@ -139,11 +140,14 @@ def _fmt_target_pnl(target_pnl: float | None, max_credit: float | None) -> str:
     return f"{format_inr(target_pnl)} ({target_pnl / max_credit * 100:+.2f}%)"
 
 
-def _fmt_pnl(pnl: float | None, pnl_pct: float | None, target_pnl: float | None, stop_loss: float | None) -> str:
-    """"✅ ₹1,234.56 (+12.34%)" once P&L has cleared Target P&L, "❌
-    ₹1,234.56 (-8.00%)" once P&L has fallen through Stop Loss, or just
-    the plain value with no marker when neither threshold is crossed
-    (or there's nothing to compare against yet, e.g. no Trade Date)."""
+def _fmt_pnl(pnl: float | None, target_pnl: float | None, stop_loss: float | None) -> str:
+    """"✅ ₹1,234.56" once P&L has cleared Target P&L, "❌ ₹1,234.56" once
+    P&L has fallen through Stop Loss, or just the plain value with no
+    marker when neither threshold is crossed (or there's nothing to
+    compare against yet, e.g. no Trade Date). The P&L% parenthetical
+    this used to carry was dropped per an explicit user request, once
+    the dedicated Margin ROI/Cash ROI columns took over showing P&L as
+    a percentage."""
     if pnl is None:
         return "—"
     if target_pnl is not None and pnl > target_pnl:
@@ -152,9 +156,7 @@ def _fmt_pnl(pnl: float | None, pnl_pct: float | None, target_pnl: float | None,
         marker = "❌ "
     else:
         marker = ""
-    if pnl_pct is None:
-        return f"{marker}{format_inr(pnl)}"
-    return f"{marker}{format_inr(pnl)} ({pnl_pct:+.2f}%)"
+    return f"{marker}{format_inr(pnl)}"
 
 
 def _render_csp_tab(
@@ -224,7 +226,7 @@ def _render_csp_tab(
         existing_stop_loss = leg_meta.stop_loss if leg_meta else None
 
         max_credit = portfolio_service.csp_max_credit(leg["avg_price"], leg["qty"])
-        cash_commitment = portfolio_service.csp_cash_commitment(leg["strike_price"], leg["qty"])
+        cash_needed = portfolio_service.csp_cash_needed(leg["strike_price"], leg["qty"])
         target_pnl = portfolio_service.csp_target_pnl(max_credit, trade_date, leg["expiry_date"])
         new_stop_loss = portfolio_service.csp_stop_loss(existing_stop_loss, max_credit, leg["pnl_pct"])
         if new_stop_loss is not None and (existing_stop_loss is None or abs(new_stop_loss - existing_stop_loss) > 1e-9):
@@ -258,6 +260,13 @@ def _render_csp_tab(
             if margin_result:
                 margin = margin_result.get("totalMargin")
 
+        # P&L as a percentage of Margin/Cash Needed respectively -- added
+        # per an explicit user request once the P&L column's own inline
+        # percentage (against Credit) was dropped, so a percentage view
+        # of P&L is now these two dedicated columns instead.
+        margin_roi = portfolio_service.csp_margin_roi(leg["pnl"], margin)
+        cash_roi = portfolio_service.csp_cash_roi(leg["pnl"], cash_needed)
+
         table_rows.append(
             {
                 "Trade Date": trade_date.strftime("%d %b %Y") if trade_date else None,
@@ -266,11 +275,13 @@ def _render_csp_tab(
                 "Strike": leg["strike_price"],
                 "Qty": leg["qty"],
                 "Avg Price": leg["avg_price"],
-                "Cash Commitment": cash_commitment,
+                "Cash Needed": cash_needed,
                 "Credit": max_credit,
                 "Margin": format_inr(margin) if margin is not None else "N/A",
                 "LTP": _fmt_ltp(leg["ltp"], leg.get("ltp_as_of")),
-                "P&L": _fmt_pnl(leg["pnl"], leg["pnl_pct"], target_pnl, new_stop_loss),
+                "P&L": _fmt_pnl(leg["pnl"], target_pnl, new_stop_loss),
+                "Margin ROI": margin_roi,
+                "Cash ROI": cash_roi,
                 "Target P&L": _fmt_target_pnl(target_pnl, max_credit),
                 "Stop Loss": new_stop_loss,
                 "Breakeven": _fmt_breakeven(breakeven_price, breakeven_pct),
@@ -287,35 +298,41 @@ def _render_csp_tab(
             }
         )
 
-    # Total row -- per an explicit user request, sums only Cash Commitment
+    # Total row -- per an explicit user request, sums only Cash Needed
     # and Credit (the two "how much am I on the hook for" columns); every
-    # other column is left blank rather than a misleading sum/average
-    # (summing Strike or averaging 1D% across unrelated underlyings isn't
-    # meaningful). Appended after the per-leg rows, not sortable away from
-    # the bottom since st.dataframe's own column-header sort would move it
-    # -- acceptable here since this table has no sort-by-column control in
-    # the first place, unlike the Dashboard's screener.
+    # other column is left blank ("" rather than None -- None rendered as
+    # the literal text "None" in this table, since these columns hold a
+    # mix of numbers and blanks once this row is appended, per an
+    # explicit user request to fix that) rather than a misleading
+    # sum/average (summing Strike, or averaging 1D%/an ROI% across
+    # unrelated underlyings, isn't meaningful). Appended after the
+    # per-leg rows, not sortable away from the bottom since st.dataframe's
+    # own column-header sort would move it -- acceptable here since this
+    # table has no sort-by-column control in the first place, unlike the
+    # Dashboard's screener.
     table_rows.append(
         {
-            "Trade Date": None,
+            "Trade Date": "",
             "Underlying": "Total",
-            "Expiry": None,
-            "Strike": None,
-            "Qty": None,
-            "Avg Price": None,
-            "Cash Commitment": sum(r["Cash Commitment"] for r in table_rows if r["Cash Commitment"] is not None),
+            "Expiry": "",
+            "Strike": "",
+            "Qty": "",
+            "Avg Price": "",
+            "Cash Needed": sum(r["Cash Needed"] for r in table_rows if r["Cash Needed"] is not None),
             "Credit": sum(r["Credit"] for r in table_rows if r["Credit"] is not None),
             "Margin": "",
             "LTP": "",
             "P&L": "",
+            "Margin ROI": "",
+            "Cash ROI": "",
             "Target P&L": "",
-            "Stop Loss": None,
+            "Stop Loss": "",
             "Breakeven": "",
-            "LTP Underlying": None,
+            "LTP Underlying": "",
             "Momentum": "",
-            "1D": None,
-            "5D": None,
-            "20D": None,
+            "1D": "",
+            "5D": "",
+            "20D": "",
         }
     )
 
@@ -327,8 +344,10 @@ def _render_csp_tab(
         column_config={
             "Qty": st.column_config.NumberColumn(format="%+,.0f"),
             "Avg Price": st.column_config.NumberColumn(format="₹%,.2f"),
-            "Cash Commitment": st.column_config.NumberColumn(format="₹%,.2f"),
+            "Cash Needed": st.column_config.NumberColumn(format="₹%,.2f"),
             "Credit": st.column_config.NumberColumn(format="₹%,.2f"),
+            "Margin ROI": st.column_config.NumberColumn(format="%+.2f%%"),
+            "Cash ROI": st.column_config.NumberColumn(format="%+.2f%%"),
             "LTP Underlying": st.column_config.NumberColumn(format="₹%,.2f"),
             "1D": st.column_config.NumberColumn(format="%+.2f%%"),
             "5D": st.column_config.NumberColumn(format="%+.2f%%"),
