@@ -1479,15 +1479,18 @@ and are silently skipped. Columns, left to right:
   a plain percentage, not converted to a rupee amount, since there's no
   "value" of the underlying itself to apply it to.
 
-A **Total** row is appended at the bottom of the table, summing only
-**Cash Needed** and **Credit** (the two "how much am I on the hook
-for" figures) -- every other column is left blank (an empty string, not
-`None` -- an early version of this row used `None` for every other
-column, which rendered as the literal text "None" once mixed into a
-column that also holds real numbers/strings; fixed on request) rather
-than a misleading sum or average (summing Strike, or averaging
-1D%/Margin ROI/Cash ROI across unrelated underlyings, isn't
-meaningful).
+Below the table, a **"Total Cash Needed: ... | Total Credit: ..."**
+summary line shows the sum of just those two columns (the two "how much
+am I on the hook for" figures) -- not a sum/average of anything else
+(summing Strike, or averaging 1D%/Margin ROI/Cash ROI across unrelated
+underlyings, isn't meaningful). This was originally an extra row
+appended *inside* the table itself, with every other column left blank
+-- dropped after two attempts (`None`, then `""`) both rendered as the
+literal text **"None"** for the numeric columns on a real deployment,
+despite a clean local reproduction showing a genuine blank cell each
+time; a markdown line built from two known numbers can't have this
+problem, since there's no table cell for Streamlit to infer a type for
+and get wrong.
 
 Trade Date/Target P&L/Stop Loss are saved to a new table,
 `portfolio_position_meta` (migration `0025`), keyed by the leg's natural

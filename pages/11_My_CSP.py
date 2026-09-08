@@ -298,43 +298,23 @@ def _render_csp_tab(
             }
         )
 
-    # Total row -- per an explicit user request, sums only Cash Needed
-    # and Credit (the two "how much am I on the hook for" columns); every
-    # other column is left blank ("" rather than None -- None rendered as
-    # the literal text "None" in this table, since these columns hold a
-    # mix of numbers and blanks once this row is appended, per an
-    # explicit user request to fix that) rather than a misleading
-    # sum/average (summing Strike, or averaging 1D%/an ROI% across
-    # unrelated underlyings, isn't meaningful). Appended after the
-    # per-leg rows, not sortable away from the bottom since st.dataframe's
-    # own column-header sort would move it -- acceptable here since this
-    # table has no sort-by-column control in the first place, unlike the
-    # Dashboard's screener.
-    table_rows.append(
-        {
-            "Trade Date": "",
-            "Underlying": "Total",
-            "Expiry": "",
-            "Strike": "",
-            "Qty": "",
-            "Avg Price": "",
-            "Cash Needed": sum(r["Cash Needed"] for r in table_rows if r["Cash Needed"] is not None),
-            "Credit": sum(r["Credit"] for r in table_rows if r["Credit"] is not None),
-            "Margin": "",
-            "LTP": "",
-            "P&L": "",
-            "Margin ROI": "",
-            "Cash ROI": "",
-            "Target P&L": "",
-            "Stop Loss": "",
-            "Breakeven": "",
-            "LTP Underlying": "",
-            "Momentum": "",
-            "1D": "",
-            "5D": "",
-            "20D": "",
-        }
-    )
+    # Totals -- per an explicit user request, sums only Cash Needed and
+    # Credit (the two "how much am I on the hook for" columns). Two
+    # earlier attempts appended this as an extra row *inside* the table
+    # (first with None for every other column, then with "" once None
+    # rendered as the literal text "None") -- confirmed live, on the
+    # user's own real deployment, that "" still rendered as "None" for
+    # the NumberColumn-configured columns despite a clean local
+    # reproduction showing a genuine blank cell; rather than guess at a
+    # third fix dependent on how a given Streamlit/pyarrow version
+    # renders a blank cell in a column whose dtype becomes `object` once
+    # a non-numeric row is mixed in, the totals are shown as a plain
+    # markdown summary line below the table instead -- structurally
+    # incapable of ever showing "None", since it's built entirely from
+    # two already-known numbers, not a table cell Streamlit has to
+    # render/infer a type for.
+    total_cash_needed = sum(r["Cash Needed"] for r in table_rows if r["Cash Needed"] is not None)
+    total_credit = sum(r["Credit"] for r in table_rows if r["Credit"] is not None)
 
     st.dataframe(
         pd.DataFrame(table_rows),
@@ -355,6 +335,7 @@ def _render_csp_tab(
             "Stop Loss": st.column_config.NumberColumn(format="₹%,.2f"),
         },
     )
+    st.markdown(f"**Total Cash Needed:** {format_inr(total_cash_needed)} &nbsp;&nbsp;|&nbsp;&nbsp; **Total Credit:** {format_inr(total_credit)}")
 
 
 portfolio_names = sorted({h.portfolio_name for h in saved_holdings} | {p.portfolio_name for p in saved_positions})

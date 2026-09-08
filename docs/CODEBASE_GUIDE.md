@@ -2800,8 +2800,8 @@ before `1D`/`5D`/`20D` (the returns it's computed from) — see the dict
 literal in `_render_csp_tab` for the exact order, which `pd.DataFrame`
 preserves as column order.
 
-**`Cash Needed`/`Credit`/`Margin`, and a `Total` row, added later per an
-explicit user request:**
+**`Cash Needed`/`Credit`/`Margin`, and a totals summary, added later per
+an explicit user request:**
 - **`Cash Needed`** — `portfolio_service.csp_cash_needed(strike_price,
   qty)`, a new sibling function right next to `csp_max_credit`:
   `strike_price * abs(qty)`, the cash a cash-secured-put seller sets
@@ -2832,24 +2832,46 @@ explicit user request:**
   succeeding, mirroring My Portfolio Trades' own `dhan_connection` setup
   exactly. Confirmed live against a real account's own CSP leg (SBIN,
   short PE) before shipping.
-- **`Total` row** — appended after the per-leg rows, summing only
+- **Totals summary** — a plain `st.markdown` line right below the table,
+  `"**Total Cash Needed:** ... | **Total Credit:** ..."`, summing only
   `Cash Needed` and `Credit` (`sum(... if ... is not None)` over the
-  already-built `table_rows`); every other column is left blank —
-  literally `""` for *every* column, `NumberColumn`-configured ones
-  included, not just the plain string ones. **An earlier version used
-  `None` for the `NumberColumn` columns** (`Qty`/`Avg Price`/`Stop
-  Loss`/`LTP Underlying`/`1D`/`5D`/`20D`, and later `Margin ROI`/`Cash
-  ROI`) on the theory that `None` renders as an empty cell the way it
-  does elsewhere on this page — but once mixed into a `pd.DataFrame`
-  column that also holds real numbers (making the column's dtype
-  `object`), Streamlit's grid rendered that `None` as the literal text
-  `"None"` instead of blank, confirmed live and fixed on request by
-  using `""` uniformly instead. Left blank rather than a misleading sum
-  or average either way — summing `Strike`, or averaging
-  `1D`/`5D`/`20D`/`Margin ROI`/`Cash ROI` across unrelated underlyings,
-  isn't meaningful. Computed inline in the page, not a
+  already-built `table_rows`, computed once before the table itself
+  renders, then referenced after it). Computed inline in the page, not a
   `portfolio_service` function, since it's pure aggregation over
-  already-computed row dicts, not a new financial calculation.
+  already-computed row dicts, not a new financial calculation. Nothing
+  else is summed or averaged — summing `Strike`, or averaging
+  `1D`/`5D`/`20D`/`Margin ROI`/`Cash ROI` across unrelated underlyings,
+  isn't meaningful.
+
+  **This went through two failed attempts as an extra row appended
+  *inside* the table** (`table_rows.append({...})`, a dict with every
+  non-summed key set to a blank placeholder) before landing on the
+  markdown-line design above — worth recording since both failures were
+  only visible on a real deployment, not in local testing:
+  1. **First attempt**: every other column set to `None`. Rendered as
+     the literal text `"None"` for the `NumberColumn`-configured columns
+     (`Strike`/`Qty`/`Avg Price`/`Stop Loss`/`LTP Underlying`/`1D`/`5D`/`20D`)
+     once mixed into a `pd.DataFrame` column that otherwise holds real
+     numbers (`object` dtype) — confirmed live on the user's own account.
+  2. **Second attempt**: switched every blank to `""` instead, on the
+     theory that an explicit empty string (rather than `None`) would
+     render as a genuinely blank cell. **A local reproduction of the
+     exact same shape (several numeric rows + one all-`""` row, same
+     `column_config`) confirmed a blank cell, not `"None"`, via both a
+     screenshot and the page's own accessibility tree** — yet the same
+     code, on the user's real deployment, *still* showed `"None"` for
+     those columns. The Margin ROI/Cash ROI columns (only added in this
+     same commit) were correctly populated for the real per-leg rows in
+     that same screenshot, ruling out "stale deployment, hasn't picked
+     up the fix yet" as the explanation.
+  3. Rather than guess at a third table-row-shaped fix against an
+     environment difference that couldn't be pinned down (a Streamlit or
+     pyarrow version difference between local dev and the real
+     deployment is suspected, but unconfirmed), the totals were pulled
+     out of the table entirely into the markdown line described above —
+     built from two already-known Python floats, with no table cell for
+     Streamlit to infer a type for and get wrong, so this class of bug
+     is structurally impossible here regardless of environment.
 
 **`Margin ROI`/`Cash ROI`, and dropping `P&L`'s own percentage, added
 later per an explicit user request:**
