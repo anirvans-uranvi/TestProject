@@ -1,7 +1,7 @@
 """Broker API response translation and valuation for the Portfolio
 feature's pages (7_My_Trades.py, 8_My_Holdings.py, 9_My_Positions.py,
 10_Analyse_Trade.py, 11_My_CSP.py, 12_My_Portfolio_Trades.py,
-15_Other_Stock_Holdings.py, 17_Other_Stock_Trades.py, 14_Trade_History.py,
+15_Other_Stock_Holdings.py, 17_Other_Stock_Options.py, 14_Trade_History.py,
 5_Options.py) -- holdings/positions come from a live
 Dhan sync (Settings' "Data Provider" section,
 src/utils/data_provider_settings.py) only; CSV upload was dropped
@@ -574,7 +574,7 @@ def is_portfolio_trade_type(trade_type: str) -> bool:
 
 def is_other_trade_type(trade_type: str) -> bool:
     """Whether a Trade's `trade_type` is neither CSP nor a Portfolio-
-    prefixed type -- the signal `pages/17_Other_Stock_Trades.py` filters
+    prefixed type -- the signal `pages/17_Other_Stock_Options.py` filters
     on: every Trade that isn't already broken out onto My CSP or My
     Portfolio Trades, regardless of whether it's a real options strategy
     (a bare Strangle/Jade Lizard/Twisted Sister/IC with no holding, a
@@ -586,8 +586,9 @@ def is_other_trade_type(trade_type: str) -> bool:
     they'd double up on both pages. (This function, and the page that
     used it, were deleted once already per an explicit user request, then
     both reinstated -- under a new page name and a narrower, stock-only
-    scope -- per a later, separate request; see that page's own
-    docstring.)"""
+    scope -- per a later, separate request; that page was then itself
+    renamed "Other Stock Options" and moved ahead of Other Stock Holdings
+    in the nav, per a further request; see that page's own docstring.)"""
     return not is_csp_trade_type(trade_type) and not is_portfolio_trade_type(trade_type)
 
 

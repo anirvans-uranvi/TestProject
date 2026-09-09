@@ -1,14 +1,17 @@
-"""Other Stock Trades -- every stock-bucket Trade with **at least one
+"""Other Stock Options -- every stock-bucket Trade with **at least one
 option leg** whose Trade Type is **neither "CSP" nor
 "Portfolio "-prefixed** (`portfolio_service.is_other_trade_type`): a
 bare Strangle/Jade Lizard/Twisted Sister/IC with no stock holding, a
 custom label on a mixed holding+options Trade, or the default "Trade"
-label on a naked option position. New page, added per an explicit user
-request as the next step after Other Stock Holdings in the "Wheel
-Strategy" journey: Screener for CSP -> My Current CSPs -> My Portfolio
-Trades (holdings *with* option legs, Portfolio-prefixed) -> Other Stock
-Holdings (holdings with none) -> **this page** (everything else with an
-option leg, stock-bucket only).
+label on a naked option position. Added per an explicit user request as
+a step in the "Wheel Strategy" journey: Screener for CSP -> My Current
+CSPs -> My Portfolio Trades (holdings *with* option legs,
+Portfolio-prefixed) -> **this page** (every other stock-options trade)
+-> Other Stock Holdings (holdings with none). Originally named "Other
+Stock Trades" and placed after Other Stock Holdings; renamed and moved
+ahead of it per an explicit follow-up request -- purely a display-label
+and `app.py` ordering change, the underlying filter/rendering are
+unaffected.
 
 **Plain holdings are excluded**, per an explicit follow-up request --
 `any(leg["leg_type"] == "Position" for leg in t["legs"])`, a shape
@@ -33,11 +36,12 @@ and built to the same **six-column-block** layout My Portfolio Trades
 uses (Trade Details incl. Margin Required / Stock Holding / PE Sell /
 PE Buy / CE Sell / CE Buy), rather than the old page's flatter summary
 table -- an explicit user request to match that page's format.
-`_render_other_trades_table`/`_LEG_SLOTS`/`_slot_legs`/`_fmt_ltp` below
-are a page-local duplicate of My Portfolio Trades' own versions (same
-"duplicated business logic across pages" tradeoff this app already
-accepts elsewhere, e.g. Other Stock Holdings' covered-call table vs.
-Options' Portfolio CC section) -- only the trade filter differs.
+`_render_other_stock_options_table`/`_LEG_SLOTS`/`_slot_legs`/`_fmt_ltp`
+below are a page-local duplicate of My Portfolio Trades' own versions
+(same "duplicated business logic across pages" tradeoff this app
+already accepts elsewhere, e.g. Other Stock Holdings' covered-call
+table vs. Options' Portfolio CC section) -- only the trade filter
+differs.
 
 **Margin Required** is the same live, Dhan-only figure My Portfolio
 Trades shows: `DhanProvider.get_margin_for_legs` against the trade's own
@@ -75,7 +79,7 @@ from src.utils.refresh_bar import render_portfolio_refresh_button, render_stock_
 from src.utils.session import current_user_id, get_user_client_cached, require_login
 from src.utils.ui import inject_global_styles, render_disclaimer
 
-st.set_page_config(page_title="Other Stock Trades | Nifty 50 Screener", page_icon="\U0001f4cb", layout="wide")
+st.set_page_config(page_title="Other Stock Options | Nifty 50 Screener", page_icon="\U0001f4cb", layout="wide")
 require_login()  # already injects Tailwind + the light-theme CSS design system
 
 client = get_user_client_cached()
@@ -83,7 +87,7 @@ user_id = current_user_id()
 user_settings = settings_repo.get_user_settings(client, user_id)
 inject_global_styles(user_settings.theme)  # re-inject with the user's actual theme
 
-st.title("\U0001f4cb Other Stock Trades")
+st.title("\U0001f4cb Other Stock Options")
 render_disclaimer()
 render_stock_refresh_button(client, user_id, user_settings.data_provider)
 render_portfolio_refresh_button(client, user_id, user_settings.data_provider)
@@ -188,7 +192,7 @@ def _slot_legs(position_legs: list[dict]) -> dict[str, list[dict]]:
     return slots
 
 
-def _render_other_trades_table(*, trades: list[dict], portfolio_name: str, dhan_connection) -> None:
+def _render_other_stock_options_table(*, trades: list[dict], portfolio_name: str, dhan_connection) -> None:
     if not trades:
         st.caption('No trades tagged neither "CSP" nor "Portfolio ..." yet for this portfolio.')
         return
@@ -334,12 +338,12 @@ def _render_other_trades_table(*, trades: list[dict], portfolio_name: str, dhan_
         pd.DataFrame(table_rows),
         use_container_width=True,
         hide_index=True,
-        key=f"other_stock_trades_table_{slug(portfolio_name)}",
+        key=f"other_stock_options_table_{slug(portfolio_name)}",
         column_config=column_config,
     )
 
 
-def _render_other_trades_tab(
+def _render_other_stock_options_tab(
     portfolio_name: str,
     holdings_for_portfolio: list,
     positions_for_portfolio: list,
@@ -377,9 +381,9 @@ def _render_other_trades_tab(
     # ETF/other-underlying Trade of this shape is still visible only via
     # the unfiltered "All Trades" page (My Portfolio section), same scope
     # decision Other Stock Holdings already made for its own holdings.
-    stock_trades = [t for t in other_trades if t["bucket"] == "stock"]
+    stock_option_trades = [t for t in other_trades if t["bucket"] == "stock"]
 
-    _render_other_trades_table(trades=stock_trades, portfolio_name=portfolio_name, dhan_connection=dhan_connection)
+    _render_other_stock_options_table(trades=stock_option_trades, portfolio_name=portfolio_name, dhan_connection=dhan_connection)
 
 
 portfolio_names = sorted({h.portfolio_name for h in saved_holdings} | {p.portfolio_name for p in saved_positions})
@@ -393,7 +397,7 @@ else:
     tabs = st.tabs(portfolio_names)
     for name, tab in zip(portfolio_names, tabs):
         with tab:
-            _render_other_trades_tab(
+            _render_other_stock_options_tab(
                 name,
                 [h for h in saved_holdings if h.portfolio_name == name],
                 [p for p in saved_positions if p.portfolio_name == name],

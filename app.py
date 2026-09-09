@@ -12,10 +12,13 @@ import streamlit as st
 # sidebar (Streamlit's only native notion of a "sub-page"). Restructured
 # per an explicit user request into a guided "Wheel Strategy" journey --
 # screen for a CSP candidate -> track running CSPs -> see stocks that
-# have been assigned into holdings with option overlays -> see plain
-# holdings with a covered-call trigger -> everything else, stock-only
-# (Other Stock Trades) -- with "Index Options" (strangle ideas on the 4
-# major indices) as its own section alongside it. "Market" (raw
+# have been assigned into holdings with option overlays -> see every
+# other stock-options trade (Other Stock Options) -> see plain holdings
+# with a covered-call trigger -- with "Index Options" (strangle ideas on
+# the 4 major indices) as its own section alongside it. (Other Stock
+# Options was originally named "Other Stock Trades" and placed after
+# Other Stock Holdings instead -- renamed and moved ahead of it per an
+# explicit later request.) "Market" (raw
 # Equity/Options lookup, kept as its
 # own section per the user's explicit choice) and "My Portfolio"
 # (Holdings/Positions/All Trades) and "Trade History" round out the
@@ -29,8 +32,8 @@ pages = {
         st.Page("pages/1_Dashboard.py", title="Screener for CSP", default=True),
         st.Page("pages/11_My_CSP.py", title="My Current CSPs"),
         st.Page("pages/12_My_Portfolio_Trades.py", title="My Portfolio Trades"),
+        st.Page("pages/17_Other_Stock_Options.py", title="Other Stock Options"),
         st.Page("pages/15_Other_Stock_Holdings.py", title="Other Stock Holdings"),
-        st.Page("pages/17_Other_Stock_Trades.py", title="Other Stock Trades"),
         st.Page("pages/10_Analyse_Trade.py", title="Analyse Trade", visibility="hidden"),
     ],
     "Index Options": [
