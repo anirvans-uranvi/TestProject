@@ -577,6 +577,72 @@ def covered_call_for_holding(
     }
 
 
+def planner_cc_for_holding(ce_rows: list[dict], avg_price: float, ltp: float, qty: float, expiry_date) -> dict | None:
+    """Planner for CCs' own CC Strike/CC ROI columns -- a **new, separate**
+    per-holding covered-call target, not a modification of
+    `covered_call_for_holding` above (that function is unchanged, still
+    live on the Options page's own "Portfolio CC" section). Deliberately
+    the opposite condition/base pairing from `covered_call_for_holding`,
+    per an explicit user request for this page specifically:
+
+    - If `ltp > avg_price` (a profit so far): target 3% above `ltp`.
+    - Otherwise (`avg_price >= ltp`, at a loss or exactly at breakeven):
+      target 5% above `avg_price`.
+
+    (`covered_call_for_holding` targets 3% above avg_price on a *loss*
+    and 5% above ltp otherwise -- the exact opposite mapping. Two
+    genuinely different planning tools were asked for, not a bug.)
+
+    Strike selection, the premium/ROI formulas, and the `None`-on-no-
+    priceable-strike/zero-qty/non-positive-price-input behavior are
+    otherwise identical to `covered_call_for_holding` -- see its own
+    docstring for the exact `cc_roi_pct`/`assignment_roi_pct` formulas
+    this reuses unchanged. Returns `None` under the same conditions that
+    function does."""
+    if not qty or avg_price is None or ltp is None or avg_price <= 0 or ltp <= 0:
+        return None
+    near_rows = [r for r in ce_rows if str(r.get("option_type")) == "CE" and r.get("strike_price") is not None]
+    if not near_rows:
+        return None
+
+    if ltp > avg_price:
+        target_base, target_pct = ltp, 0.03
+    else:
+        target_base, target_pct = avg_price, 0.05
+    target = target_base * (1 + target_pct)
+    best_row = min(_freshest_rows(near_rows), key=lambda r: abs(_num(r["strike_price"]) - target))
+    strike = _num(best_row["strike_price"])
+    premium_per_share = (
+        _num(best_row.get("last_price")) or _num(best_row.get("close")) or _num(best_row.get("settlement_price"))
+    )
+    lot_size = _int(best_row.get("lot_size"))
+    invested_amount = avg_price * qty
+
+    premium_collected = premium_per_share * lot_size if (premium_per_share is not None and lot_size) else None
+    cc_roi_pct = (
+        premium_collected / invested_amount * 100 if (premium_collected is not None and invested_amount) else None
+    )
+    sale_amount = strike * qty if strike is not None else None
+    assignment_roi_pct = (
+        (premium_collected + sale_amount - invested_amount) / invested_amount * 100
+        if (premium_collected is not None and sale_amount is not None and invested_amount)
+        else None
+    )
+    return {
+        "strike": strike,
+        "premium_per_share": premium_per_share,
+        "lot_size": lot_size,
+        "invested_amount": invested_amount,
+        "premium_collected": premium_collected,
+        "cc_roi_pct": cc_roi_pct,
+        "assignment_roi_pct": assignment_roi_pct,
+        "target_base": target_base,
+        "target_pct": target_pct,
+        "expiry_date": expiry_date,
+        "trade_date": best_row.get("trade_date"),
+    }
+
+
 _CSP_OTM_PCT_BY_RANK = [5.0, 7.0, 10.0]  # near, next, far -- see dashboard_metrics_rows
 
 

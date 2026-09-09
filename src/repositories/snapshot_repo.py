@@ -79,6 +79,52 @@ def get_latest_returns_and_pe(client: Client, symbols: list[str]) -> dict[str, d
     return result
 
 
+def get_latest_fundamentals_and_returns(client: Client, symbols: list[str]) -> dict[str, dict]:
+    """Planner for CCs' Dividend/PEG/Fundamentals/Momentum/1D/5D/20D
+    columns, all from one query -- return_1d/return_5d/return_20d (the
+    same fields get_latest_returns_and_pe above already exposes, just
+    fetched together here rather than round-tripping this same table
+    twice) plus ttm_dividend_yield/peg_ratio/criterion_a/criterion_b/
+    criterion_c, the pre-classified fields the Screener's own Dividend/
+    PEG/Fundamentals/Momentum cells read directly rather than
+    recomputing (unlike My CSP/My Portfolio Trades' own Momentum column,
+    which recomputes criterion_b fresh from returns since those pages
+    can't reuse latest_screener_view for a portfolio-only symbol -- see
+    below for why this function has the identical constraint and the
+    identical fix). Queried directly against daily_screener_snapshots,
+    not latest_screener_view, for the same reason get_latest_prices
+    above is: the view's inner join on nifty50_constituents.is_current
+    would silently drop a portfolio-only stock that isn't one of the
+    Nifty50. Each symbol's dict is taken from its single most recent
+    snapshot row as-is (no cross-row carry-forward for a field that's
+    null in that row), same convention get_latest_returns_and_pe above
+    already uses."""
+    if not symbols:
+        return {}
+    resp = (
+        client.table("daily_screener_snapshots")
+        .select("symbol, snapshot_date, return_1d, return_5d, return_20d, ttm_dividend_yield, peg_ratio, criterion_a, criterion_b, criterion_c")
+        .in_("symbol", symbols)
+        .order("snapshot_date", desc=True)
+        .execute()
+    )
+    result: dict[str, dict] = {}
+    for row in resp.data or []:
+        symbol = row["symbol"]
+        if symbol not in result:
+            result[symbol] = {
+                "return_1d": row.get("return_1d"),
+                "return_5d": row.get("return_5d"),
+                "return_20d": row.get("return_20d"),
+                "ttm_dividend_yield": row.get("ttm_dividend_yield"),
+                "peg_ratio": row.get("peg_ratio"),
+                "criterion_a": row.get("criterion_a"),
+                "criterion_b": row.get("criterion_b"),
+                "criterion_c": row.get("criterion_c"),
+            }
+    return result
+
+
 def get_user_live_prices(client: Client, user_id: str, symbols: list[str]) -> dict[str, float]:
     """This account's own cached live LTPs (user_live_prices, migration
     0030) for the given symbols -- written by the "Market Data Refresh"

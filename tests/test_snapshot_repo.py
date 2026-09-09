@@ -99,6 +99,79 @@ class TestGetLatestReturnsAndPe:
         assert snapshot_repo.get_latest_returns_and_pe(client, ["NIFTYBEES"]) == {}
 
 
+class TestGetLatestFundamentalsAndReturns:
+    def test_empty_symbols_returns_empty_dict_without_querying(self):
+        client = _FakeSnapshotClient([{"symbol": "SBIN", "return_1d": 1.0}])
+        assert snapshot_repo.get_latest_fundamentals_and_returns(client, []) == {}
+
+    def test_returns_all_fields_from_the_single_most_recent_row_per_symbol(self):
+        client = _FakeSnapshotClient(
+            [
+                {
+                    "symbol": "SBIN",
+                    "snapshot_date": "2026-08-12",
+                    "return_1d": 0.5,
+                    "return_5d": 1.2,
+                    "return_20d": 3.4,
+                    "ttm_dividend_yield": 2.1,
+                    "peg_ratio": 0.8,
+                    "criterion_a": True,
+                    "criterion_b": False,
+                    "criterion_c": True,
+                },
+                {
+                    "symbol": "SBIN",
+                    "snapshot_date": "2026-08-11",
+                    "return_1d": 9.9,
+                    "return_5d": 9.9,
+                    "return_20d": 9.9,
+                    "ttm_dividend_yield": 9.9,
+                    "peg_ratio": 9.9,
+                    "criterion_a": False,
+                    "criterion_b": True,
+                    "criterion_c": False,
+                },
+            ]
+        )
+        result = snapshot_repo.get_latest_fundamentals_and_returns(client, ["SBIN"])
+        assert result == {
+            "SBIN": {
+                "return_1d": 0.5,
+                "return_5d": 1.2,
+                "return_20d": 3.4,
+                "ttm_dividend_yield": 2.1,
+                "peg_ratio": 0.8,
+                "criterion_a": True,
+                "criterion_b": False,
+                "criterion_c": True,
+            }
+        }
+
+    def test_does_not_carry_forward_a_null_field_from_an_older_row(self):
+        client = _FakeSnapshotClient(
+            [
+                {"symbol": "SBIN", "snapshot_date": "2026-08-12", "peg_ratio": None},
+                {"symbol": "SBIN", "snapshot_date": "2026-08-11", "peg_ratio": 0.8},
+            ]
+        )
+        result = snapshot_repo.get_latest_fundamentals_and_returns(client, ["SBIN"])
+        assert result["SBIN"]["peg_ratio"] is None
+
+    def test_filters_to_only_the_requested_symbols(self):
+        client = _FakeSnapshotClient(
+            [
+                {"symbol": "SBIN", "snapshot_date": "2026-08-12", "peg_ratio": 1.0},
+                {"symbol": "ONGC", "snapshot_date": "2026-08-12", "peg_ratio": 2.0},
+            ]
+        )
+        result = snapshot_repo.get_latest_fundamentals_and_returns(client, ["SBIN"])
+        assert set(result.keys()) == {"SBIN"}
+
+    def test_no_rows_returns_empty_dict(self):
+        client = _FakeSnapshotClient([])
+        assert snapshot_repo.get_latest_fundamentals_and_returns(client, ["SBIN"]) == {}
+
+
 class _FakeLivePricesTable:
     """A persistent-store fake (unlike _FakeSnapshotTable above, which
     hands out a fresh copy per .table() call) -- needed here since

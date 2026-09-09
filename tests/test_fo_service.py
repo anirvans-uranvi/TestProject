@@ -647,6 +647,78 @@ class TestCoveredCallForHolding:
         assert result["trade_date"] == "2026-07-20"
 
 
+class TestPlannerCcForHolding:
+    """Planner for CCs' own per-holding covered-call target -- a
+    separate function from covered_call_for_holding above, with the
+    opposite condition/base pairing: profit targets 3% above LTP, a
+    loss/breakeven targets 5% above avg_price (covered_call_for_holding
+    is the reverse: loss targets 3% above avg_price, profit/breakeven
+    targets 5% above LTP)."""
+
+    def test_profit_position_targets_3pct_above_ltp(self):
+        # ltp 100 > avg_price 90 (a profit) -> target = 100 * 1.03 = 103.
+        rows = [
+            {"symbol": "RELIANCE", "option_type": "CE", "strike_price": 100.0, "expiry_date": "2026-07-28", "last_price": 6.0, "lot_size": 10},
+            {"symbol": "RELIANCE", "option_type": "CE", "strike_price": 105.0, "expiry_date": "2026-07-28", "last_price": 4.0, "lot_size": 10},
+        ]
+        result = fo_service.planner_cc_for_holding(rows, avg_price=90.0, ltp=100.0, qty=20.0, expiry_date="2026-07-28")
+        assert result["strike"] == 105.0
+        assert result["target_base"] == 100.0
+        assert result["target_pct"] == 0.03
+
+    def test_loss_or_breakeven_position_targets_5pct_above_avg_price(self):
+        # avg_price 100 >= ltp 90 (a loss) -> target = 100 * 1.05 = 105 (exact match).
+        rows = [
+            {"symbol": "RELIANCE", "option_type": "CE", "strike_price": 100.0, "expiry_date": "2026-07-28", "last_price": 5.0, "lot_size": 10},
+            {"symbol": "RELIANCE", "option_type": "CE", "strike_price": 105.0, "expiry_date": "2026-07-28", "last_price": 3.0, "lot_size": 10},
+        ]
+        result = fo_service.planner_cc_for_holding(rows, avg_price=100.0, ltp=90.0, qty=50.0, expiry_date="2026-07-28")
+        assert result["strike"] == 105.0
+        assert result["target_base"] == 100.0
+        assert result["target_pct"] == 0.05
+
+    def test_exact_breakeven_uses_the_avg_price_base_not_ltp(self):
+        # ltp == avg_price -- not a profit, so the "otherwise" branch
+        # applies (5% above avg_price), the opposite of
+        # covered_call_for_holding's own breakeven handling.
+        rows = [{"symbol": "RELIANCE", "option_type": "CE", "strike_price": 105.0, "expiry_date": "2026-07-28", "last_price": 3.0, "lot_size": 10}]
+        result = fo_service.planner_cc_for_holding(rows, avg_price=100.0, ltp=100.0, qty=20.0, expiry_date="2026-07-28")
+        assert result["target_base"] == 100.0
+        assert result["target_pct"] == 0.05
+
+    def test_computes_invested_amount_premium_collected_and_both_rois(self):
+        rows = [{"symbol": "RELIANCE", "option_type": "CE", "strike_price": 105.0, "expiry_date": "2026-07-28", "last_price": 3.0, "lot_size": 10}]
+        result = fo_service.planner_cc_for_holding(rows, avg_price=90.0, ltp=100.0, qty=20.0, expiry_date="2026-07-28")
+        assert result["invested_amount"] == 1800.0  # 90 * 20
+        assert result["premium_collected"] == 30.0  # 3 * 10
+        assert abs(result["cc_roi_pct"] - (30.0 / 1800.0 * 100)) < 1e-9
+        assert abs(result["assignment_roi_pct"] - (330.0 / 1800.0 * 100)) < 1e-9
+
+    def test_none_when_qty_is_zero(self):
+        rows = [{"symbol": "RELIANCE", "option_type": "CE", "strike_price": 105.0, "expiry_date": "2026-07-28", "last_price": 3.0, "lot_size": 10}]
+        assert fo_service.planner_cc_for_holding(rows, avg_price=90.0, ltp=100.0, qty=0.0, expiry_date="2026-07-28") is None
+
+    def test_none_when_ltp_is_none_or_not_positive(self):
+        rows = [{"symbol": "RELIANCE", "option_type": "CE", "strike_price": 105.0, "expiry_date": "2026-07-28", "last_price": 3.0, "lot_size": 10}]
+        assert fo_service.planner_cc_for_holding(rows, avg_price=90.0, ltp=None, qty=20.0, expiry_date="2026-07-28") is None
+        assert fo_service.planner_cc_for_holding(rows, avg_price=90.0, ltp=0.0, qty=20.0, expiry_date="2026-07-28") is None
+
+    def test_none_when_no_ce_rows(self):
+        rows = [{"symbol": "RELIANCE", "option_type": "PE", "strike_price": 105.0, "expiry_date": "2026-07-28", "last_price": 3.0, "lot_size": 10}]
+        assert fo_service.planner_cc_for_holding(rows, avg_price=90.0, ltp=100.0, qty=20.0, expiry_date="2026-07-28") is None
+
+    def test_prefers_freshest_trade_date_over_pure_nearest_strike(self):
+        # target 103 (ltp 100 * 1.03). Strike 105 is farther but is the
+        # only strike from the freshest trade_date.
+        rows = [
+            {"symbol": "RELIANCE", "option_type": "CE", "strike_price": 100.0, "expiry_date": "2026-07-28", "last_price": 3.0, "lot_size": 10, "trade_date": "2026-07-01"},
+            {"symbol": "RELIANCE", "option_type": "CE", "strike_price": 105.0, "expiry_date": "2026-07-28", "last_price": 1.0, "lot_size": 10, "trade_date": "2026-07-20"},
+        ]
+        result = fo_service.planner_cc_for_holding(rows, avg_price=90.0, ltp=100.0, qty=20.0, expiry_date="2026-07-28")
+        assert result["strike"] == 105.0
+        assert result["trade_date"] == "2026-07-20"
+
+
 class TestDashboardMetricsRows:
     """dashboard_metrics_rows fans out per symbol over its up to 3
     nearest distinct expiries (near/next/far), computing

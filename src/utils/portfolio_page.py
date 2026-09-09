@@ -1,9 +1,11 @@
 """Cross-page helpers for the Portfolio feature's pages -- My Trades (7),
-My Holdings (8), My Positions (9), My CSP (11), My Portfolio Trades (12),
-and Analyse Trade (10, hidden from the sidebar) -- plus the Screener for
-CSP page (1, `load_trade_types_by_symbol` only, for its "Trade Taken"
-column) and Other Stock Holdings (15, reuses `build_trade_legs`/
-`load_option_expiries`/`load_option_chain` the same way). Broker
+My Holdings (8), My Positions (9), My CSP (11), Modified CSPs (17), My
+Portfolio Trades (12), and Analyse Trade (10, hidden from the sidebar)
+-- plus the Screener for CSP page (1, `load_trade_types_by_symbol` only,
+for its "Trade Taken" column) and Planner for CCs (15, reuses
+`build_trade_legs`/`load_option_expiries`/`load_option_chain` the same
+way, plus `load_fundamentals_and_returns` for its
+Dividend/PEG/Fundamentals/Momentum columns). Broker
 connect/sync UI lives in Settings' "Data Provider" section
 (src/utils/data_provider_settings.py) now, not a dedicated page -- these
 loaders are still shared across every page that reads the resulting
@@ -190,6 +192,11 @@ def load_latest_prices(_client, symbols: tuple[str, ...], _cache_bust: int):
 @st.cache_data(ttl=60, show_spinner=False)
 def load_returns_and_pe(_client, symbols: tuple[str, ...], _cache_bust: int):
     return snapshot_repo.get_latest_returns_and_pe(_client, list(symbols))
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_fundamentals_and_returns(_client, symbols: tuple[str, ...], _cache_bust: int):
+    return snapshot_repo.get_latest_fundamentals_and_returns(_client, list(symbols))
 
 
 @st.cache_data(ttl=60, show_spinner=False)

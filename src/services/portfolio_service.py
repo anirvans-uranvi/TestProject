@@ -1,7 +1,7 @@
 """Broker API response translation and valuation for the Portfolio
 feature's pages (7_My_Trades.py, 8_My_Holdings.py, 9_My_Positions.py,
 10_Analyse_Trade.py, 11_My_CSP.py, 12_My_Portfolio_Trades.py,
-17_Modified_CSPs.py, 15_Other_Stock_Holdings.py, 14_Trade_History.py,
+17_Modified_CSPs.py, 15_Planner_for_CCs.py, 14_Trade_History.py,
 5_Options.py) -- holdings/positions come from a live
 Dhan sync (Settings' "Data Provider" section,
 src/utils/data_provider_settings.py) only; CSV upload was dropped

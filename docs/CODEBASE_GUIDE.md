@@ -1260,8 +1260,9 @@ pages = {
     "Wheel Strategy": [
         st.Page("pages/1_Dashboard.py", title="Screener for CSP", default=True),
         st.Page("pages/11_My_CSP.py", title="My Current CSPs"),
+        st.Page("pages/17_Modified_CSPs.py", title="Modified CSPs"),
+        st.Page("pages/15_Planner_for_CCs.py", title="Planner for CCs"),
         st.Page("pages/12_My_Portfolio_Trades.py", title="My Portfolio Trades"),
-        st.Page("pages/15_Other_Stock_Holdings.py", title="Other Stock Holdings"),
         st.Page("pages/10_Analyse_Trade.py", title="Analyse Trade", visibility="hidden"),
     ],
     "Index Options": [
@@ -1304,11 +1305,11 @@ guided **"Wheel Strategy"** journey (the section login lands in, via
 `default=True` moving here with the Dashboard) -- screen for a CSP
 candidate (Screener for CSP) → track running CSPs (My Current CSPs) →
 see a CSP that's been rolled/adjusted into a bare multi-leg spread
-(Modified CSPs) → see stocks assigned into holdings with option
-overlays (My Portfolio Trades) → see plain holdings with a covered-call
-trigger (Other Stock Holdings), plus the hidden Analyse Trade --
-alongside a standalone **"Index Options"** section (new, strangle
-ideas on the 4 major indices). (Modified CSPs went through two renames
+(Modified CSPs) → plan a covered call for a plain holding (Planner for
+CCs) → see stocks assigned into holdings with option overlays (My
+Portfolio Trades), plus the hidden Analyse Trade -- alongside a
+standalone **"Index Options"** section (new, strangle ideas on the 4
+major indices). (Modified CSPs went through two renames
 and a reordering before landing here, all per separate explicit
 requests -- an earlier, differently-shaped step, "everything else" /
 My Other Trades (`13_My_Other_Trades.py`), was in this journey too
@@ -1318,8 +1319,11 @@ only and reformatted to My Portfolio Trades' own six-column layout,
 nested *after* Other Stock Holdings -- then renamed to "Other Stock
 Options" and moved *ahead* of Other Stock Holdings -- then renamed
 again to **Modified CSPs** and moved to sit right after My Current CSPs
-instead, additionally excluding any Trade with a stock holding at all;
-see the Portfolio pages section below.) "Market" (Equity/Options) stays its own section
+instead, additionally excluding any Trade with a stock holding at all.
+Planner for CCs is itself a full rebuild of that same "Other Stock
+Holdings" page -- renamed and moved from after My Portfolio Trades to
+right after Modified CSPs, per a further separate request; see the
+Portfolio pages section below for both.) "Market" (Equity/Options) stays its own section
 unchanged, per the user's explicit choice not to fold it elsewhere. "My
 Portfolio" keeps Holdings/Positions and picks up `7_My_Trades.py` ("All
 Trades", no longer sharing a section with the CSP/Portfolio-Trades
@@ -1408,7 +1412,7 @@ page's own `st.set_page_config(page_title=..., page_icon=...)` call
 (browser-tab metadata) is unaffected too -- it's independent of `st.Page`'s
 `title=` (sidebar label).
 
-- **`1_Dashboard.py`** — loads `latest_screener_view` via `snapshot_repo.get_latest_screener()`, applies the signed-in user's thresholds via `threshold_override.apply_user_thresholds()`, renders metric cards (also usable as quick filters, wired through `st.session_state["status_filter"]`), sidebar filters, and the screener table. The Status sidebar filter is a `st.multiselect` over `ALL_STATUSES = ["Green", "Amber", "Red", "Unavailable"]` — `status_filter` is always a *list* (any combination, not one-or-all), and the final row filter is a single `df["status"].isin([...])`, so selecting all four is equivalent to no filter at all. Saved filter presets normalize old single-string `"status"` values (from before this was a multiselect) into a list on load for backward compatibility. The "Minimum dividend yield" / "Minimum PEG" sidebar filters default to `0.0`, **not** `user_settings.dividend_yield_threshold`/`peg_threshold` — they're a separate display filter from the criterion A/C pass/fail thresholds, and defaulting them to the threshold value silently hid every stock below it on first load (a real bug, since fixed). Keep these two concepts distinct if you touch this page: the Settings-page thresholds decide Green/Amber/Red/Unavailable; these sidebar inputs just additionally hide rows below a value the user dials in themselves, and should default to "show everything." Right after the title/disclaimer, `render_stock_refresh_button(client, user_id, user_settings.data_provider)` (`src/utils/refresh_bar.py`, see the Utils section below) renders **Stock Data Refresh** (YFinance/Bhavcopy) or three Dhan-specific buttons (see the Utils section's `refresh_bar.py` bullet) by Data Provider setting — this used to be a single bundled **"🔄 Market Data Refresh"** button firing every fetch (stock, fundamentals, F&O bhavcopy, broker live prices) at once; it's now five independent, narrower buttons across Settings and the other pages (see the Utils section's `refresh_bar.py` bullet for the full breakdown). `render_stock_refresh_button` is called identically from every page except Settings (Dashboard, Stock Detail, Options, My Trades, My Holdings, My Positions, My CSP, My Portfolio Trades, Other Stock Holdings, Analyse Trade), so refreshing stock data never requires navigating back here specifically. Below the title, a "Data sources" caption reads `user_settings.data_provider` (the signed-in account's own Settings > Data Provider choice — `"dhan"`/`"yfinance_bhavcopy"`, migration `0028`) for stock prices, `get_settings().fundamentals_provider` for PE/PEG/dividends (this one stays an app-wide `.env`-driven setting -- fundamentals are never provider-branched per account, see the `refresh_bar.py` bullet below), and states the options/F&O source as a fixed string, "NSE + BSE Bhavcopy (end-of-day) — always, regardless of Data Provider" — there's no configurable per-account F&O provider (Dhan's API doesn't expose a bhavcopy-equivalent full options chain, see the Futures & Options section). The header's "Data freshness" line covers stock refresh only now (`last_fetch_at`, still needed for `get_market_state()`'s staleness check); the per-exchange F&O refresh timestamps live in the shared refresh bar's own captions instead of a Dashboard-only line. "Latest NSE Bhavcopy: <date>" / "Latest BSE Bhavcopy: <date>" are still Dashboard-specific, each from its own `fo_repo.get_latest_fo_trade_date(client, source_prefix=...)` call (`"nse_fo_bhavcopy"` / `"bse_fo_bhavcopy"` -- same `source`-prefix scoping the fo-refresh Edge Function's own watermark query uses, and for the same reason: NSE and BSE publish on the same trading days, so one combined "latest bhavcopy" figure couldn't tell you which exchange's file was actually newest, and a single shared line was exactly what made a real BSE-side false-success bug easy to miss -- see the Edge Functions section's "A third real bug, once BSE was added"). Each is deliberately **not** that exchange's own last-successful-fetch timestamp: a bhavcopy is published for a specific trading day and a run on a non-trading day finds nothing new, so a refresh can succeed today while the loaded data is still from a prior session -- these lines surface that distinction. Wrapped in the same `except APIError: None` degrade as the rest of this page's optional F&O reads, for a deployment that hasn't applied migration `0007` yet.
+- **`1_Dashboard.py`** — loads `latest_screener_view` via `snapshot_repo.get_latest_screener()`, applies the signed-in user's thresholds via `threshold_override.apply_user_thresholds()`, renders metric cards (also usable as quick filters, wired through `st.session_state["status_filter"]`), sidebar filters, and the screener table. The Status sidebar filter is a `st.multiselect` over `ALL_STATUSES = ["Green", "Amber", "Red", "Unavailable"]` — `status_filter` is always a *list* (any combination, not one-or-all), and the final row filter is a single `df["status"].isin([...])`, so selecting all four is equivalent to no filter at all. Saved filter presets normalize old single-string `"status"` values (from before this was a multiselect) into a list on load for backward compatibility. The "Minimum dividend yield" / "Minimum PEG" sidebar filters default to `0.0`, **not** `user_settings.dividend_yield_threshold`/`peg_threshold` — they're a separate display filter from the criterion A/C pass/fail thresholds, and defaulting them to the threshold value silently hid every stock below it on first load (a real bug, since fixed). Keep these two concepts distinct if you touch this page: the Settings-page thresholds decide Green/Amber/Red/Unavailable; these sidebar inputs just additionally hide rows below a value the user dials in themselves, and should default to "show everything." Right after the title/disclaimer, `render_stock_refresh_button(client, user_id, user_settings.data_provider)` (`src/utils/refresh_bar.py`, see the Utils section below) renders **Stock Data Refresh** (YFinance/Bhavcopy) or three Dhan-specific buttons (see the Utils section's `refresh_bar.py` bullet) by Data Provider setting — this used to be a single bundled **"🔄 Market Data Refresh"** button firing every fetch (stock, fundamentals, F&O bhavcopy, broker live prices) at once; it's now five independent, narrower buttons across Settings and the other pages (see the Utils section's `refresh_bar.py` bullet for the full breakdown). `render_stock_refresh_button` is called identically from every page except Settings (Dashboard, Stock Detail, Options, My Trades, My Holdings, My Positions, My CSP, Modified CSPs, My Portfolio Trades, Planner for CCs, Analyse Trade), so refreshing stock data never requires navigating back here specifically. Below the title, a "Data sources" caption reads `user_settings.data_provider` (the signed-in account's own Settings > Data Provider choice — `"dhan"`/`"yfinance_bhavcopy"`, migration `0028`) for stock prices, `get_settings().fundamentals_provider` for PE/PEG/dividends (this one stays an app-wide `.env`-driven setting -- fundamentals are never provider-branched per account, see the `refresh_bar.py` bullet below), and states the options/F&O source as a fixed string, "NSE + BSE Bhavcopy (end-of-day) — always, regardless of Data Provider" — there's no configurable per-account F&O provider (Dhan's API doesn't expose a bhavcopy-equivalent full options chain, see the Futures & Options section). The header's "Data freshness" line covers stock refresh only now (`last_fetch_at`, still needed for `get_market_state()`'s staleness check); the per-exchange F&O refresh timestamps live in the shared refresh bar's own captions instead of a Dashboard-only line. "Latest NSE Bhavcopy: <date>" / "Latest BSE Bhavcopy: <date>" are still Dashboard-specific, each from its own `fo_repo.get_latest_fo_trade_date(client, source_prefix=...)` call (`"nse_fo_bhavcopy"` / `"bse_fo_bhavcopy"` -- same `source`-prefix scoping the fo-refresh Edge Function's own watermark query uses, and for the same reason: NSE and BSE publish on the same trading days, so one combined "latest bhavcopy" figure couldn't tell you which exchange's file was actually newest, and a single shared line was exactly what made a real BSE-side false-success bug easy to miss -- see the Edge Functions section's "A third real bug, once BSE was added"). Each is deliberately **not** that exchange's own last-successful-fetch timestamp: a bhavcopy is published for a specific trading day and a run on a non-trading day finds nothing new, so a refresh can succeed today while the loaded data is still from a prior session -- these lines surface that distinction. Wrapped in the same `except APIError: None` degrade as the rest of this page's optional F&O reads, for a deployment that hasn't applied migration `0007` yet.
 
   **Live price override (migration `0030`, `user_live_prices`)**: once `df` is built from `latest_screener_view`, if `user_settings.data_provider != "yfinance_bhavcopy"` the page calls `snapshot_repo.get_user_live_prices(client, user_id, df["symbol"].tolist())` and overwrites `df["latest_price"]` for any symbol that call returns — the account's own cached live LTP from whichever broker "Stock & Option Data Refresh" last pulled it from (see the `refresh_bar.py` bullet below), taking priority over the shared, possibly-Yahoo-delayed `daily_screener_snapshots` value. A symbol this account hasn't live-priced yet (no broker connected, an unwatched symbol, an expired token) simply keeps its snapshot value — same `{**shared, **live}` merge pattern `src/utils/portfolio_page.py::load_live_broker_prices` already established for the portfolio pages. This same `live_prices` lookup is also consulted by the "(as of <date>)" stale-fallback marker described below — a row with a live-overridden LTP skips that suffix even if the *snapshot* row backing its 52W/returns/PEG columns is stale, since the LTP itself is fresh.
 
@@ -1518,7 +1522,8 @@ page's own `st.set_page_config(page_title=..., page_icon=...)` call
     the lowest call strike still at or above 5% above spot, expressed as
     a percentage of gross investment) — dropped entirely from the
     Dashboard per an explicit, earlier and unrelated user request, once
-    "Other Stock Holdings" took over the covered-call-decision role with
+    "Other Stock Holdings" (since renamed/rebuilt into "Planner for
+    CCs") took over the covered-call-decision role with
     a different, per-holding formula (see the Portfolio pages section
     below). The Options screen's own "5% CC" section is the only place
     `cc_pct` still renders directly, additionally showing "Net
@@ -1553,7 +1558,7 @@ page's own `st.set_page_config(page_title=..., page_icon=...)` call
 
   **A real bug found here, right after this section first shipped**: the CSP/CC breakdown's spot value (CC was still "ITM PMCC" at the time, but the bug and fix applied identically) was initially taken from `option_chain_summary(near_chain_rows)["spot"]` — the F&O bhavcopy's own `underlying_price` column — while the Dashboard's two columns (now the `dashboard_fo_metrics` cache, see above) use the cash-market `latest_price` from `latest_screener_view`. These two prices aren't the same value, so this page's numbers didn't match the Dashboard's for the same stock (confirmed live: ADANIENT showed 5% CSP = 0.54% on the Dashboard but 0.45% here, since a different spot picked a different nearest-5%-below strike, 3040 vs 3020). Fixed by fetching `snapshot_repo.get_latest_screener_row(client, symbol).latest_price` and using that as the spot for both calculations here too, instead of the chain's `underlying_price` — the top-of-page "Spot"/"ATM strike" summary tiles are unaffected and deliberately still use the chain's own `underlying_price` (correct for highlighting the ATM row in the actual option-chain data being displayed there). If you add another F&O-derived calculation to either screen, source spot the same way this one now does — from the screener, not the chain — to keep the two screens' numbers in agreement.
 
-- **`7_My_Trades.py` / `8_My_Holdings.py` / `9_My_Positions.py` / `11_My_CSP.py` / `17_Modified_CSPs.py` / `12_My_Portfolio_Trades.py` / `15_Other_Stock_Holdings.py` / `10_Analyse_Trade.py`** — eight pages (`10_Analyse_Trade.py` hidden from the sidebar, see the "Streamlit app" section above) replacing what used to be one combined `6_Portfolio.py` (sidebar label "My Portfolio", retired). `pages/6_My_Broker.py`, an earlier page in this family, was later deleted entirely -- CSV upload dropped along with it, and its connect/sync UI moved into Settings' "Data Provider" section (see the Streamlit app section above and the dedicated Portfolio pages section below for the full story). `12_My_CC.py` (as it was originally called) was rebuilt into a per-leg table matching `11_My_CSP.py`'s own depth, then rebuilt again into `12_My_Portfolio_Trades.py` -- one row **per Trade**, not per leg, covering every "Portfolio "-prefixed strategy rather than Covered Call only (see the dedicated Portfolio pages section below for the sync → save → refresh-registration pipeline and the My Trades/Analyse Trade/My CSP/My Portfolio Trades grouping). **There used to be an eighth page here already, `13_My_Other_Trades.py`** — exactly `7_My_Trades.py`'s own trades-table code with one extra `trade_type` filter applied before the bucket split (`portfolio_service.is_other_trade_type`, next to `is_csp_trade_type`), not a new grouping/analytics engine — deleted entirely per an explicit user request, along with the then-unused `is_other_trade_type` helper (removed rather than left as dead code). **Both were reinstated later per a separate, later request**, initially as `17_Other_Stock_Trades.py` (nested after Other Stock Holdings), then renamed to `17_Other_Stock_Options.py` (moved ahead of Other Stock Holdings), then renamed again to `17_Modified_CSPs.py` (moved once more, to sit right after `11_My_CSP.py`) — `is_other_trade_type` restored to `portfolio_service.py` unchanged throughout, but the page itself is a redesign, not a revival: Stock bucket only (the old page also covered the Other bucket), any Trade with a stock holding excluded outright (tightened twice -- first to just "plain holdings", then to "any holding at all" -- see that page's own bullet below), and rendered with My Portfolio Trades' own six-column-block layout, trimmed down (`_render_modified_csps_table`, a page-local duplicate of `_render_portfolio_trades_table` -- see that page's own bullet below) rather than the old page's flatter summary table. Each page reads every one of the signed-in user's saved rows across every portfolio and broker via `src/utils/portfolio_page.py`'s shared cached loaders; My Holdings/My Positions/My Trades/My CSP/My Portfolio Trades/Other Stock Holdings/Modified CSPs each render one `st.tabs` entry per distinct `portfolio_name` (union of holdings' and positions' names — a portfolio can exist on positions alone; in practice this is a single tab for almost every account now, since the live sync flow only ever targets one resolved name — see the Portfolio pages section's "One portfolio per account" note below) scoping `portfolio_service.merge_holdings`/`compute_portfolio_view` (LTP via `snapshot_repo.get_latest_prices`, a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why — overridden by a live broker quote wherever `portfolio_page.load_live_broker_prices` finds one, on request; see the LTP Underlying and Holdings sections below) and `compute_positions_view` to just that portfolio's own rows. Every table on these pages is a plain `st.dataframe` — see below for why, and for how row selection replaced the per-row 🔍 button.
+- **`7_My_Trades.py` / `8_My_Holdings.py` / `9_My_Positions.py` / `11_My_CSP.py` / `17_Modified_CSPs.py` / `15_Planner_for_CCs.py` / `12_My_Portfolio_Trades.py` / `10_Analyse_Trade.py`** — eight pages (`10_Analyse_Trade.py` hidden from the sidebar, see the "Streamlit app" section above) replacing what used to be one combined `6_Portfolio.py` (sidebar label "My Portfolio", retired). `pages/6_My_Broker.py`, an earlier page in this family, was later deleted entirely -- CSV upload dropped along with it, and its connect/sync UI moved into Settings' "Data Provider" section (see the Streamlit app section above and the dedicated Portfolio pages section below for the full story). `12_My_CC.py` (as it was originally called) was rebuilt into a per-leg table matching `11_My_CSP.py`'s own depth, then rebuilt again into `12_My_Portfolio_Trades.py` -- one row **per Trade**, not per leg, covering every "Portfolio "-prefixed strategy rather than Covered Call only (see the dedicated Portfolio pages section below for the sync → save → refresh-registration pipeline and the My Trades/Analyse Trade/My CSP/My Portfolio Trades grouping). **There used to be an eighth page here already, `13_My_Other_Trades.py`** — exactly `7_My_Trades.py`'s own trades-table code with one extra `trade_type` filter applied before the bucket split (`portfolio_service.is_other_trade_type`, next to `is_csp_trade_type`), not a new grouping/analytics engine — deleted entirely per an explicit user request, along with the then-unused `is_other_trade_type` helper (removed rather than left as dead code). **Both were reinstated later per a separate, later request**, initially as `17_Other_Stock_Trades.py` (nested after Other Stock Holdings), then renamed to `17_Other_Stock_Options.py` (moved ahead of Other Stock Holdings), then renamed again to `17_Modified_CSPs.py` (moved once more, to sit right after `11_My_CSP.py`) — `is_other_trade_type` restored to `portfolio_service.py` unchanged throughout, but the page itself is a redesign, not a revival: Stock bucket only (the old page also covered the Other bucket), any Trade with a stock holding excluded outright (tightened twice -- first to just "plain holdings", then to "any holding at all" -- see that page's own bullet below), and rendered with My Portfolio Trades' own six-column-block layout, trimmed down (`_render_modified_csps_table`, a page-local duplicate of `_render_portfolio_trades_table` -- see that page's own bullet below) rather than the old page's flatter summary table. **`15_Planner_for_CCs.py`, itself a full rebuild of the earlier `15_Other_Stock_Holdings.py`**, was renamed and moved from after `12_My_Portfolio_Trades.py` to right after `17_Modified_CSPs.py` in the same request that rebuilt its contents -- see its own bullet below for what changed. Each page reads every one of the signed-in user's saved rows across every portfolio and broker via `src/utils/portfolio_page.py`'s shared cached loaders; My Holdings/My Positions/My Trades/My CSP/My Portfolio Trades/Planner for CCs/Modified CSPs each render one `st.tabs` entry per distinct `portfolio_name` (union of holdings' and positions' names — a portfolio can exist on positions alone; in practice this is a single tab for almost every account now, since the live sync flow only ever targets one resolved name — see the Portfolio pages section's "One portfolio per account" note below) scoping `portfolio_service.merge_holdings`/`compute_portfolio_view` (LTP via `snapshot_repo.get_latest_prices`, a direct `daily_screener_snapshots` query, deliberately **not** `latest_screener_view` — see below for why — overridden by a live broker quote wherever `portfolio_page.load_live_broker_prices` finds one, on request; see the LTP Underlying and Holdings sections below) and `compute_positions_view` to just that portfolio's own rows. Every table on these pages is a plain `st.dataframe` — see below for why, and for how row selection replaced the per-row 🔍 button.
 
 ## Portfolio pages
 
@@ -1572,15 +1577,18 @@ holding at all* whose Trade Type is neither "CSP" nor
 "Portfolio "-prefixed -- `is_other_trade_type` plus a shape check
 excluding any Trade with a Holding leg; the same six-column-block
 layout `12_My_Portfolio_Trades.py` uses, trimmed down -- see its own
+subsection further below), `pages/15_Planner_for_CCs.py`
+(every stock holding with no option leg at all -- a shape check on
+the Trade's current legs, not the saved `trade_type` string, unchanged
+from the earlier "Other Stock Holdings" page this was rebuilt from --
+one flat row per holding, Dividend/PEG/Fundamentals/Momentum sourced
+the same way the Screener shows them, plus a CC Strike/CC ROI column
+pair per near/next/far monthly expiry; Stock bucket only, see its own
 subsection further below), `pages/12_My_Portfolio_Trades.py` (formerly
 `12_My_CC.py`, Covered-Call only -- every "Portfolio "-prefixed Trade,
 one row per Trade: the covered stock's own Holding/Avg Price/Invested/
 LTP/Momentum alongside up to 4 option legs -- see its own subsection
-below, right after My CSP's), `pages/15_Other_Stock_Holdings.py`
-(every stock/ETF holding with no option leg at all -- a shape check on
-the Trade's current legs, not the saved `trade_type` string -- with a
-per-holding covered-call entry trigger; Stock bucket only, see its own
-subsection further below), and `pages/10_Analyse_Trade.py`
+below, right after My CSP's), and `pages/10_Analyse_Trade.py`
 (one Trade's
 detail, registered `visibility="hidden"` in `app.py` so it's reachable
 via `st.switch_page` but never shows as its own sidebar link). There used
@@ -1603,10 +1611,12 @@ Stock bucket only this time, any Trade with a stock holding excluded
 outright (tightened across two follow-ups), and reformatted to My
 Portfolio Trades' own layout, trimmed down, rather than the old page's
 flatter one; originally named "Other Stock Trades" and nested after
-Other Stock Holdings, then renamed to "Other Stock Options" and moved
-ahead of it, then renamed again to "Modified CSPs" and moved to sit
-right after My CSP -- three separate later requests in all; see that
-page's own subsection further below for what changed and why. All eight pages
+Other Stock Holdings (itself later renamed/rebuilt into
+`pages/15_Planner_for_CCs.py`, see its own bullet above), then renamed
+to "Other Stock Options" and moved ahead of it, then renamed again to
+"Modified CSPs" and moved to sit right after My CSP -- three separate
+later requests in all; see that page's own subsection further below for
+what changed and why. All eight pages
 share one module, `src/utils/portfolio_page.py` (cached `@st.cache_data` loaders, the
 `portfolio_cache_bust` counter, `build_trade_legs`) -- since these are
 plain module-level functions rather than redefined per page, a cache hit
@@ -1924,8 +1934,8 @@ caller left at that point, so it was deleted along with
 of" with nothing to date.
 
 **Per-holding covered-call suggestion ("CC ROI" / "CC Assignment ROI",
-the Options page's "Portfolio CC" table, and now also Other Stock
-Holdings -- see the Portfolio pages section below)**: distinct from
+the Options page's "Portfolio CC" table, and formerly Other Stock
+Holdings too -- see the Portfolio pages section below)**: distinct from
 Options' own "5% CC" figure (`cc_5pct_for_rows`, always spot-based,
 fixed 5% OTM, floor-filtered strike) -- this one is
 `fo_service.covered_call_for_holding(ce_rows, avg_price, ltp, qty,
@@ -1944,7 +1954,14 @@ started calling it too, per an explicit user request, for every
 holding-with-no-option-leg across the whole portfolio at once (using the
 previously-unused `portfolio_page.load_option_expiries`/
 `load_option_chain` cached loaders instead, since it isn't scoped to one
-already-selected symbol the way Options is):
+already-selected symbol the way Options is). **That page was later
+rebuilt into `pages/15_Planner_for_CCs.py`, which does *not* call
+`covered_call_for_holding`** -- it calls a new sibling function,
+`fo_service.planner_cc_for_holding`, with the opposite
+condition/base pairing (see that page's own subsection below for the
+formula and why it's deliberately different, not a fix). The Options
+page's own "Portfolio CC" table is unaffected either way -- still
+`covered_call_for_holding`, unchanged, described below:
 
 - If `avg_price > ltp` (a loss so far), the target is 3% above
   `avg_price` -- writing a call struck near the original cost basis
@@ -3344,6 +3361,91 @@ per separate explicit requests:**
    again from `_render_other_stock_options_table`/`_tab`) are otherwise
    unchanged from step 2's versions.
 
+**Planner for CCs (`pages/15_Planner_for_CCs.py`, formerly "Other Stock
+Holdings")** — every stock holding with **no option leg at all**.
+Unlike every other filtered Trades page here, this one does **not**
+filter on the saved `trade_type` string at all -- it's a pure shape
+check on the Trade's own current legs: `not any(leg["leg_type"] ==
+"Position" for leg in t["legs"])`, i.e. every leg is a Holding leg.
+Confirmed with the user as the right approach: the saved `trade_type`
+could be stale (still says "Portfolio CC" after the option leg was
+actually closed) or a custom label unrelated to the leg shape
+(`"Hedged"`, `"Batman"` -- both seen on a real account), so trusting it
+here could hide a genuinely uncovered holding or wrongly include one
+that's actually covered now. **Stock bucket only**, unchanged from the
+old page (its own Index Holdings/Other Holdings tables had already been
+removed by an earlier request).
+
+**A full rebuild, per an explicit user request** -- renamed from "Other
+Stock Holdings" and moved from after `12_My_Portfolio_Trades.py` to
+right after `17_Modified_CSPs.py`, with the shape-check filter and the
+`holding_only_trades`/`_merged` aggregation kept unchanged (`_merged`
+gained one new field, `investment`, previously computed then discarded
+-- now surfaced as the "Invested Amt" column) but everything about the
+page's own rendering rewritten:
+- **One flat table instead of one small table per holding.** The old
+  page rendered a separate `_render_holdings_cc_table` call per
+  holding, each its own markdown line plus a Term/Expiry/Strike/.../CC
+  Assignment ROI table underneath. This page instead builds one
+  `table_rows` list, one dict per holding, with columns **Stock, Avg
+  Price, Qty, Invested Amt, LTP, Dividend, PEG, Fundamentals, 1D, 5D,
+  20D, Momentum**, then a **`{Month} CC Strike`/`{Month} CC ROI`**
+  column pair per expiry -- the same "flatten near/next/far into paired
+  columns, literal month names, computed once and shared across every
+  row" approach `pages/1_Dashboard.py`'s own CSP columns established
+  (`all_expiries = sorted({e for exps in expiries_by_symbol.values() for e in exps})[:3]`,
+  mirroring that page's `_csp_expiries` computation almost verbatim).
+- **`snapshot_repo.get_latest_fundamentals_and_returns(client, symbols)`**,
+  a new repo function, feeds Dividend/PEG/Fundamentals/Momentum/1D/5D/
+  20D all from one query -- `ttm_dividend_yield`/`peg_ratio`/
+  `criterion_a`/`criterion_b`/`criterion_c`/`return_1d`/`return_5d`/
+  `return_20d`, the single most recent `daily_screener_snapshots` row
+  per symbol, no cross-row carry-forward for a null field (same
+  convention `get_latest_returns_and_pe` right above it already uses).
+  Queried directly against `daily_screener_snapshots`, not
+  `latest_screener_view`, for the identical reason `get_latest_prices`/
+  `get_latest_returns_and_pe` already do: the view's inner join on
+  `nifty50_constituents.is_current` would silently drop a portfolio-only,
+  non-Nifty50 stock. **Momentum here is the *stored* `criterion_b`
+  flag**, not `criterion_b(return_1d, return_5d, return_20d)`
+  recomputed fresh the way every other portfolio page (My CSP, My
+  Portfolio Trades, Modified CSPs) does it -- an explicit request that
+  this column specifically match the Screener's own value, not the
+  sibling portfolio pages' convention. Dividend/PEG/Fundamentals cells
+  are formatted identically to the Screener's own
+  (`f"{format_pct(...)} {pass_fail_icon(criterion_a)}"`,
+  `f"{peg:.2f} {pass_fail_icon(criterion_c)}"` or `"N/A"`,
+  `pass_fail_icon(criterion_fundamentals(criterion_a, criterion_c))`).
+- **`fo_service.planner_cc_for_holding`, a new sibling function to
+  `covered_call_for_holding`** (unchanged, still what the Options
+  page's own "Portfolio CC" table uses) -- **the opposite
+  condition/base pairing**, per an explicit instruction for this page
+  specifically: `ltp > avg_price` (a profit) targets 3% above **LTP**;
+  otherwise (a loss, or exactly at breakeven) targets 5% above **avg
+  buy price**. (`covered_call_for_holding` is the reverse: loss targets
+  3% above avg_price, profit/breakeven targets 5% above LTP.) Strike
+  selection (nearest listed strike either side, freshest-`trade_date`-
+  preferred via `_freshest_rows`) and the `cc_roi_pct`/
+  `assignment_roi_pct` formulas are otherwise identical to
+  `covered_call_for_holding`'s own, reused verbatim -- only `CC Strike`
+  and `CC ROI` (`cc["strike"]`/`cc["cc_roi_pct"]`) are actually rendered
+  as columns; `assignment_roi_pct` is computed and returned but not
+  displayed, since Assignment ROI wasn't part of the requested column
+  list. Confirmed live against a real account's three plain holdings
+  before shipping: ONGC (avg ₹234.07, LTP ₹236.06, a profit) correctly
+  targeted 3% above LTP (target ₹243.14, nearest listed strike ₹242.50);
+  HDFCBANK (avg ₹831.89, LTP ₹694.55, a loss) correctly targeted 5%
+  above avg price (target ₹873.48, nearest listed strike ₹880).
+- **Row selection replaces the per-holding markdown/table layout
+  entirely** -- `st.dataframe(..., on_select="rerun",
+  selection_mode="single-row")` on the one combined table, then the
+  identical **"Open {symbol} in Stock Detail"**/**"Open {symbol} in
+  Options"** button pair `pages/1_Dashboard.py`'s own screener table
+  uses below it (`st.session_state["selected_symbol"]`/`["fo_symbol"]`,
+  `st.switch_page` to `2_Stock_Detail.py`/`5_Options.py`), per an
+  explicit request to reuse "the same ones as appearing in Screener for
+  CSP" rather than inventing a new interaction.
+
 **My Portfolio Trades (`pages/12_My_Portfolio_Trades.py`, formerly My
 CC)** — renamed and rebuilt per an explicit user request: generalizes
 from "Covered Call only" to **every** Trade whose `trade_type` starts
@@ -3472,43 +3574,6 @@ itself margin-relevant) and shows the response's `totalMargin`.
   multi-leg trade shown on this page; a genuinely risk-offsetting
   structure might behave differently, untested.
 
-**Other Stock Holdings (`pages/15_Other_Stock_Holdings.py`)** — added
-alongside the "Wheel Strategy" restructure (see "Streamlit app" above).
-Every stock/ETF holding with **no option leg at all**. Unlike every
-other filtered Trades page here, this one does **not** filter on the
-saved `trade_type` string at all -- it's a pure shape check on the
-Trade's own current legs: `not any(leg["leg_type"] == "Position" for leg
-in t["legs"])`, i.e. every leg is a Holding leg. Confirmed with the user
-as the right approach: the saved `trade_type` could be stale (still says
-"Portfolio CC" after the option leg was actually closed) or a custom
-label unrelated to the leg shape (`"Hedged"`, `"Batman"` -- both seen on
-a real account), so trusting it here could hide a genuinely uncovered
-holding or wrongly include one that's actually covered now.
-
-**Stock bucket only, shown as one "Stock Holdings" table** -- the page
-originally rendered all three bucket tabs' worth of holdings (Stock/
-Index/Other, the same buckets every other Trades page splits into) as
-three separate tables, "Stock Holdings"/"Index Holdings"/"Other
-Holdings"; the latter two were **removed entirely per an explicit user
-request**. `holding_only_trades` (the shape-filtered list) and `_merged`
-(the per-trade Holding-leg aggregation) still compute across every
-bucket unchanged -- only the render call for the `index`/`other` buckets
-was dropped, filtering `_merged(t)` to `t["bucket"] == "stock"` before
-passing it to `_render_holdings_cc_table`.
-
-For each qualifying trade, its Holding leg(s) are merged (summed qty,
-investment-weighted avg price, mirroring My Portfolio Trades' own Stock
-Holding aggregation) into one row, then `fo_service
-.covered_call_for_holding` runs against near/next/far monthly expiries
-(`portfolio_page.load_option_expiries`/`load_option_chain` -- previously
-unused, cached loaders already sitting in `portfolio_page.py`, now
-finally called) -- **the exact same function** the Options page's own
-"Portfolio CC" section already uses, confirmed with the user rather than
-inventing a new formula. Renders the identical Term/Expiry/Strike/
-Premium/Trade Date/Invested Amount/CC ROI/CC Assignment ROI table, just
-gathered for every qualifying Stock holding on one page instead of
-requiring a per-symbol visit to Options.
-
 **Index Options (`pages/16_Index_Options.py`)** — new page, its own
 top-level `st.navigation` section (not nested under "Wheel Strategy") --
 short-strangle ideas (sell OTM PE + sell OTM CE) on the 4 major indices:
@@ -3557,18 +3622,18 @@ Two new pure functions in `fo_service.py`:
 
 The page loops over 4 hardcoded `(symbol, {term: pct})` configs, calling
 `load_option_expiries`/`load_option_chain` (the same previously-unused
-cached loaders Other Stock Holdings now also uses) for each term this
+cached loaders Planner for CCs also uses) for each term this
 symbol shows, and renders one small table per index with a "Current
 Price" caption (the strangle's own echoed-back `spot`) above it.
 
 `app.py` groups `1_Dashboard.py`/`11_My_CSP.py`/`17_Modified_CSPs.py`/
-`12_My_Portfolio_Trades.py`/
-`15_Other_Stock_Holdings.py`/`10_Analyse_Trade.py` (hidden) under one
+`15_Planner_for_CCs.py`/
+`12_My_Portfolio_Trades.py`/`10_Analyse_Trade.py` (hidden) under one
 `st.navigation` dict section, `"Wheel Strategy"` — a guided journey
 (screen for a CSP candidate → track running CSPs → see a CSP that's
-been rolled/adjusted into a bare multi-leg spread → see stocks assigned
-into holdings with option overlays → see plain holdings with a
-covered-call trigger) restructured from the app's former flat
+been rolled/adjusted into a bare multi-leg spread → plan a covered call
+for a plain holding → see stocks assigned into holdings with option
+overlays) restructured from the app's former flat
 "Market"/"My Trades" split per an explicit user request. (`13_My_Other_Trades.py`
 -- a differently-shaped earlier step -- was in this section too until
 it was deleted entirely per an explicit user request, then reinstated
@@ -3576,7 +3641,11 @@ later as `17_Other_Stock_Trades.py` (nested after Other Stock
 Holdings), then renamed to `17_Other_Stock_Options.py` (moved ahead of
 it), then renamed again to `17_Modified_CSPs.py` (moved once more, to
 sit right after `11_My_CSP.py`) -- three separate later requests in all
--- see its own subsection above.)
+-- see its own subsection above. `15_Planner_for_CCs.py`, the page it
+kept getting nested next to throughout, is itself a full rebuild of
+that same "Other Stock Holdings", renamed and moved from after
+`12_My_Portfolio_Trades.py` to right after `17_Modified_CSPs.py`, per a
+further separate request -- see its own subsection above too.)
 `16_Index_Options.py` gets its own single-page `"Index Options"`
 section; `7_My_Trades.py` (still "All Trades") moved into `"My
 Portfolio"` alongside Holdings/Positions, no longer sharing a section

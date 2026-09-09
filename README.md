@@ -44,14 +44,17 @@ pages/                  Streamlit multipage app (each still its own script,
                               neither "CSP" nor Portfolio-prefixed -- sidebar label "Modified CSPs", nested
                               under "Wheel Strategy" right after My Current CSPs (formerly "Other Stock
                               Trades"/"Other Stock Options", nested elsewhere)
+  15_Planner_for_CCs.py       Every stock holding with no option leg at all (Stock bucket only) -- one row per
+                              stock: Avg Price/Qty/Invested Amt/LTP/Dividend/PEG/Fundamentals/1D/5D/20D/
+                              Momentum plus a CC Strike/CC ROI column pair per near/next/far monthly expiry,
+                              row selection opens the stock in Stock Detail/Options -- sidebar label "Planner
+                              for CCs", nested under "Wheel Strategy" right after Modified CSPs (formerly
+                              "Other Stock Holdings", nested after My Portfolio Trades instead)
   12_My_Portfolio_Trades.py   Every Trade whose Trade Type starts with "Portfolio " (Portfolio CC/Strangle/Jade
                               Lizard/Twisted Sister/IC, ...) -- one row per Trade: Stock Holding's own numbers
                               plus up to 4 option legs (PE Sell/PE Buy/CE Sell/CE Buy) -- sidebar label "My
                               Portfolio Trades", nested under "Wheel Strategy" (formerly "My CC", Covered-Call
                               only)
-  15_Other_Stock_Holdings.py  Every stock/ETF holding with no option leg at all (Stock bucket only), with a
-                              per-holding covered-call entry trigger (near/next/far month) -- sidebar label
-                              "Other Stock Holdings", nested under "Wheel Strategy"
   10_Analyse_Trade.py          One Trade's legs -- correct underlying, rename trade type, merge/split
                               (hidden from the sidebar -- reached only via My Current CSPs'/My Portfolio
                               Trades' row selection)
@@ -442,7 +445,7 @@ regardless of which page triggered the refresh.
 | **Bhavcopy Refresh** (NSE + BSE) | Settings, same section | always | `render_fundamental_and_bhavcopy_refresh` |
 | **Stock Data Refresh** | every page except Settings | Data Provider = YFinance/Bhavcopy | `render_stock_refresh_button` |
 | **Stock & Option Data Refresh from Dhan** / **Stock Data Refresh from Dhan** / **Option Data Refresh from Dhan** | every page except Settings | Data Provider = Dhan | `render_stock_refresh_button` → `_render_dhan_stock_option_refresh_buttons` |
-| **Portfolio Refresh** | My Trades, My Holdings, My Positions, My CSP, Modified CSPs, My Portfolio Trades, Other Stock Holdings | Data Provider = Dhan | `render_portfolio_refresh_button` |
+| **Portfolio Refresh** | My Trades, My Holdings, My Positions, My CSP, Modified CSPs, Planner for CCs, My Portfolio Trades | Data Provider = Dhan | `render_portfolio_refresh_button` |
 | **Refresh Instrument Master - Dhan** | Settings ("Data Provider" section) | Data Provider = Dhan | `_render_dhan_instrument_master_refresh` |
 
 - **Fundamental Data Refresh** -- a fresh Yahoo Finance fundamentals
@@ -784,8 +787,9 @@ The Screener for CSP page's own CSP columns (its old flat "5% CSP"/"5%
 CC" pair was replaced with **six** columns per an explicit user
 request -- `{Month} CSP Strike`/`{Month} CSP ROI` for each of near/next/
 far, no month picker; "5% CC" was already dropped earlier once the
-"Other Stock Holdings" page's own per-holding covered-call trigger took
-over that role, and CC's cache computation is otherwise unaffected) read
+"Other Stock Holdings" (since rebuilt into "Planner for CCs") page's
+own per-holding covered-call trigger took over that role, and CC's
+cache computation is otherwise unaffected) read
 from a small precomputed cache table (`dashboard_fo_metrics`, migration
 `0011`, keyed by `(symbol, expiry_date)` -- up to 3 rows per symbol,
 near/next/far) instead of recalculating across every open option
@@ -884,9 +888,11 @@ default): **My Current CSPs** (`pages/11_My_CSP.py`, was sidebar label
 two renames and a reordering, all per separate later requests --
 originally "Other Stock Trades" nested after Other Stock Holdings, then
 "Other Stock Options" moved ahead of it, then moved again to sit right
-here) -> **My Portfolio Trades** (`pages/12_My_Portfolio_Trades.py`,
-formerly "My CC"/`pages/12_My_CC.py`, Covered-Call only) -> **Other
-Stock Holdings** (`pages/15_Other_Stock_Holdings.py`), plus
+here) -> **Planner for CCs** (`pages/15_Planner_for_CCs.py`; a full
+rebuild of the earlier "Other Stock Holdings", renamed and moved from
+after My Portfolio Trades to right here) -> **My Portfolio Trades**
+(`pages/12_My_Portfolio_Trades.py`, formerly "My CC"/`pages/12_My_CC.py`,
+Covered-Call only), plus
 the hidden **Analyse Trade**. The Screener itself (`pages/1_Dashboard.py`, sidebar
 label "Screener for CSP") also lives in this section as its
 first/default page. **My Holdings**, **My Positions**, and **My Trades**
@@ -930,7 +936,7 @@ six-column-block layout, trimmed down (see its own subsection below)
 rather than the old page's flatter Underlying/Trade Type/Legs/Total P&L
 summary table.
 
-**My Portfolio Trades**, **Other Stock Holdings**, and **Modified
+**My Portfolio Trades**, **Planner for CCs**, and **Modified
 CSPs** are all filtered views of the exact same Trade list My Trades
 computes (`portfolio_service.group_into_trades`), and together (along
 with My CSP) partition every stock-bucket Trade into exactly one of the
@@ -940,36 +946,38 @@ Strangle, Portfolio Jade Lizard, Portfolio Twisted Sister, Portfolio IC,
 or a hand-typed label using the same convention -- and drives My
 Portfolio Trades, which renders one row **per Trade** (not per leg,
 since a Trade here can carry up to 4 option legs at once -- see "My
-Portfolio Trades" below for the full column layout). **Other Stock
-Holdings** picks a different signal entirely -- not the saved
-`trade_type` string at all, but a **shape check on the Trade's actual
-current legs** (`not any(leg["leg_type"] == "Position" for leg in
-t["legs"])`, i.e. every leg is a Holding leg) -- so a stale or mislabeled
-`trade_type` can't hide a plain holding from this page or wrongly
-include one that actually has options now; see its own subsection
-below. The page shows only the **Stock** bucket's holdings -- its Index
-Holdings and Other Holdings tables were removed per an explicit user
-request; the underlying bucket split
+Portfolio Trades" below for the full column layout). **Planner for
+CCs** picks a different signal entirely -- not the saved `trade_type`
+string at all, but a **shape check on the Trade's actual current legs**
+(`not any(leg["leg_type"] == "Position" for leg in t["legs"])`, i.e.
+every leg is a Holding leg) -- so a stale or mislabeled `trade_type`
+can't hide a plain holding from this page or wrongly include one that
+actually has options now; see its own subsection below (unchanged from
+the old "Other Stock Holdings" page this was rebuilt from -- only the
+page's name, position, and everything *rendered* changed, not this
+filter). The page shows only the **Stock** bucket's holdings -- its
+Index Holdings and Other Holdings tables were removed per an earlier
+explicit user request; the underlying bucket split
 (`portfolio_service.classify_underlying_bucket`) is unaffected, just no
 longer rendered for the `index`/`other` buckets on this page. **Modified
 CSPs** picks up everything the other two don't -- neither CSP nor
 Portfolio-prefixed (`is_other_trade_type`), restricted to the Stock
-bucket the same way Other Stock Holdings is, **and additionally
+bucket the same way Planner for CCs is, **and additionally
 excluding any Trade with a Holding leg at all** (`not any(leg["leg_type"]
 == "Holding" for leg in t["legs"])`) -- a shape check layered on top of
 the `trade_type` string check, so a plain stock holding (most commonly
 auto-classified as `"Holding"`, which is itself neither CSP nor
-Portfolio-prefixed) shows up on Other Stock Holdings only, and a
+Portfolio-prefixed) shows up on Planner for CCs only, and a
 hand-typed, non-Portfolio-prefixed label on a Trade that genuinely pairs
 a holding with option legs (e.g. `"Hedged"`) no longer shows up here at
 all -- an explicit user request, since Modified CSPs is meant strictly
 for a CSP that's been rolled/adjusted into a bare spread, never one
 carrying an assigned or otherwise-held stock position. This fixes the
-one overlap Modified CSPs itself used to have with Other Stock Holdings
+one overlap Modified CSPs itself used to have with Planner for CCs
 (a holding-only Trade landing on both); a separate, older, still-open
-edge case remains between My Portfolio Trades and Other Stock Holdings
+edge case remains between My Portfolio Trades and Planner for CCs
 -- a hand-typed `"Portfolio ..."` label on a Trade with zero Position
-legs at all matches both, since Other Stock Holdings is purely
+legs at all matches both, since Planner for CCs is purely
 shape-based and My Portfolio Trades is purely string-based (see its own
 subsection below).
 
@@ -1571,7 +1579,7 @@ requests:
 
 **Any Trade with a stock holding is excluded entirely**, per an
 explicit follow-up request -- `not any(leg["leg_type"] == "Holding" for
-leg in t["legs"])`, a shape check mirroring Other Stock Holdings' own
+leg in t["legs"])`, a shape check mirroring Planner for CCs' own
 signal, layered on top of the `is_other_trade_type` string check. This
 is stricter than the page's own first version, which only required *at
 least one* option leg (`any(leg["leg_type"] == "Position" ...)`) and
@@ -1615,6 +1623,80 @@ qualifying Trade never has one anymore. `_render_modified_csps_table`/
 Portfolio Trades' own versions (only the trade filter, the dropped
 columns, and the two new ones differ), the same "duplicated business
 logic across pages" tradeoff this app already accepts elsewhere.
+
+### Planner for CCs (`pages/15_Planner_for_CCs.py`) -- formerly "Other Stock Holdings"
+
+Every stock holding with **no option leg at all** -- a Trade whose
+current legs are entirely Holding legs. Deliberately a **shape check**
+(`not any(leg["leg_type"] == "Position" for leg in t["legs"])`), not a
+`trade_type` string match -- unlike every other filtered Trades page,
+this one can't trust a saved label, since the whole point is "does this
+holding *currently* have an option overlay," and a stale/custom
+`trade_type` shouldn't be able to hide a holding here or wrongly include
+one that's actually covered now. **Stock bucket only**, same scope the
+old "Other Stock Holdings" page had (its own Index Holdings/Other
+Holdings tables were already removed by an earlier request).
+
+**A full rebuild, per an explicit user request** -- renamed from "Other
+Stock Holdings" and moved from after My Portfolio Trades to right after
+Modified CSPs, with the shape-check filter kept unchanged but everything
+about the page's own content rewritten:
+
+- **One flat table instead of one small table per holding.** The old
+  page rendered a separate Term/Expiry/Strike/.../CC Assignment ROI
+  table under each holding's own markdown line; this page instead
+  renders every qualifying holding as **one row**, columns: **Stock,
+  Avg Price, Qty, Invested Amt, LTP, Dividend, PEG, Fundamentals, 1D,
+  5D, 20D, Momentum**, then a **`{Month} CC Strike`/`{Month} CC ROI`**
+  column pair for each of the (shared) near/next/far monthly expiries
+  -- the same "flatten near/next/far into paired columns, literal month
+  names" layout the Screener for CSP page's own CSP columns already
+  established, applied here for the first time to a covered-call figure.
+- **Dividend/PEG/Fundamentals/Momentum, new columns** -- sourced the
+  same way the Screener shows them: pre-classified
+  `criterion_a`/`criterion_b`/`criterion_c` and
+  `ttm_dividend_yield`/`peg_ratio`, read directly from
+  `daily_screener_snapshots` (a new repo function,
+  `snapshot_repo.get_latest_fundamentals_and_returns`, queried the same
+  way `get_latest_prices`/`get_latest_returns_and_pe` already bypass
+  `latest_screener_view`'s inner join so a portfolio-only, non-Nifty50
+  stock isn't silently dropped), **not** recomputed. Momentum in
+  particular is the **stored** `criterion_b` flag here, unlike every
+  other portfolio page (My CSP, My Portfolio Trades, Modified CSPs),
+  which all recompute `criterion_b(return_1d, return_5d, return_20d)`
+  fresh -- an explicit request that this column specifically match the
+  Screener, not the sibling portfolio pages' own convention.
+- **A new, separate covered-call target formula,**
+  `fo_service.planner_cc_for_holding` -- **not** a change to
+  `covered_call_for_holding` (unchanged, still live on the Options
+  page's own "Portfolio CC" section, and still what the old "Other
+  Stock Holdings" page used) but a sibling function with the **opposite**
+  condition/base pairing, per an explicit instruction for this page
+  specifically: if LTP is **above** avg buy price (a profit), the
+  strike targeted is **3% above LTP**; otherwise (a loss, or exactly at
+  breakeven), it's **5% above avg buy price** -- `covered_call_for_holding`
+  targets loss->3%-above-avg-price and profit/breakeven->5%-above-LTP,
+  the reverse mapping. Two deliberately different planning tools, not a
+  correction of one by the other. Strike selection (nearest listed
+  strike either side, freshest-`trade_date`-preferred) and the CC
+  ROI/Assignment ROI formulas are otherwise identical to
+  `covered_call_for_holding`'s own -- only CC Strike and CC ROI are
+  actually rendered as columns here; Assignment ROI is computed and
+  available but not shown, since it wasn't part of the requested column
+  list.
+- **Row selection replaces the per-holding markdown/table layout
+  entirely** -- selecting a row shows the same **"Open in Stock
+  Detail"**/**"Open in Options"** button pair the Screener for CSP
+  page's own table uses (`st.session_state["selected_symbol"]`/
+  `["fo_symbol"]`, `st.switch_page` to `2_Stock_Detail.py`/
+  `5_Options.py`), rather than a manual per-row button or a link.
+
+Confirmed live against a real account's three plain holdings (HDFCBANK,
+ONGC, COALINDIA) before shipping -- e.g. ONGC (avg ₹234.07, LTP ₹236.06,
+a profit) correctly targeted 3% above LTP (₹243.14, nearest listed
+strike ₹242.50 for the near expiry), while HDFCBANK (avg ₹831.89, LTP
+₹694.55, a loss) correctly targeted 5% above avg price (₹873.48,
+nearest listed strike ₹880).
 
 ### My Portfolio Trades (`pages/12_My_Portfolio_Trades.py`) -- formerly "My CC"
 
@@ -1700,37 +1782,6 @@ alone. Also confirmed live: a real two-leg naked Strangle got
 `hedgeBenefit: 0.0` -- don't expect Dhan to apply a margin discount to
 every multi-leg trade shown here, only genuinely offsetting structures
 (untested).
-
-### Other Stock Holdings (`pages/15_Other_Stock_Holdings.py`)
-
-Added alongside the "Wheel Strategy" restructure: every stock/ETF
-holding with **no option leg at all** -- a Trade whose current legs are
-entirely Holding legs. Deliberately a **shape check**
-(`not any(leg["leg_type"] == "Position" for leg in t["legs"])`), not a
-`trade_type` string match -- unlike every other filtered Trades page,
-this one can't trust a saved label, since the whole point is "does this
-holding *currently* have an option overlay," and a stale/custom
-`trade_type` shouldn't be able to hide a holding here or wrongly include
-one that's actually covered now.
-
-**Stock bucket only** -- shows one table, "Stock Holdings". It
-originally also showed "Index Holdings" and "Other Holdings" tables (the
-same shape check's `index`/`other` buckets), removed entirely per an
-explicit user request; the underlying bucket classification is
-unaffected, just no longer rendered for those two buckets here.
-
-For each qualifying holding, a covered-call entry trigger broken out by
-near/next/far monthly expiry -- **exactly** `fo_service
-.covered_call_for_holding`, the same per-holding formula already live on
-the Options page's own "Portfolio CC" section (see below): if avg buy
-price is above the last traded price, the strike targeted is ~3% above
-avg buy price; otherwise it's ~5% above the last traded price, picking
-whichever listed strike is nearest that target. Confirmed with the user
-to reuse this unchanged rather than invent a new formula -- this page
-just gathers it for every qualifying holding across the whole portfolio
-at once, instead of requiring a per-symbol visit to Options. Columns:
-Term / Expiry / Strike / Premium / Trade Date / Invested Amount / CC
-ROI / CC Assignment ROI -- identical to the Options page's own table.
 
 ### Index Options (`pages/16_Index_Options.py`)
 
