@@ -3396,24 +3396,31 @@ requiring a per-symbol visit to Options.
 
 **Other Stock Trades (`pages/17_Other_Stock_Trades.py`)** — new page,
 added as the next step after Other Stock Holdings in the "Wheel
-Strategy" journey. Every **Stock**-bucket Trade whose `trade_type` is
-`is_other_trade_type` -- neither CSP nor Portfolio-prefixed
-(`t["bucket"] == "stock"` filters an `other_trades =
-[t for t in trades if portfolio_service.is_other_trade_type(t["trade_type"])]`
-list down further, mirroring exactly how `12_My_Portfolio_Trades.py`
-filters `portfolio_trades` down to its own `stock_trades`).
+Strategy" journey. Every **Stock**-bucket Trade **with at least one
+option leg** whose `trade_type` is `is_other_trade_type` -- neither CSP
+nor Portfolio-prefixed:
+```python
+other_trades = [t for t in trades if portfolio_service.is_other_trade_type(t["trade_type"])]
+other_trades = [t for t in other_trades if any(leg["leg_type"] == "Position" for leg in t["legs"])]
+stock_trades = [t for t in other_trades if t["bucket"] == "stock"]
+```
+the bucket filter mirroring exactly how `12_My_Portfolio_Trades.py`
+filters `portfolio_trades` down to its own `stock_trades`; the
+option-leg filter (see below) was added in a follow-up request, after
+the page first shipped without it.
 
 **A redesign of the deleted `13_My_Other_Trades.py`, not a straight
 revival** -- confirmed with the user this was the intent (matching My
-Portfolio Trades' own format was the explicit ask), so two things
-changed on top of reusing the same `is_other_trade_type` predicate
-unchanged:
+Portfolio Trades' own format was the explicit ask), so three things
+differ from reusing the same `is_other_trade_type` predicate unchanged:
 - **Scope narrowed to Stock bucket only.** The old page covered Stock
   *and* Other buckets (Index had already been excluded before its
   deletion, once Index Options shipped). This page only ever computes
   `t["bucket"] == "stock"`, matching Other Stock Holdings' own bucket
   restriction -- an Other-bucket or Index-bucket Trade of this same
   shape stays visible only via the unfiltered My Trades page.
+- **Plain holdings excluded** (see below) -- the old page had no such
+  exclusion.
 - **Rendering rebuilt to My Portfolio Trades' six-column-block layout**,
   not the old page's flatter `Underlying Instrument`/`Trade
   Type`/`Legs`/`Total P&L` summary table. `_render_other_trades_table`/
@@ -3430,20 +3437,30 @@ unchanged:
   separate "select a row to see the full leg list" affordance the way a
   flat summary table did.
 
-**Most Trades landing here have no Holding leg at all** -- that's
-precisely what would have earned them the "Portfolio " prefix instead,
-sending them to My Portfolio Trades. The one exception: a Trade
-auto-classified (or hand-typed) as plain `"Holding"` -- no option legs
-at all -- *does* carry one, and its Stock Holding block populates
-exactly like a real Portfolio trade's would. That same Trade also
-appears on Other Stock Holdings, since the two pages use genuinely
-different signals (a `trade_type` string check here vs. a leg-shape
-check there) that happen to agree on a holding-only Trade -- confirmed
-live against a real account (HDFCBANK/ONGC/COALINDIA, each a plain
-`"Holding"`-typed Trade with a single Holding leg and no Position legs,
-correctly appear on both pages) -- not a bug, and not a new overlap
-either: the old `13_My_Other_Trades.py` had the identical overlap with
-whatever covered plain holdings at the time.
+**Plain holdings excluded, added in a follow-up request right after the
+page first shipped**: `any(leg["leg_type"] == "Position" for leg in
+t["legs"])`, a shape check layered on top of `is_other_trade_type` --
+mirroring Other Stock Holdings' own signal, not a `trade_type` match.
+The page originally shipped without this filter, and a Trade
+auto-classified (or hand-typed) as plain `"Holding"` (no option legs at
+all -- itself neither CSP nor Portfolio-prefixed) showed up on **both**
+this page and Other Stock Holdings, confirmed live against a real
+account (HDFCBANK/ONGC/COALINDIA, each a plain `"Holding"`-typed Trade
+with a single Holding leg and no Position legs). The shape check
+confines a holding-only Trade to Other Stock Holdings only, re-verified
+live afterward (same three symbols dropped out of Other Stock Trades'
+own result set, a genuine options trade like CIPLA's bare Jade Lizard
+unaffected). Most Trades that still land here have no Holding leg at
+all either (that's what would have earned them the "Portfolio " prefix
+instead, sending them to My Portfolio Trades) -- the exception is a
+hand-typed, non-Portfolio-prefixed label on a Trade that genuinely pairs
+a holding with option legs (e.g. `"Hedged"`, seen on a real account),
+which still passes the option-leg check and shows its own Stock Holding
+numbers here. A mislabeled edge case can still overlap with Other Stock
+Holdings' own shape check regardless -- e.g. a hand-typed `"Portfolio
+..."` or `"CSP"` label on a Trade with zero Position legs -- the same
+known, accepted limit of mixing a string-based signal with a
+shape-based one this section already documents for that page.
 
 **Index Options (`pages/16_Index_Options.py`)** — new page, its own
 top-level `st.navigation` section (not nested under "Wheel Strategy") --

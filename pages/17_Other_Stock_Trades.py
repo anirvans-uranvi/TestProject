@@ -1,32 +1,43 @@
-"""Other Stock Trades -- every stock-bucket Trade whose Trade Type is
-**neither "CSP" nor "Portfolio "-prefixed** (`portfolio_service.is_other_trade_type`):
-the untouched default "Trade" label, a bare Strangle/Jade Lizard/Twisted
-Sister/IC with no stock holding, or any other free-text Trade Type.
-New page, added per an explicit user request as the next step after
-Other Stock Holdings in the "Wheel Strategy" journey: Screener for CSP
--> My Current CSPs -> My Portfolio Trades (holdings *with* option legs,
-Portfolio-prefixed) -> Other Stock Holdings (holdings with none) ->
-**this page** (everything else, stock-bucket only).
+"""Other Stock Trades -- every stock-bucket Trade with **at least one
+option leg** whose Trade Type is **neither "CSP" nor
+"Portfolio "-prefixed** (`portfolio_service.is_other_trade_type`): a
+bare Strangle/Jade Lizard/Twisted Sister/IC with no stock holding, a
+custom label on a mixed holding+options Trade, or the default "Trade"
+label on a naked option position. New page, added per an explicit user
+request as the next step after Other Stock Holdings in the "Wheel
+Strategy" journey: Screener for CSP -> My Current CSPs -> My Portfolio
+Trades (holdings *with* option legs, Portfolio-prefixed) -> Other Stock
+Holdings (holdings with none) -> **this page** (everything else with an
+option leg, stock-bucket only).
+
+**Plain holdings are excluded**, per an explicit follow-up request --
+`any(leg["leg_type"] == "Position" for leg in t["legs"])`, a shape
+check mirroring Other Stock Holdings' own signal, not a `trade_type`
+match (the auto-classified default "Holding" label is itself neither
+CSP nor Portfolio-prefixed, and would otherwise land here too). This
+page and Other Stock Holdings now partition stock-bucket Trades
+cleanly instead of a holding-only Trade showing on both.
 
 There used to be a page just like this one, `pages/13_My_Other_Trades.py`
 ("Other Trades") -- a flat per-trade summary table (Underlying/Trade
 Type/Legs/Total P&L) covering Stock *and* Other buckets, with a
-row-select -> Analyse Trade flow. It was deleted entirely per an earlier,
-separate user request, along with `portfolio_service.is_other_trade_type`
-(the exact predicate this page reuses, restored here unchanged). This
-page is a deliberate redesign, not a revival of the old one: **stock
-bucket only** (Index/Other trades stay visible only via the unfiltered
-"All Trades" page under My Portfolio, matching Other Stock Holdings'
-own scope decision), and built to the same **six-column-block** layout
-My Portfolio Trades uses (Trade Details incl. Margin Required / Stock
-Holding / PE Sell / PE Buy / CE Sell / CE Buy), rather than the old
-page's flatter summary table -- an explicit user request to match that
-page's format. `_render_other_trades_table`/`_LEG_SLOTS`/`_slot_legs`/
-`_fmt_ltp` below are a page-local duplicate of My Portfolio Trades' own
-versions (same "duplicated business logic across pages" tradeoff this
-app already accepts elsewhere, e.g. Other Stock Holdings' covered-call
-table vs. Options' Portfolio CC section) -- only the trade filter
-differs.
+row-select -> Analyse Trade flow, and no exclusion for plain holdings.
+It was deleted entirely per an earlier, separate user request, along
+with `portfolio_service.is_other_trade_type` (the exact predicate this
+page reuses, restored here unchanged). This page is a deliberate
+redesign, not a revival of the old one: **stock bucket only** (Index/
+Other trades stay visible only via the unfiltered "All Trades" page
+under My Portfolio, matching Other Stock Holdings' own scope decision),
+**plain holdings excluded** (see above -- the old page didn't do this),
+and built to the same **six-column-block** layout My Portfolio Trades
+uses (Trade Details incl. Margin Required / Stock Holding / PE Sell /
+PE Buy / CE Sell / CE Buy), rather than the old page's flatter summary
+table -- an explicit user request to match that page's format.
+`_render_other_trades_table`/`_LEG_SLOTS`/`_slot_legs`/`_fmt_ltp` below
+are a page-local duplicate of My Portfolio Trades' own versions (same
+"duplicated business logic across pages" tradeoff this app already
+accepts elsewhere, e.g. Other Stock Holdings' covered-call table vs.
+Options' Portfolio CC section) -- only the trade filter differs.
 
 **Margin Required** is the same live, Dhan-only figure My Portfolio
 Trades shows: `DhanProvider.get_margin_for_legs` against the trade's own
@@ -77,15 +88,16 @@ render_disclaimer()
 render_stock_refresh_button(client, user_id, user_settings.data_provider)
 render_portfolio_refresh_button(client, user_id, user_settings.data_provider)
 st.caption(
-    'Every stock Trade whose Trade Type is neither "CSP" nor starts with "Portfolio " -- the untouched default '
-    '"Trade" label, a bare Strangle/Jade Lizard/Twisted Sister/IC with no stock holding, or any other custom '
-    "label. Index and Other-bucket trades aren't shown here -- see the unfiltered \"All Trades\" page under My "
-    "Portfolio for those. Go to My Trades, select a trade, click \"Analyse Trade\", and rename its Trade Type to "
-    "\"CSP\" or to start with \"Portfolio \" to move it off this page instead. Same six-column layout as My "
-    "Portfolio Trades: the holding's own numbers (blank if this trade has none) alongside up to 4 option legs "
-    '(PE Sell/PE Buy/CE Sell/CE Buy) -- blank where a trade has no leg of that shape. "Margin Required" is '
-    "Dhan's own combined margin-calculator figure for the trade's option legs (Data Provider = Dhan only; "
-    '"N/A" otherwise).'
+    'Every stock Trade with at least one option leg whose Trade Type is neither "CSP" nor starts with '
+    '"Portfolio " -- a bare Strangle/Jade Lizard/Twisted Sister/IC with no stock holding, a custom label on a '
+    "mixed holding+options Trade, or the default \"Trade\" label on a naked option position. Plain holdings "
+    "(no option leg at all) aren't shown here -- see Other Stock Holdings for those. Index and Other-bucket "
+    "trades aren't shown here either -- see the unfiltered \"All Trades\" page under My Portfolio. Go to My "
+    "Trades, select a trade, click \"Analyse Trade\", and rename its Trade Type to \"CSP\" or to start with "
+    "\"Portfolio \" to move it off this page instead. Same six-column layout as My Portfolio Trades: the "
+    "holding's own numbers (blank if this trade has none) alongside up to 4 option legs (PE Sell/PE Buy/CE "
+    'Sell/CE Buy) -- blank where a trade has no leg of that shape. "Margin Required" is Dhan\'s own combined '
+    'margin-calculator figure for the trade\'s option legs (Data Provider = Dhan only; "N/A" otherwise).'
 )
 
 ensure_cache_bust()
@@ -350,6 +362,16 @@ def _render_other_trades_tab(
     }
     trades = portfolio_service.group_into_trades(legs, overrides_by_leg, trade_meta_by_id, company_type_by_symbol)
     other_trades = [t for t in trades if portfolio_service.is_other_trade_type(t["trade_type"])]
+
+    # Exclude plain holdings (no option leg at all), per an explicit user
+    # request -- those belong on Other Stock Holdings instead, regardless
+    # of what trade_type string they happen to carry (most commonly the
+    # auto-classified default "Holding", which is itself neither CSP nor
+    # Portfolio-prefixed and would otherwise land here too). A shape
+    # check, not a trade_type match, deliberately mirroring Other Stock
+    # Holdings' own signal -- so this page and that one now partition
+    # cleanly instead of overlapping on a holding-only Trade.
+    other_trades = [t for t in other_trades if any(leg["leg_type"] == "Position" for leg in t["legs"])]
 
     # Stock bucket only, per an explicit user request -- an index or
     # ETF/other-underlying Trade of this shape is still visible only via
