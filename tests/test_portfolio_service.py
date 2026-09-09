@@ -370,6 +370,78 @@ class TestCspCashRoi:
         assert portfolio_service.csp_cash_roi(5000.0, 0.0) is None
 
 
+class TestModifiedCspCashNeeded:
+    def test_naked_pe_sell_no_pe_buy_at_all(self):
+        pe_sell = [{"strike_price": 1400.0, "qty": -425.0}]
+        assert portfolio_service.modified_csp_cash_needed(pe_sell, []) == 1400.0 * 425.0
+
+    def test_pe_sell_covered_by_any_pe_buy_is_zero(self):
+        # A bare existence check -- doesn't matter that this PE Buy's own
+        # strike has nothing to do with the PE Sell's.
+        pe_sell = [{"strike_price": 1400.0, "qty": -425.0}]
+        pe_buy = [{"strike_price": 1300.0, "qty": 425.0}]
+        assert portfolio_service.modified_csp_cash_needed(pe_sell, pe_buy) == 0.0
+
+    def test_no_pe_sell_at_all_is_zero(self):
+        assert portfolio_service.modified_csp_cash_needed([], []) == 0.0
+
+    def test_no_pe_sell_but_a_pe_buy_is_still_zero(self):
+        pe_buy = [{"strike_price": 1300.0, "qty": 425.0}]
+        assert portfolio_service.modified_csp_cash_needed([], pe_buy) == 0.0
+
+    def test_multiple_naked_pe_sell_legs_are_summed(self):
+        pe_sell = [
+            {"strike_price": 1400.0, "qty": -425.0},
+            {"strike_price": 1350.0, "qty": -100.0},
+        ]
+        assert portfolio_service.modified_csp_cash_needed(pe_sell, []) == 1400.0 * 425.0 + 1350.0 * 100.0
+
+    def test_never_returns_none(self):
+        assert portfolio_service.modified_csp_cash_needed([], []) is not None
+
+
+class TestNetOptionCredit:
+    def test_single_short_leg_is_a_positive_credit(self):
+        legs = [{"qty": -425.0, "avg_price": 16.0}]
+        assert portfolio_service.net_option_credit(legs) == 425.0 * 16.0
+
+    def test_single_long_leg_is_a_negative_debit(self):
+        legs = [{"qty": 425.0, "avg_price": 9.5}]
+        assert portfolio_service.net_option_credit(legs) == -425.0 * 9.5
+
+    def test_jade_lizard_nets_two_credits_minus_one_debit(self):
+        # Short PE + short CE + long CE (further OTM) -- a real Jade
+        # Lizard shape confirmed live this session (CIPLA).
+        legs = [
+            {"qty": -425.0, "avg_price": 16.0},  # PE sell
+            {"qty": -425.0, "avg_price": 12.4},  # CE sell
+            {"qty": 425.0, "avg_price": 9.5},  # CE buy
+        ]
+        expected = 425.0 * 16.0 + 425.0 * 12.4 - 425.0 * 9.5
+        assert portfolio_service.net_option_credit(legs) == expected
+
+    def test_net_debit_when_the_long_leg_costs_more(self):
+        legs = [
+            {"qty": -100.0, "avg_price": 5.0},
+            {"qty": 100.0, "avg_price": 20.0},
+        ]
+        assert portfolio_service.net_option_credit(legs) == -1500.0
+
+    def test_empty_legs_is_none(self):
+        assert portfolio_service.net_option_credit([]) is None
+
+    def test_leg_with_no_avg_price_is_skipped_not_fatal(self):
+        legs = [
+            {"qty": -425.0, "avg_price": 16.0},
+            {"qty": -100.0, "avg_price": None},
+        ]
+        assert portfolio_service.net_option_credit(legs) == 425.0 * 16.0
+
+    def test_all_legs_unpriced_is_none(self):
+        legs = [{"qty": -425.0, "avg_price": None}]
+        assert portfolio_service.net_option_credit(legs) is None
+
+
 class TestCspTargetPnl:
     def test_before_cap_uses_the_accelerated_linear_target(self):
         # 50% of the way through -- accelerated target (1.2x pace) is

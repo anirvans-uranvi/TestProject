@@ -11,14 +11,16 @@ import streamlit as st
 # The dict form groups pages under a labeled section header in the
 # sidebar (Streamlit's only native notion of a "sub-page"). Restructured
 # per an explicit user request into a guided "Wheel Strategy" journey --
-# screen for a CSP candidate -> track running CSPs -> see stocks that
-# have been assigned into holdings with option overlays -> see every
-# other stock-options trade (Other Stock Options) -> see plain holdings
-# with a covered-call trigger -- with "Index Options" (strangle ideas on
-# the 4 major indices) as its own section alongside it. (Other Stock
-# Options was originally named "Other Stock Trades" and placed after
-# Other Stock Holdings instead -- renamed and moved ahead of it per an
-# explicit later request.) "Market" (raw
+# screen for a CSP candidate -> track running CSPs -> see a CSP that's
+# been rolled/adjusted into a bare multi-leg spread (Modified CSPs) ->
+# see stocks that have been assigned into holdings with option overlays
+# -> see plain holdings with a covered-call trigger -- with "Index
+# Options" (strangle ideas on the 4 major indices) as its own section
+# alongside it. (Modified CSPs went through two renames and a
+# reordering, all per separate explicit requests: "Other Stock Trades"
+# nested after Other Stock Holdings -> "Other Stock Options" moved ahead
+# of it -> "Modified CSPs" moved again, to right after My Current CSPs;
+# see that page's own docstring.) "Market" (raw
 # Equity/Options lookup, kept as its
 # own section per the user's explicit choice) and "My Portfolio"
 # (Holdings/Positions/All Trades) and "Trade History" round out the
@@ -31,8 +33,8 @@ pages = {
     "Wheel Strategy": [
         st.Page("pages/1_Dashboard.py", title="Screener for CSP", default=True),
         st.Page("pages/11_My_CSP.py", title="My Current CSPs"),
+        st.Page("pages/17_Modified_CSPs.py", title="Modified CSPs"),
         st.Page("pages/12_My_Portfolio_Trades.py", title="My Portfolio Trades"),
-        st.Page("pages/17_Other_Stock_Options.py", title="Other Stock Options"),
         st.Page("pages/15_Other_Stock_Holdings.py", title="Other Stock Holdings"),
         st.Page("pages/10_Analyse_Trade.py", title="Analyse Trade", visibility="hidden"),
     ],

@@ -1,7 +1,7 @@
 """Broker API response translation and valuation for the Portfolio
 feature's pages (7_My_Trades.py, 8_My_Holdings.py, 9_My_Positions.py,
 10_Analyse_Trade.py, 11_My_CSP.py, 12_My_Portfolio_Trades.py,
-15_Other_Stock_Holdings.py, 17_Other_Stock_Options.py, 14_Trade_History.py,
+17_Modified_CSPs.py, 15_Other_Stock_Holdings.py, 14_Trade_History.py,
 5_Options.py) -- holdings/positions come from a live
 Dhan sync (Settings' "Data Provider" section,
 src/utils/data_provider_settings.py) only; CSV upload was dropped
@@ -574,8 +574,8 @@ def is_portfolio_trade_type(trade_type: str) -> bool:
 
 def is_other_trade_type(trade_type: str) -> bool:
     """Whether a Trade's `trade_type` is neither CSP nor a Portfolio-
-    prefixed type -- the signal `pages/17_Other_Stock_Options.py` filters
-    on: every Trade that isn't already broken out onto My CSP or My
+    prefixed type -- the signal `pages/17_Modified_CSPs.py` filters on:
+    every Trade that isn't already broken out onto My CSP or My
     Portfolio Trades, regardless of whether it's a real options strategy
     (a bare Strangle/Jade Lizard/Twisted Sister/IC with no holding, a
     custom label, ...) or just the default "Trade". Checks
@@ -586,9 +586,12 @@ def is_other_trade_type(trade_type: str) -> bool:
     they'd double up on both pages. (This function, and the page that
     used it, were deleted once already per an explicit user request, then
     both reinstated -- under a new page name and a narrower, stock-only
-    scope -- per a later, separate request; that page was then itself
-    renamed "Other Stock Options" and moved ahead of Other Stock Holdings
-    in the nav, per a further request; see that page's own docstring.)"""
+    scope -- per a later, separate request. That page was then renamed
+    and reordered twice more, per further separate requests: "Other
+    Stock Options" moved ahead of Other Stock Holdings, then "Modified
+    CSPs" moved again to sit right after My CSP, additionally excluding
+    any Trade with a stock holding at all -- see that page's own
+    docstring.)"""
     return not is_csp_trade_type(trade_type) and not is_portfolio_trade_type(trade_type)
 
 
@@ -736,6 +739,47 @@ def csp_cash_roi(pnl: float | None, cash_needed: float | None) -> float | None:
     if pnl is None or cash_needed is None or cash_needed == 0:
         return None
     return pnl / cash_needed * 100
+
+
+def modified_csp_cash_needed(pe_sell_legs: list[dict], pe_buy_legs: list[dict]) -> float:
+    """Modified CSPs' "Cash Needed" column -- the cash a cash-secured-put
+    seller would need to set aside, but only for a **naked** short put:
+    if this trade has at least one PE Sell leg and **no** PE Buy leg at
+    all (nothing capping the downside), sums `csp_cash_needed(strike_price,
+    qty)` (`strike_price * abs(qty)`) across every PE Sell leg -- summed
+    rather than just the first, in case a trade has more than one PE Sell
+    at different strikes (rare, but the same "more than one leg in a
+    slot" case `_render_modified_csps_table`'s own `⚠️` caption already
+    flags). The instant a PE Buy leg is present at all (a put credit
+    spread, e.g. Twisted Sister or Iron Condor's put side, not just a
+    strike-matched vertical), the short put is "covered" for this
+    purpose and the whole trade's Cash Needed is `0.0` -- a bare
+    existence check on the PE Buy leg, not a strike-relationship one.
+    No PE Sell leg at all (e.g. a Jade Lizard has none on the put side)
+    is also `0.0`. Always a plain `float`, never `None` -- there's
+    nothing to set aside is a legitimate `0.0`, not a missing value."""
+    if not pe_sell_legs or pe_buy_legs:
+        return 0.0
+    return sum((csp_cash_needed(leg["strike_price"], leg["qty"]) or 0.0) for leg in pe_sell_legs)
+
+
+def net_option_credit(position_legs: list[dict]) -> float | None:
+    """Modified CSPs' "Credit" column -- the net premium for the whole
+    multi-leg trade: every short leg's premium adds to the total credit,
+    every long leg's premium subtracts from it (`-qty * avg_price`,
+    summed across every Position leg -- `qty` is signed, negative for a
+    short/sell leg, positive for a long/buy leg, this app's convention,
+    so this single expression handles both sides without an explicit
+    if/else per leg). A positive result is a net credit received; a
+    negative one is a net debit paid (e.g. a Jade Lizard whose long CE
+    wing costs more than the two short legs collected, though that's not
+    the common case). `None` (-> N/A) only when not one single leg has
+    both a `qty` and an `avg_price` to work with -- an empty `position_legs`
+    list, or every leg still unpriced."""
+    priced = [leg for leg in position_legs if leg.get("qty") is not None and leg.get("avg_price") is not None]
+    if not priced:
+        return None
+    return sum(-leg["qty"] * leg["avg_price"] for leg in priced)
 
 
 def csp_target_pnl(
