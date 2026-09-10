@@ -496,6 +496,16 @@ def apply_fallback_option_ltp(
     return filled
 
 
+def default_underlying_label(legs: list[dict]) -> str:
+    """The auto-computed "Underlying Instrument" for a set of legs --
+    sorted, `" + "`-joined distinct `symbol` (falling back to `raw_name`
+    for a still-unresolved leg). This is what `group_into_trades` uses
+    for a trade with no `underlying_label` override, and what Analyse
+    Trade's "split into a new trade" action names the new trade's
+    underlying after the legs being split out."""
+    return " + ".join(sorted({leg["symbol"] or leg["raw_name"] for leg in legs}))
+
+
 def assign_trade_ids(positions: list[dict], overrides: dict[tuple[str, str], str]) -> list[dict]:
     """Adds a `trade_id` to each leg -- the manual "Trade" grouping shown
     on My Trades / Analyse Trade (pages/7_My_Trades.py,
@@ -926,7 +936,7 @@ def group_into_trades(
         else:
             buckets = {classify_underlying_bucket(leg["symbol"], company_type_by_symbol) for leg in trade_legs}
             bucket = next(iter(buckets)) if len(buckets) == 1 else "other"
-        default_label = " + ".join(sorted({leg["symbol"] or leg["raw_name"] for leg in trade_legs}))
+        default_label = default_underlying_label(trade_legs)
         underlying_label = (meta.get("underlying_label") if meta else None) or default_label
         trade_type = (meta.get("trade_type") if meta else None) or "Trade"
         detected_type = classify_trade_type(trade_legs)

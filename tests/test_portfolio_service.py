@@ -179,6 +179,35 @@ class TestAssignTradeIds:
         assert dhan_leg["trade_id"] == "X"
 
 
+class TestDefaultUnderlyingLabel:
+    def test_single_symbol(self):
+        legs = [{"symbol": "RELIANCE", "raw_name": "RELIANCE 25AUG3000CE"}]
+        assert portfolio_service.default_underlying_label(legs) == "RELIANCE"
+
+    def test_distinct_symbols_sorted_and_joined(self):
+        legs = [
+            {"symbol": "NIFTY", "raw_name": "NIFTY LEG"},
+            {"symbol": "BANKNIFTY", "raw_name": "BANKNIFTY LEG"},
+            {"symbol": "NIFTY", "raw_name": "NIFTY LEG 2"},
+        ]
+        assert portfolio_service.default_underlying_label(legs) == "BANKNIFTY + NIFTY"
+
+    def test_falls_back_to_raw_name_when_symbol_unresolved(self):
+        legs = [{"symbol": None, "raw_name": "WEIRD FORMAT 123"}]
+        assert portfolio_service.default_underlying_label(legs) == "WEIRD FORMAT 123"
+
+    def test_matches_group_into_trades_default_label(self):
+        # The split-a-new-trade action in Analyse Trade names the new
+        # trade's underlying with this helper; it must agree with what
+        # group_into_trades would then compute for that same set of legs.
+        legs = [
+            {"raw_name": "BANKNIFTY PE", "broker": "OtherBroker", "symbol": "BANKNIFTY", "leg_type": "Position", "pnl": None, "option_type": OptionType.PE, "qty": -15},
+            {"raw_name": "BANKNIFTY CE", "broker": "OtherBroker", "symbol": "BANKNIFTY", "leg_type": "Position", "pnl": None, "option_type": OptionType.CE, "qty": -15},
+        ]
+        trades = portfolio_service.group_into_trades(legs, overrides={}, trade_meta={}, company_type_by_symbol={})
+        assert portfolio_service.default_underlying_label(legs) == trades[0]["default_underlying_label"]
+
+
 class TestClassifyUnderlyingBucket:
     def test_none_symbol_is_other(self):
         assert portfolio_service.classify_underlying_bucket(None, {}) == "other"

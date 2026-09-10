@@ -1385,14 +1385,31 @@ appears as its own sidebar link). There you can:
   My CSP below for what it's used for and the "defaults to today on
   sync" behavior.
 - **Merge** other Trades into this one (multiselect of this portfolio's
-  other Trade IDs), or **split** selected legs out of this Trade -- either
-  back to their own default per-underlying Trade, or into a brand-new
-  named Trade ID. Both actions reassign the affected legs'
-  `(broker, raw_name) -> trade_id` mapping via
-  `portfolio_repo.set_trade_group`/`clear_trade_group_overrides`, the
-  same `portfolio_trade_groups` mechanism (migration `0020`) this app
-  already used for F&O-only Trade grouping before My Trades existed --
-  now applied uniformly to holdings and positions alike.
+  other Trade IDs), or **split** selected legs out of this Trade into a
+  brand-new Trade. The split always mints a fresh opaque `trade_id`
+  (`split-<12 hex>`) -- it never just "clears the override back to the
+  per-underlying default", because for a multi-leg Trade whose id already
+  *is* the underlying symbol (a `BANKNIFTY` Iron Condor, say) that would
+  drop the legs straight back into the same Trade. The new Trade is named
+  the same way a freshly-synced one is: its **Trade Type** is
+  auto-detected from the picked legs' shape via
+  `portfolio_service.classify_trade_type` (shown pre-filled in a text box
+  you can edit -- it's a real `st.form`, so you just type and click, no
+  Enter needed), and its **Underlying Instrument** is auto-computed from
+  their symbols via `portfolio_service.default_underlying_label`. The
+  split writes both a `portfolio_trade_groups` row per leg
+  (`portfolio_repo.set_trade_group`) *and* a `portfolio_trade_meta` row
+  for the new id (`portfolio_repo.set_trade_meta`) so the Trade Type
+  actually shows on My Trades instead of the bare default "Trade".
+  Selecting *every* leg is blocked (nothing to split *out* -- rename in
+  place with the edit form above instead). Merge reassigns the affected
+  legs' `(broker, raw_name) -> trade_id` mapping via
+  `portfolio_repo.set_trade_group`, the same `portfolio_trade_groups`
+  mechanism (migration `0020`) this app already used for F&O-only Trade
+  grouping before My Trades existed -- now applied uniformly to holdings
+  and positions alike. (`portfolio_repo.clear_trade_group_overrides` --
+  the old "split back to default grouping" primitive -- still exists and
+  is tested, but no page wires it up anymore.)
 
 Both `portfolio_trade_groups` and `portfolio_trade_meta` are keyed by
 natural identity (a leg's own `(portfolio_name, broker, raw_name)`, or a

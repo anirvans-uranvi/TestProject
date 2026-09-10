@@ -2738,15 +2738,36 @@ edit form only calls `set_trade_meta` with a non-`None` label when the
 edited text differs from `trade["default_underlying_label"]` -- leaving
 the field unchanged doesn't create an unnecessary override row.
 
-**Merge and split, generalized to holdings + positions.** Analyse Trade
-reuses the exact same `portfolio_repo.set_trade_group`/
-`clear_trade_group_overrides` calls the old Trades feature already had
--- "Merge into this trade" (a multiselect of the portfolio's *other*
-`trade_id`s) collects every leg across the selected source trades and
-reassigns them all to the current trade's id; "Split" (multi-row-select
-over *this* trade's own legs table) either clears their override (back
-to the default per-underlying grouping) or assigns them a fresh
-`trade_id`. Same keying rationale as before: `(portfolio_name, broker,
+**Merge and split, generalized to holdings + positions.** "Merge into
+this trade" (a multiselect of the portfolio's *other* `trade_id`s)
+collects every leg across the selected source trades and reassigns them
+all to the current trade's id via `portfolio_repo.set_trade_group`.
+
+"Split" (multi-row-select over *this* trade's own legs table) always
+moves the picked legs to a **brand-new** trade with a freshly-minted
+opaque id (`split-<uuid4().hex[:12]>`). It deliberately does *not* offer
+"clear the override back to the per-underlying default" anymore: a
+multi-leg trade whose `trade_id` already equals its underlying symbol
+(e.g. a `BANKNIFTY` Iron Condor grouped under `trade_id == "BANKNIFTY"`)
+would see the "cleared" legs immediately regroup into that same trade,
+so the split visibly did nothing (a real bug the user hit). The new
+trade is named exactly the way a freshly-synced trade is:
+`portfolio_service.classify_trade_type(selected_legs)` fills a text box
+(inside a real `st.form`, so typing + clicking submits in one go -- no
+Enter keypress needed to "commit" the field first, which was another bug
+the user hit), and `portfolio_service.default_underlying_label(
+selected_legs)` (a small helper factored out of `group_into_trades`'s
+own `default_label` line) supplies the Underlying Instrument. The split
+writes both a `portfolio_trade_groups` row per leg *and* a
+`portfolio_trade_meta` row for the new id (`trade_type` = the box's
+value), so My Trades shows that Trade Type rather than the bare default
+"Trade" (the third bug). Selecting every leg is blocked outright --
+there is nothing to split *out*, and renaming a whole trade in place is
+what the edit form directly above is for. `portfolio_repo.
+clear_trade_group_overrides` still exists and is unit-tested but has no
+call site now.
+
+Same keying rationale as before: `(portfolio_name, broker,
 raw_name)` is a leg's natural identity, stable across
 `replace_broker_holdings`/`replace_broker_positions`'s full
 delete-then-insert on every upload/sync -- the exact same trick

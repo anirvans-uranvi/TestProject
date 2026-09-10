@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
@@ -410,39 +411,55 @@ with split_col:
     selected_leg_rows = [i for i in all_selected_rows if i < len(trade_legs)]
     if not selected_leg_rows:
         st.caption("Select one or more legs above first.")
+    elif len(selected_leg_rows) == len(trade_legs):
+        st.caption(
+            "Every leg is selected -- there's nothing to split *out*. Deselect at least one leg to keep in "
+            "this trade, or use the edit form above to rename this trade in place."
+        )
     else:
         selected_legs = [trade_legs[i] for i in selected_leg_rows]
         selected_leg_keys = [(leg["broker"], leg["raw_name"]) for leg in selected_legs]
-        st.caption(f"{len(selected_legs)} leg(s) selected.")
-        split_mode = st.radio(
-            "Split to",
-            ["Default grouping (by underlying)", "A new Trade ID"],
-            key=f"analyse_trade_split_mode_{slug(portfolio_name)}_{slug(trade_id)}",
-            horizontal=True,
+        # The split always creates a brand-new Trade for the picked legs
+        # -- never "clear the override back to the per-underlying
+        # default", which for a multi-leg trade whose id already *is* the
+        # underlying symbol (e.g. a "BANKNIFTY" Iron Condor) would just
+        # drop the legs straight back into the same trade. A fresh opaque
+        # trade_id guarantees they actually leave. The new trade is named
+        # with the same rules a fresh trade gets: Trade Type auto-detected
+        # from the picked legs' shape (editable below), Underlying
+        # Instrument auto-computed from their symbols.
+        auto_type = portfolio_service.classify_trade_type(selected_legs) or "Trade"
+        auto_label = portfolio_service.default_underlying_label(selected_legs)
+        st.caption(
+            f"{len(selected_legs)} leg(s) selected -- they'll move to a brand-new trade "
+            f'(auto-detected as "{auto_type}" on {auto_label}).'
         )
-        if split_mode == "A new Trade ID":
-            new_trade_id = st.text_input(
-                "New Trade ID", key=f"analyse_trade_split_new_id_{slug(portfolio_name)}_{slug(trade_id)}"
-            ).strip()
-            if st.button(
-                "Split into new trade",
-                disabled=not new_trade_id,
-                key=f"analyse_trade_split_new_btn_{slug(portfolio_name)}_{slug(trade_id)}",
-            ):
-                portfolio_repo.set_trade_group(client, user_id, portfolio_name, selected_leg_keys, new_trade_id)
-                st.session_state["portfolio_cache_bust"] += 1
-                st.cache_data.clear()
-                st.session_state.pop(legs_table_key, None)  # trade_legs is about to shrink -- see merge button's comment
-                st.success(f'Split {len(selected_legs)} leg(s) into "{new_trade_id}".')
-                st.rerun()
-        else:
-            if st.button("Split to default grouping", key=f"analyse_trade_split_default_btn_{slug(portfolio_name)}_{slug(trade_id)}"):
-                portfolio_repo.clear_trade_group_overrides(client, user_id, portfolio_name, selected_leg_keys)
-                st.session_state["portfolio_cache_bust"] += 1
-                st.cache_data.clear()
-                st.session_state.pop(legs_table_key, None)  # trade_legs is about to shrink -- see merge button's comment
-                st.success(f"Split {len(selected_legs)} leg(s) back to their default per-underlying Trade.")
-                st.rerun()
+        with st.form(f"analyse_trade_split_form_{slug(portfolio_name)}_{slug(trade_id)}"):
+            new_trade_type = st.text_input(
+                "Trade Type for the new trade",
+                value=auto_type,
+                help="What the split-out trade shows as its Trade Type on My Trades. Pre-filled with the "
+                'strategy auto-detected from the legs you picked -- edit it (e.g. "CSP", "Batman") or leave '
+                "it as-is. No need to press Enter; just click the button.",
+            )
+            split_submitted = st.form_submit_button("Split into a new trade")
+        if split_submitted:
+            new_trade_id = f"split-{uuid4().hex[:12]}"
+            trade_type_to_save = new_trade_type.strip() or auto_type
+            portfolio_repo.set_trade_group(client, user_id, portfolio_name, selected_leg_keys, new_trade_id)
+            portfolio_repo.set_trade_meta(
+                client,
+                user_id,
+                portfolio_name,
+                new_trade_id,
+                underlying_label=None,  # auto-computed from the moved legs
+                trade_type=trade_type_to_save,
+            )
+            st.session_state["portfolio_cache_bust"] += 1
+            st.cache_data.clear()
+            st.session_state.pop(legs_table_key, None)  # trade_legs is about to shrink -- see merge button's comment
+            st.success(f'Split {len(selected_legs)} leg(s) into a new "{trade_type_to_save}" trade on {auto_label}.')
+            st.rerun()
 
 st.divider()
 if st.button("← Back to My Trades"):
