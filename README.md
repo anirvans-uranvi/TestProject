@@ -1041,14 +1041,25 @@ visit needed -- the point being a laptop-free fix when you're on mobile
 and the token expires away from a place you can regenerate one. It only
 works on a token that **hasn't expired yet** (Dhan's own documented
 limit -- renewing an already-expired one just 401s, same as a sync
-attempt would); past that point there's no way around a freshly-pasted
-token below. Deliberately built on the existing bearer token rather than
-a longer-lived credential: Dhan also offers a PIN+TOTP endpoint that can
-mint a brand-new token even after expiry, and a 12-month API-key/secret
-pair, but both mean storing the account's actual login credential (a PIN
-or a TOTP seed) at rest -- a materially bigger risk than the 24-hour
-bearer token already stored, so neither is implemented here. Fetching
-live LTP for positions needs
+attempt would). Once it *has* lapsed, **"Generate a new token (PIN +
+TOTP)"** mints a fresh one with no `web.dhan.co` visit at all: it calls
+Dhan's `POST https://auth.dhan.co/app/generateAccessToken`
+(`DhanProvider.generate_access_token`) with your Client ID, Dhan PIN, and
+a current 6-digit code read off your authenticator app (Google
+Authenticator, etc.) -- requires TOTP enabled once on `web.dhan.co` ->
+"DhanHQ Trading APIs". The **TOTP secret/seed stays in your authenticator
+app** -- this app never stores it (storing it would let the app
+re-authenticate unattended forever, which is exactly the at-rest
+account-login credential deliberately avoided here -- see
+`docs/CODEBASE_GUIDE.md`); only the resulting 24-hour bearer token is
+saved, same as the paste and renew flows. The one new exposure: the
+Streamlit server transiently receives your PIN to forward it to Dhan for
+that one call (never stored, never logged) -- today the paste flow never
+sees the PIN at all, so this is a deliberate, called-out trade for the
+self-hosted single-user case. Dhan's other headless flow, a 12-month
+API-key/secret pair, is still not used (it would mean a longer-lived
+credential at rest for marginal benefit over the live-code approach).
+Fetching live LTP for positions needs
 Dhan's separate "Data APIs" subscription (distinct from "Trading APIs");
 without it (or for any security Dhan's own feed omits),
 `portfolio_service.apply_fallback_option_ltp` fills the gap from this

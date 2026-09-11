@@ -170,7 +170,7 @@ def _sync_dhan(*, client, user_id: str, connection: BrokerConnection) -> None:
     except DhanAuthError:
         st.error(
             "Your Dhan access token was rejected -- it's likely expired (Dhan tokens last ~24 hours). "
-            "Generate a new one on web.dhan.co and paste it below."
+            'Use "Generate a new token (PIN + TOTP)" below, or paste a fresh one from web.dhan.co.'
         )
         return
     except ProviderError as exc:
@@ -287,6 +287,85 @@ def _renew_dhan_token(*, client, user_id: str, connection: BrokerConnection) -> 
     st.rerun()
 
 
+def _generate_dhan_token(*, client, user_id: str, client_id: str, pin: str, totp: str, then_sync: bool) -> None:
+    """"Generate & Save" -- mints a brand-new 24-hour token via Dhan's own
+    POST /app/generateAccessToken (DhanProvider.generate_access_token)
+    from the account's Client ID + Dhan PIN + a current 6-digit TOTP code
+    the user reads off their authenticator app. Unlike _renew_dhan_token
+    above, this works even once the previous token has fully expired -- so
+    it's the "I'm locked out and away from a laptop" path, not just the
+    "renew early" one.
+
+    Deliberately does NOT store the PIN or the TOTP code (or a TOTP
+    seed) -- only the resulting bearer token lands in broker_connections,
+    exactly the same credential Save & Sync / Renew already persist. The
+    PIN is forwarded to Dhan for this one call and then dropped. See
+    docs/CODEBASE_GUIDE.md's auth section for why storing the seed (which
+    would make this fully unattended) was ruled out.
+
+    `then_sync` mirrors the two call sites: True from the not-connected
+    form (behave like "Save & Sync"), False from the connected-state
+    expander (behave like "Renew" -- just swap the token in place)."""
+    try:
+        new_token = DhanProvider.generate_access_token(client_id, pin, totp)
+    except DhanAuthError:
+        st.error(
+            "Dhan rejected the PIN or TOTP code. The TOTP code changes every 30 seconds -- enter the "
+            "current one from your authenticator app. Repeated wrong PINs can lock your Dhan login."
+        )
+        return
+    except ProviderError as exc:
+        st.error(f"Could not generate a Dhan token: {exc}")
+        return
+    new_connection = BrokerConnection(
+        user_id=user_id,
+        broker="Dhan",
+        client_id=client_id,
+        access_token=new_token,
+        token_saved_at=datetime.now(timezone.utc),
+    )
+    portfolio_repo.upsert_broker_connection(client, new_connection)
+    _bump_cache_bust()
+    if then_sync:
+        _sync_dhan(client=client, user_id=user_id, connection=new_connection)
+    else:
+        st.success("New token generated -- valid for ~24 hours.")
+        st.rerun()
+
+
+def _render_dhan_generate_token_form(
+    *, client, user_id: str, existing_client_id: str | None, then_sync: bool
+) -> None:
+    """The PIN + TOTP form shared by both states of
+    _render_dhan_connect_section (not-connected: also collects the Client
+    ID and syncs on success; connected: Client ID pre-filled, no resync).
+    A plain st.form so typing the code and clicking the button submits in
+    one go -- no Enter keypress needed to commit the field first."""
+    form_key = "dhan_generate_token_connected" if existing_client_id else "dhan_generate_token_new"
+    with st.form(form_key):
+        client_id = st.text_input("Dhan Client ID", value=existing_client_id or "")
+        pin = st.text_input("Dhan PIN", type="password")
+        totp = st.text_input(
+            "TOTP code",
+            max_chars=6,
+            help="The 6-digit code from your authenticator app (Google Authenticator, etc.). It changes "
+            "every 30 seconds -- type the current one.",
+        )
+        submitted = st.form_submit_button("Generate & Save")
+    if submitted:
+        if not client_id.strip() or not pin.strip() or not totp.strip():
+            st.error("Client ID, PIN and TOTP code are all required.")
+            return
+        _generate_dhan_token(
+            client=client,
+            user_id=user_id,
+            client_id=client_id.strip(),
+            pin=pin.strip(),
+            totp=totp.strip(),
+            then_sync=then_sync,
+        )
+
+
 def _render_dhan_connect_section(*, client, user_id: str) -> None:
     try:
         connection = portfolio_repo.get_broker_connection(client, user_id, "Dhan")
@@ -326,6 +405,17 @@ def _render_dhan_connect_section(*, client, user_id: str) -> None:
             portfolio_repo.upsert_broker_connection(client, new_connection)
             _bump_cache_bust()
             _sync_dhan(client=client, user_id=user_id, connection=new_connection)
+
+        st.divider()
+        st.caption(
+            "Or generate a token from your Dhan PIN + a 6-digit authenticator code -- no web.dhan.co "
+            "visit, works from any device. Enable TOTP first on web.dhan.co -> \"DhanHQ Trading APIs\". "
+            "Your PIN is sent to Dhan to mint the token and is never stored -- only the resulting "
+            "24-hour token is saved, same as the paste flow above."
+        )
+        _render_dhan_generate_token_form(
+            client=client, user_id=user_id, existing_client_id=None, then_sync=True
+        )
         return
 
     masked_id = f"...{connection.client_id[-4:]}" if len(connection.client_id) > 4 else connection.client_id
@@ -337,8 +427,8 @@ def _render_dhan_connect_section(*, client, user_id: str) -> None:
                 "This token is over 10 hours old and expires ~24 hours after it was saved. Renew it "
                 "now with \"Renew Token\" below -- that only works on a still-active token, so it's "
                 "safer to do it early (e.g. from mobile) than to wait and risk missing the window. "
-                "Once it has actually expired, renewal will fail and you'll need to regenerate one on "
-                "web.dhan.co and update it below."
+                "Once it has actually expired, renewal will fail -- use \"Generate a new token (PIN + "
+                "TOTP)\" below (or regenerate one on web.dhan.co and update it)."
             )
     else:
         st.caption(f"Connected -- Client ID {masked_id}.")
@@ -347,8 +437,8 @@ def _render_dhan_connect_section(*, client, user_id: str) -> None:
         "Renew Token (+24h)",
         key="dhan_renew_token",
         help="Extends this token's validity by another 24 hours, in place, from wherever you are -- "
-        "no need to visit web.dhan.co. Only works while the token is still active; an already-expired "
-        "one still needs a fresh paste below.",
+        "no need to visit web.dhan.co. Only works while the token is still active; once it's expired, "
+        'use "Generate a new token (PIN + TOTP)" below.',
     ):
         _renew_dhan_token(client=client, user_id=user_id, connection=connection)
 
@@ -358,6 +448,17 @@ def _render_dhan_connect_section(*, client, user_id: str) -> None:
         _bump_cache_bust()
         st.success("Disconnected. Previously synced holdings/positions are unaffected.")
         st.rerun()
+
+    with st.expander("Generate a new token (PIN + TOTP)"):
+        st.caption(
+            "Mints a fresh 24-hour token from your Dhan PIN + a current authenticator code -- works "
+            "even after the current one has expired, unlike \"Renew\". Needs TOTP enabled on "
+            "web.dhan.co -> \"DhanHQ Trading APIs\". The PIN is sent to Dhan for this one call and "
+            "never stored."
+        )
+        _render_dhan_generate_token_form(
+            client=client, user_id=user_id, existing_client_id=connection.client_id, then_sync=False
+        )
 
     with st.expander("Update credentials"):
         with st.form("dhan_update_form"):
@@ -476,7 +577,7 @@ def _render_dhan_trade_history_sync(*, client, user_id: str) -> None:
             except DhanAuthError:
                 st.error(
                     "Your Dhan access token was rejected -- it's likely expired (Dhan tokens last ~24 hours). "
-                    "Generate a new one on web.dhan.co and paste it above."
+                    'Refresh it with "Generate a new token (PIN + TOTP)" or a fresh paste above.'
                 )
                 return
             except ProviderError as exc:

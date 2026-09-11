@@ -31,9 +31,13 @@ from src.utils.timezones import now_ist
 IST = pytz.timezone("Asia/Kolkata")
 
 BASE_URL = "https://api.dhan.co/v2"
+# Dhan's auth service is a *different* host from the v2 API (api.dhan.co)
+# -- only the token-minting flows live here.
+AUTH_BASE_URL = "https://auth.dhan.co"
 INSTRUMENT_MASTER_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
 HISTORICAL_ENDPOINT = f"{BASE_URL}/charts/historical"
 LTP_ENDPOINT = f"{BASE_URL}/marketfeed/ltp"
+GENERATE_TOKEN_ENDPOINT = f"{AUTH_BASE_URL}/app/generateAccessToken"
 
 # Dhan documents per-second rate limits on data endpoints; stay comfortably
 # under them with a simple client-side throttle.
@@ -698,6 +702,70 @@ class DhanProvider(PriceDataProvider):
         if not new_token:
             raise ProviderError(f"Dhan token renewal response had no token: {resp.text[:200]}")
         return new_token
+
+    @staticmethod
+    def generate_access_token(client_id: str, pin: str, totp: str, timeout: float = 15.0) -> str:
+        """POST https://auth.dhan.co/app/generateAccessToken -- mints a
+        brand-new 24-hour Dhan access token from Client ID + Dhan PIN + a
+        *current* TOTP 6-digit code (RFC 6238, rotates every 30s), read
+        live from the user's authenticator app (Google Authenticator,
+        etc.). Unlike renew_access_token above, this works even after the
+        previous token has fully expired -- it's a fresh login, not an
+        extension. Requires TOTP to be enabled on the Dhan account first
+        (web.dhan.co -> DhanHQ Trading APIs).
+
+        A `@staticmethod`, not an instance method: it produces the token
+        the rest of this class needs, so there's nothing to construct a
+        DhanProvider around yet (`__init__` requires a non-empty
+        access_token).
+
+        `dhanClientId`/`pin`/`totp` go as **query params** -- no headers,
+        no request body. **Confirmed live**: sending them as a JSON body
+        instead 400s (`{"error":"Bad Request"}`), so the query-param shape
+        the docs show is load-bearing, not stylistic. Success response is
+        `{"accessToken", "expiryTime", "dhanClientId", ...}`; the token is
+        under `accessToken`, with a `token` fallback only in case Dhan's
+        shape ever drifts the way RenewToken's response did.
+
+        **Confirmed live: a rejected credential comes back as HTTP 200
+        with an error body**, not a 401 -- e.g.
+        `{"message": "Unauthorized Request", "status": "error"}` for a
+        bad client id / PIN / stale-or-reused TOTP / TOTP-not-enabled.
+        (This matches several other Dhan endpoints that embed the real
+        outcome in a 200 body.) So the auth-failure mapping keys off
+        `status == "error"` / an "unauthorized"-ish message in a
+        token-less 200, not just the HTTP status. Either way it raises
+        DhanAuthError, so the caller can show a "check your PIN / the code
+        changes every 30s" hint distinct from a generic failure. A real
+        HTTP 4xx/5xx (non-JSON, gateway error, the JSON-body 400 above) is
+        still handled too. The PIN is used only for this one call and is
+        never stored or logged by this app."""
+        _throttle()
+        try:
+            resp = httpx.post(
+                GENERATE_TOKEN_ENDPOINT,
+                params={"dhanClientId": client_id, "pin": pin, "totp": totp},
+                timeout=timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"Dhan token generation request failed: {exc}") from exc
+        if resp.status_code == 401:
+            raise DhanAuthError(f"Dhan rejected the PIN or TOTP code (401): {resp.text[:200]}")
+        if resp.status_code >= 400:
+            raise ProviderError(f"Dhan token generation error {resp.status_code}: {resp.text[:200]}")
+        try:
+            body = resp.json() or {}
+        except ValueError:
+            body = {}
+        new_token = body.get("accessToken") or body.get("token")
+        if new_token:
+            return new_token
+        # 200 with no token: Dhan puts a rejected credential here, not in
+        # an HTTP 401 (confirmed live -- see docstring).
+        message = str(body.get("message") or body.get("errorMessage") or resp.text[:200])
+        if str(body.get("status")).lower() == "error" or "unauthor" in message.lower():
+            raise DhanAuthError(f"Dhan rejected the PIN or TOTP code: {message}")
+        raise ProviderError(f"Dhan token generation response had no token: {resp.text[:200]}")
 
     def get_trade_history(self, from_date: date, to_date: date, max_pages: int = 500) -> list[dict]:
         """Raw rows from GET /v2/trades/{from-date}/{to-date}/{page} -- one

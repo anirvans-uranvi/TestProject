@@ -2347,25 +2347,69 @@ build on:
   in a row here.
 - It's documented to work **only on a token that hasn't expired yet** —
   renewing an already-expired one 401s exactly like a sync attempt
-  would, mapped to the same `DhanAuthError` → "paste a fresh one below"
-  message. There's no way around that once the 24 hours are actually up;
-  this only helps if you renew *before* it lapses (e.g. right after the
-  "renew it now" ~10-hour warning fires -- deliberately early, well ahead
-  of the ~24-hour expiry, so there's a wide safe window even if the app
-  isn't opened again for a while, e.g. on mobile).
+  would, mapped to the same `DhanAuthError`. There's no way around that
+  once the 24 hours are actually up; renew only helps if you do it
+  *before* it lapses (e.g. right after the "renew it now" ~10-hour
+  warning fires -- deliberately early, well ahead of the ~24-hour expiry,
+  so there's a wide safe window even if the app isn't opened again for a
+  while, e.g. on mobile). Past that, the "Generate a new token" flow
+  below is the fix.
 
-Deliberately **not** built on Dhan's other two token-issuing flows, both
-of which genuinely can mint a brand-new token even past expiry, entirely
-headlessly: a `dhanClientId` + PIN + TOTP endpoint, and a 12-month
-API-key/secret pair. Both were ruled out for the same reason — either
-one means storing the account's actual login credential (a PIN, or a
-TOTP seed capable of generating valid codes indefinitely) at rest in
-`broker_connections`, which is a different, larger category of risk than
-a revocable, 24-hour bearer token: a leaked bearer token is a ticking
-clock; a leaked PIN/TOTP seed lets an attacker log into the account
-itself, no expiry. See `tests/test_dhan_provider.py`'s
-`TestRenewAccessToken` for the header/response-shape/error-mapping
-coverage.
+**Generating a token in-app from PIN + a live TOTP code ("Generate a new
+token (PIN + TOTP)").** For when the token *has* fully lapsed and renew
+can't help. Dhan's v2.5 release (Feb 2026) added
+`POST https://auth.dhan.co/app/generateAccessToken` — Client ID + Dhan
+PIN + a current 6-digit TOTP code as **query params** (no headers, no
+body; on the `auth.dhan.co` host, not the `api.dhan.co` v2 API the rest
+of `DhanProvider` uses). `DhanProvider.generate_access_token` is a
+`@staticmethod` (it produces the token — there's nothing to construct a
+provider around yet). Token is under `accessToken` here (a `token`
+fallback is kept, same defensive move `renew_access_token` needed).
+
+**Two things confirmed live, not assumable from the docs** (same
+"verify against a live account" lesson `renew_access_token` already
+taught this module twice):
+
+1. Sending `dhanClientId`/`pin`/`totp` as a **JSON body** instead of
+   query params 400s (`{"error": "Bad Request"}`) — the query-param
+   shape the docs show is load-bearing, not stylistic.
+2. **A rejected credential (bad client id, wrong PIN, a stale/reused or
+   TOTP-not-enabled code) comes back as HTTP 200** with an error body —
+   `{"message": "Unauthorized Request", "status": "error"}` — **not a
+   401**, unlike `renew_access_token`'s own endpoint. So the
+   `DhanAuthError` mapping keys off `status == "error"` (or an
+   "unauthorized"-ish message) in a token-less 200, in addition to a
+   defensive real-401/4xx check. Getting this wrong would have shown a
+   generic "could not generate a token" error for the single most common
+   failure (mistyped PIN or a TOTP code that rotated mid-type) instead of
+   the specific "the code changes every 30 seconds" hint.
+
+`_generate_dhan_token`/`_render_dhan_generate_token_form` in
+`src/utils/data_provider_settings.py` render the form in both states of
+`_render_dhan_connect_section` (not-connected: also collects Client ID,
+syncs on success like Save & Sync; connected: Client ID pre-filled, swaps
+the token in place like renew). `tests/test_dhan_provider.py`'s
+`TestGenerateAccessToken` covers the query-params/no-headers shape, the
+`token` fallback, and both auth-failure shapes (a defensive 401 and the
+real, confirmed-live 200-with-error-body); `TestRenewAccessToken` covers
+the parallel cases for renew.
+
+What this flow deliberately does **not** do: store the **TOTP seed**.
+The seed lives only in the user's authenticator app (Google
+Authenticator, etc.); the app asks for a fresh rotating code each time it
+mints a token. Storing the seed would make regeneration fully unattended
+— but a seed generates valid codes indefinitely, so at rest in
+`broker_connections` it's the account's actual login credential, a
+different and larger category of risk than a revocable 24-hour bearer
+token (a leaked bearer token is a ticking clock; a leaked seed + PIN lets
+an attacker log into the account itself, no expiry). Dhan's 12-month
+API-key/secret pair is skipped for the same "longer-lived credential at
+rest" reason. The one exposure this flow *does* add over the paste flow:
+the Streamlit server process transiently receives the Dhan **PIN** to
+forward it to Dhan for that single call — never stored, never logged, but
+briefly in memory where the paste flow never sees it at all. Judged an
+acceptable trade for the self-hosted single-user case and called out in
+the form's own caption.
 
 **Removed: Zerodha.** This section used to document a full second
 broker-connect flow -- Kite Connect's OAuth-style login (`login_url()`/

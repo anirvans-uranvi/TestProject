@@ -374,6 +374,105 @@ class TestRenewAccessToken:
             provider.renew_access_token()
 
 
+class TestGenerateAccessToken:
+    """POST https://auth.dhan.co/app/generateAccessToken -- mints a
+    brand-new 24h token from Client ID + Dhan PIN + a current TOTP code.
+    A staticmethod (no pre-existing token, so nothing to construct a
+    DhanProvider around). dhanClientId/pin/totp go as QUERY params, no
+    headers, no body -- and on the auth.dhan.co host, not the api.dhan.co
+    v2 API the rest of the class uses. Token is under `accessToken`
+    (unlike RenewToken's `token`), with a `token` fallback kept in case
+    that shape ever drifts too.
+
+    **Confirmed live against the real endpoint** (bogus client id/PIN/
+    TOTP): a rejected credential comes back as **HTTP 200** with
+    `{"message": "Unauthorized Request", "status": "error"}`, NOT a 401 --
+    unlike RenewToken, which does 401 on a rejected token. Sending the
+    same three fields as a JSON body instead of query params 400s
+    (`{"error": "Bad Request"}`), confirming the query-param shape the
+    docs show is load-bearing."""
+
+    def test_sends_query_params_no_auth_headers_and_returns_access_token(self, monkeypatch):
+        captured = {}
+
+        def fake_post(url, params=None, headers=None, timeout=None, **kwargs):
+            captured["url"] = url
+            captured["params"] = params
+            captured["headers"] = headers
+            return _FakeResponse(
+                200,
+                json_data={"accessToken": "FRESH_TOKEN", "expiryTime": "2026-01-01T00:00:00.000"},
+            )
+
+        monkeypatch.setattr(httpx, "post", fake_post)
+
+        result = DhanProvider.generate_access_token("CID1", "1234", "654321")
+
+        assert result == "FRESH_TOKEN"
+        assert captured["url"] == dhan_provider.GENERATE_TOKEN_ENDPOINT
+        assert captured["url"].startswith("https://auth.dhan.co/")
+        assert captured["params"] == {"dhanClientId": "CID1", "pin": "1234", "totp": "654321"}
+        # No bearer/client headers -- this is a fresh login, there's no token yet.
+        assert not captured["headers"] or "access-token" not in captured["headers"]
+
+    def test_falls_back_to_token_key_if_that_shape_is_ever_returned_instead(self, monkeypatch):
+        monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeResponse(200, json_data={"token": "FRESH_TOKEN"}))
+
+        assert DhanProvider.generate_access_token("CID1", "1234", "654321") == "FRESH_TOKEN"
+
+    def test_401_on_bad_pin_or_stale_totp_raises_dhan_auth_error(self, monkeypatch):
+        # Defensive: handle a real HTTP 401 too, even though Dhan's actual
+        # behavior (see below) is a 200 with an error body instead.
+        monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeResponse(401, text="invalid totp"))
+
+        with pytest.raises(DhanAuthError):
+            DhanProvider.generate_access_token("CID1", "1234", "000000")
+
+    def test_200_with_error_status_body_raises_dhan_auth_error(self, monkeypatch):
+        # The real, confirmed-live shape: a rejected credential is a 200,
+        # not a 401 -- {"message": "Unauthorized Request", "status": "error"}.
+        monkeypatch.setattr(
+            httpx,
+            "post",
+            lambda *a, **k: _FakeResponse(200, json_data={"message": "Unauthorized Request", "status": "error"}),
+        )
+
+        with pytest.raises(DhanAuthError):
+            DhanProvider.generate_access_token("CID1", "1234", "000000")
+
+    def test_200_with_unauthorized_message_but_no_status_field_still_raises_dhan_auth_error(self, monkeypatch):
+        monkeypatch.setattr(
+            httpx, "post", lambda *a, **k: _FakeResponse(200, json_data={"errorMessage": "Unauthorized access"})
+        )
+
+        with pytest.raises(DhanAuthError):
+            DhanProvider.generate_access_token("CID1", "1234", "000000")
+
+    def test_other_error_status_raises_generic_provider_error_not_auth_error(self, monkeypatch):
+        monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeResponse(500, text="boom"))
+
+        with pytest.raises(ProviderError) as exc_info:
+            DhanProvider.generate_access_token("CID1", "1234", "654321")
+        assert not isinstance(exc_info.value, DhanAuthError)
+
+    def test_response_missing_both_token_keys_raises_provider_error(self, monkeypatch):
+        monkeypatch.setattr(
+            httpx, "post", lambda *a, **k: _FakeResponse(200, json_data={"expiryTime": "..."})
+        )
+
+        with pytest.raises(ProviderError):
+            DhanProvider.generate_access_token("CID1", "1234", "654321")
+
+    def test_network_error_is_wrapped_as_provider_error(self, monkeypatch):
+        def boom(*a, **k):
+            raise httpx.ConnectError("no route to host")
+
+        monkeypatch.setattr(httpx, "post", boom)
+
+        with pytest.raises(ProviderError):
+            DhanProvider.generate_access_token("CID1", "1234", "654321")
+
+
 class TestGetTradeHistory:
     def test_single_page_stops_after_one_empty_page(self, monkeypatch):
         calls = []
