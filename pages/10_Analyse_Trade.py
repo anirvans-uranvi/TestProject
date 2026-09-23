@@ -259,6 +259,7 @@ for leg in trade_legs:
         {
             "Trade Date": trade_date_for_leg.strftime("%d %b %Y") if trade_date_for_leg else None,
             "Underlying": leg["symbol"] or f'{leg["raw_name"]} (unresolved)',
+            "Type": leg["option_type"].value if leg.get("option_type") else "—",
             "Expiry": leg["expiry_date"].strftime("%d %b %Y") if leg.get("expiry_date") else None,
             "Strike": leg.get("strike_price"),
             "Qty": leg["qty"],
