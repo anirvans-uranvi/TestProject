@@ -25,15 +25,18 @@ now), but with everything else about the page rewritten:
   per expiry, the same "flatten near/next/far into paired columns"
   layout the Screener for CSP page's own CSP columns already use.
 - **Dividend/PEG/Fundamentals/Momentum added**, sourced the same way
-  the Screener does -- pre-classified `criterion_a`/`criterion_b`/
-  `criterion_c` and `ttm_dividend_yield`/`peg_ratio` read directly from
+  the Screener does -- pre-classified `criterion_a`/`criterion_c` and
+  `ttm_dividend_yield`/`peg_ratio` read directly from
   `daily_screener_snapshots` (`snapshot_repo.get_latest_fundamentals_and_returns`),
   not recomputed, so these cells always agree with what the Screener
-  would show for the same stock. Momentum in particular is **not** the
-  freshly-recomputed `criterion_b(return_1d, return_5d, return_20d)`
-  every other portfolio page uses (My CSP, My Portfolio Trades, Modified
-  CSPs) -- it's the stored flag, per an explicit request that this
-  column match the Screener specifically.
+  would show for the same stock. Momentum (`criterion_b`) **is**
+  recomputed here, same as every other portfolio page (My CSP, My
+  Portfolio Trades, Modified CSPs) -- it's re-derived from a
+  live-vs-previous-close `return_1d` (`src.calculations.returns.live_return_1d`)
+  whenever a live broker quote exists, falling back to the stored
+  `return_1d` otherwise, so it stays in step with the Dashboard/Screener's
+  own now-live Momentum instead of freezing at yesterday's EOD figure
+  until the next EOD refresh.
 - **A new, separate covered-call target formula**,
   `fo_service.planner_cc_for_holding` -- deliberately the *opposite*
   condition/base pairing from the old page's `covered_call_for_holding`
@@ -56,7 +59,8 @@ import streamlit as st
 from postgrest.exceptions import APIError
 from pydantic import ValidationError
 
-from src.calculations.classification import criterion_fundamentals
+from src.calculations.classification import criterion_b, criterion_fundamentals
+from src.calculations.returns import live_return_1d
 from src.repositories import settings_repo
 from src.services import fo_service, portfolio_service
 from src.utils.formatting import format_pct, pass_fail_icon
@@ -66,6 +70,8 @@ from src.utils.portfolio_page import (
     load_all_companies,
     load_fundamentals_and_returns,
     load_holdings,
+    load_latest_prices,
+    load_live_broker_prices,
     load_option_chain,
     load_option_expiries,
     load_positions,
@@ -91,8 +97,9 @@ render_stock_refresh_button(client, user_id, user_settings.data_provider)
 render_portfolio_refresh_button(client, user_id, user_settings.data_provider)
 st.caption(
     "Every stock holding with no option trade against it at all -- i.e. a Trade whose current legs are "
-    "entirely Holding legs, regardless of what its Trade Type is saved as. Dividend/PEG/Fundamentals/Momentum "
-    "are the same pre-classified flags the Screener for CSP page shows. For each of the near/next/far monthly "
+    "entirely Holding legs, regardless of what its Trade Type is saved as. Dividend/PEG/Fundamentals are the "
+    "same pre-classified flags the Screener for CSP page shows; Momentum reacts to a live broker quote the "
+    "same way the Screener's own Momentum now does. For each of the near/next/far monthly "
     "expiries: if LTP is above avg buy price, CC Strike targets 3% above LTP; otherwise it targets 5% above "
     "avg buy price -- picking whichever listed strike is nearest that target. Select a row to open that stock "
     "in Stock Detail or Options."
@@ -141,6 +148,29 @@ def _render_planner_table(*, holdings: list[dict], portfolio_name: str) -> None:
 
     symbols = tuple(sorted({h["symbol"] for h in holdings if h["symbol"]}))
     fundamentals_by_symbol = load_fundamentals_and_returns(client, symbols, st.session_state["portfolio_cache_bust"])
+    # holding["ltp"] (below) is already live-merged internally by
+    # build_trade_legs, but that merge doesn't say *which* symbols got a
+    # genuine live quote vs. fell back to the snapshot price -- reusing
+    # it directly here would wrongly compute a flat 0% for a
+    # no-live-quote symbol (live == previous close) instead of falling
+    # back to the stored return_1d. So this page fetches its own
+    # previous-close/live-quote pair, same as every other portfolio page,
+    # and re-derives Momentum's criterion_b from the live-adjusted
+    # return_1d (src.calculations.returns.live_return_1d) -- falls back
+    # to the stored return_1d/criterion_b unchanged when no live quote
+    # exists for a symbol.
+    previous_close_by_symbol = load_latest_prices(client, symbols, st.session_state["portfolio_cache_bust"])
+    live_ltp_by_symbol = load_live_broker_prices(client, user_id, symbols, st.session_state["portfolio_cache_bust"])
+    fundamentals_by_symbol = {
+        sym: {
+            **fund,
+            "return_1d": (
+                r1 := live_return_1d(live_ltp_by_symbol.get(sym), previous_close_by_symbol.get(sym), fund.get("return_1d"))
+            ),
+            "criterion_b": criterion_b(r1, fund.get("return_5d"), fund.get("return_20d")),
+        }
+        for sym, fund in fundamentals_by_symbol.items()
+    }
 
     # Every NSE stock option shares one monthly expiry calendar (confirmed
     # with the user during the Screener for CSP redesign), so the union of

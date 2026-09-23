@@ -47,6 +47,18 @@ def value_change_from_pct(current_value: float | None, return_pct: float | None)
     return current_value * return_pct / denom
 
 
+def live_return_1d(live_price: float | None, previous_close: float | None, fallback: float | None) -> float | None:
+    """Today's 1D return using a live intraday price against the most
+    recent EOD close, when both are available -- pct_return(live_price,
+    previous_close). Falls back to `fallback` (the stored EOD-vs-EOD
+    return_1d already computed by the daily screener refresh) when
+    there's no live price for this symbol yet (no broker connected, an
+    expired token, an account without live quotes, or the broker simply
+    didn't quote this symbol this round)."""
+    live = pct_return(live_price, previous_close)
+    return live if live is not None else fallback
+
+
 def return_1d(latest_price: float | None, historical_closes: list[float | None]) -> float | None:
     return return_n_trading_days_ago(latest_price, historical_closes, 1)
 

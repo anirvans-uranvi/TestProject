@@ -66,18 +66,20 @@ row = snapshot_repo.get_latest_screener_row(client, symbol)
 if row is None:
     st.warning("No screener data for this symbol yet.")
     st.stop()
-row = recompute_with_user_thresholds(row, user_settings)
 
 # Prefer a live broker quote over the shared, possibly-stale
 # daily_screener_snapshots value -- same preference the Dashboard and
 # the portfolio pages already give it -- only when this account's Data
 # Provider setting is Dhan and "Market Data Refresh" has
 # actually cached a live price for this symbol (user_live_prices,
-# migration 0030); otherwise `row.latest_price` is left as-is.
+# migration 0030); otherwise `row.latest_price` is left as-is. Passed
+# into recompute_with_user_thresholds so return_1d/Momentum/status react
+# to the live quote too, not just the displayed LTP.
+live_price = None
 if user_settings.data_provider != "yfinance_bhavcopy":
     live_prices = snapshot_repo.get_user_live_prices(client, user_id, [symbol])
-    if symbol in live_prices:
-        row = row.model_copy(update={"latest_price": live_prices[symbol]})
+    live_price = live_prices.get(symbol)
+row = recompute_with_user_thresholds(row, user_settings, live_price)
 
 # ---------------------------------------------------------------------
 # Header

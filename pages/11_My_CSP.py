@@ -6,6 +6,7 @@ from postgrest.exceptions import APIError
 from pydantic import ValidationError
 
 from src.calculations.classification import criterion_b
+from src.calculations.returns import live_return_1d
 from src.repositories import portfolio_repo, settings_repo
 from src.services import portfolio_service
 from src.utils.formatting import format_inr, pass_fail_icon
@@ -199,7 +200,7 @@ def _render_csp_tab(
         return
 
     symbols = tuple(sorted({leg["symbol"] for leg in csp_legs if leg["symbol"]}))
-    ltp_by_symbol = load_latest_prices(client, symbols, st.session_state["portfolio_cache_bust"])
+    previous_close_by_symbol = load_latest_prices(client, symbols, st.session_state["portfolio_cache_bust"])
     # Prefer a live quote from whichever broker(s) this portfolio has
     # connected over the (possibly stale, yfinance-sourced) screener
     # snapshot above -- only overrides symbols a connected broker actually
@@ -207,8 +208,17 @@ def _render_csp_tab(
     # connected but that symbol/session didn't come back) keeps its
     # snapshot value.
     live_ltp_by_symbol = load_live_broker_prices(client, user_id, symbols, st.session_state["portfolio_cache_bust"])
-    ltp_by_symbol = {**ltp_by_symbol, **live_ltp_by_symbol}
+    ltp_by_symbol = {**previous_close_by_symbol, **live_ltp_by_symbol}
     returns_by_symbol = load_returns_and_pe(client, symbols, st.session_state["portfolio_cache_bust"])
+    # Swap in a live-vs-previous-close return_1d wherever a live quote
+    # exists (see src.calculations.returns.live_return_1d) so Momentum
+    # reacts to the same live price as "Stock LTP" above, instead of
+    # staying pinned to the stored EOD-vs-EOD figure until the next EOD
+    # refresh -- falls back to the stored return_1d unchanged otherwise.
+    returns_by_symbol = {
+        sym: {**rp, "return_1d": live_return_1d(live_ltp_by_symbol.get(sym), previous_close_by_symbol.get(sym), rp.get("return_1d"))}
+        for sym, rp in returns_by_symbol.items()
+    }
     position_meta_by_leg = {(m.broker, m.raw_name): m for m in position_meta_for_portfolio}
 
     table_rows = []

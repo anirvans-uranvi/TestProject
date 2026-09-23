@@ -120,7 +120,6 @@ render_disclaimer()
 render_stock_refresh_button(client, user_id, user_settings.data_provider)
 
 rows = _load_screener_rows(client, st.session_state["dashboard_cache_bust"])
-rows = apply_user_thresholds(rows, user_settings)
 
 if not rows:
     st.info(
@@ -129,22 +128,24 @@ if not rows:
     )
     st.stop()
 
-df = pd.DataFrame([r.model_dump() for r in rows])
-
 # Prefer a live broker quote over the shared, possibly-stale
 # daily_screener_snapshots value -- only when this account's Data
 # Provider setting (Settings page) is Dhan, and only for
 # whichever symbols "Market Data Refresh" actually cached a live price
 # for (user_live_prices, migration 0030); every other symbol keeps its
-# snapshot value. `live_prices` is also consulted below to skip the
-# "(as of <date>)" stale-fallback marker for a live-priced row -- its
-# LTP is fresh even though the snapshot row backing 52W/returns/PEG for
-# that symbol may not be.
+# snapshot value. Folded into apply_user_thresholds below (rather than
+# just overriding the displayed LTP) so return_1d/Momentum/status react
+# to the live quote too, instead of staying pinned to yesterday's
+# EOD-vs-EOD figure until the next EOD refresh. `live_prices` is also
+# consulted further down to skip the "(as of <date>)" stale-fallback
+# marker for a live-priced row -- its LTP is fresh even though the
+# snapshot row backing 52W/PEG for that symbol may not be.
 live_prices: dict[str, float] = {}
 if user_settings.data_provider != "yfinance_bhavcopy":
-    live_prices = snapshot_repo.get_user_live_prices(client, user_id, df["symbol"].tolist())
-    if live_prices:
-        df["latest_price"] = df.apply(lambda r: live_prices.get(r["symbol"], r["latest_price"]), axis=1)
+    live_prices = snapshot_repo.get_user_live_prices(client, user_id, [r.symbol for r in rows])
+
+rows = apply_user_thresholds(rows, user_settings, live_prices)
+df = pd.DataFrame([r.model_dump() for r in rows])
 
 # ---------------------------------------------------------------------
 # F&O-derived columns (near/next/far CSP, at 5%/7%/10% OTM respectively)

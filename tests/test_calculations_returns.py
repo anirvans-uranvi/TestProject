@@ -1,6 +1,7 @@
 import pytest
 
 from src.calculations.returns import (
+    live_return_1d,
     pct_return,
     return_1d,
     return_5d,
@@ -98,3 +99,24 @@ class TestValueChangeFromPct:
 
     def test_pct_of_minus_100_returns_none_not_a_zero_division_crash(self):
         assert value_change_from_pct(100, -100.0) is None
+
+
+class TestLiveReturn1d:
+    def test_live_price_and_previous_close_present_computes_live_return(self):
+        # live 423.15 vs previous close 428.00 -- the Coal India scenario
+        # that prompted this: the stored EOD return_1d was +3.21%, but the
+        # live intraday move is actually negative.
+        assert live_return_1d(423.15, 428.00, fallback=3.21) == pytest.approx(pct_return(423.15, 428.00))
+        assert live_return_1d(423.15, 428.00, fallback=3.21) < 0
+
+    def test_no_live_price_falls_back(self):
+        assert live_return_1d(None, 428.00, fallback=3.21) == 3.21
+
+    def test_no_previous_close_falls_back(self):
+        assert live_return_1d(423.15, None, fallback=3.21) == 3.21
+
+    def test_zero_previous_close_falls_back_not_a_crash(self):
+        assert live_return_1d(423.15, 0, fallback=3.21) == 3.21
+
+    def test_fallback_none_stays_none_when_no_live_price(self):
+        assert live_return_1d(None, 428.00, fallback=None) is None

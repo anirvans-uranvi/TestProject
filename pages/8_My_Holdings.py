@@ -5,7 +5,7 @@ import streamlit as st
 from postgrest.exceptions import APIError
 from pydantic import ValidationError
 
-from src.calculations.returns import value_change_from_pct
+from src.calculations.returns import live_return_1d, value_change_from_pct
 from src.models.enums import CompanyType
 from src.repositories import settings_repo
 from src.services import portfolio_service
@@ -181,12 +181,12 @@ def _render_holdings_tab(portfolio_name: str, holdings_for_portfolio: list) -> N
 
     merged = portfolio_service.merge_holdings(raw_rows)
     symbols = tuple(sorted({r["symbol"] for r in merged if r["symbol"]}))
-    ltp_by_symbol = load_latest_prices(client, symbols, st.session_state["portfolio_cache_bust"])
+    previous_close_by_symbol = load_latest_prices(client, symbols, st.session_state["portfolio_cache_bust"])
     # Prefer a live quote from whichever broker(s) this portfolio has
     # connected over the (possibly stale, yfinance-sourced) screener
     # snapshot above -- same preference My CSP's LTP Underlying uses.
     live_ltp_by_symbol = load_live_broker_prices(client, user_id, symbols, st.session_state["portfolio_cache_bust"])
-    ltp_by_symbol = {**ltp_by_symbol, **live_ltp_by_symbol}
+    ltp_by_symbol = {**previous_close_by_symbol, **live_ltp_by_symbol}
     rows, totals = portfolio_service.compute_portfolio_view(merged, ltp_by_symbol)
     rows.sort(key=lambda r: r["investment"], reverse=True)
 
@@ -218,6 +218,14 @@ def _render_holdings_tab(portfolio_name: str, holdings_for_portfolio: list) -> N
     stock_rows = [r for r in rows if not _is_etf_or_fund(r["symbol"])]
 
     returns_pe_by_symbol = load_returns_and_pe(client, symbols, st.session_state["portfolio_cache_bust"])
+    # Swap in a live-vs-previous-close return_1d wherever a live quote
+    # exists (src.calculations.returns.live_return_1d), so "1D Change"
+    # reacts to the same live LTP the row's own "LTP"/"Cur Val" already
+    # use -- falls back to the stored return_1d unchanged otherwise.
+    returns_pe_by_symbol = {
+        sym: {**rp, "return_1d": live_return_1d(live_ltp_by_symbol.get(sym), previous_close_by_symbol.get(sym), rp.get("return_1d"))}
+        for sym, rp in returns_pe_by_symbol.items()
+    }
 
     _render_holdings_table(
         title="ETFs & Mutual Funds",

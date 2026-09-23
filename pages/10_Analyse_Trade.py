@@ -9,6 +9,7 @@ from postgrest.exceptions import APIError
 from pydantic import ValidationError
 
 from src.calculations.classification import criterion_b
+from src.calculations.returns import live_return_1d
 from src.models.enums import OptionType
 from src.repositories import portfolio_repo, settings_repo
 from src.services import portfolio_service
@@ -170,7 +171,24 @@ st.caption(
 
 trade_legs = trade["legs"]
 leg_symbols = tuple(sorted({leg["symbol"] for leg in trade_legs if leg["symbol"]}))
+
+previous_close_by_symbol = load_latest_prices(client, leg_symbols, st.session_state["portfolio_cache_bust"])
+# Same broker-live-first, daily_screener_snapshots-fallback preference as
+# My CSP's own "LTP Underlying" -- applies to every leg here (Holding or
+# Position), since it's a fact about the underlying itself, not the
+# leg's own instrument.
+live_ltp_by_symbol = load_live_broker_prices(client, user_id, leg_symbols, st.session_state["portfolio_cache_bust"])
+ltp_by_symbol = {**previous_close_by_symbol, **live_ltp_by_symbol}
+
 returns_by_symbol = load_returns_and_pe(client, leg_symbols, st.session_state["portfolio_cache_bust"])
+# Swap in a live-vs-previous-close return_1d wherever a live quote exists
+# (src.calculations.returns.live_return_1d), so the Momentum tile below
+# reacts to the same live price the legs table's own LTP Underlying
+# column uses -- falls back to the stored return_1d unchanged otherwise.
+returns_by_symbol = {
+    sym: {**rp, "return_1d": live_return_1d(live_ltp_by_symbol.get(sym), previous_close_by_symbol.get(sym), rp.get("return_1d"))}
+    for sym, rp in returns_by_symbol.items()
+}
 
 # --- Momentum -------------------------------------------------------------
 # Same "B · Momentum" scorecard tile Stock Detail (Equity page) shows for
@@ -202,14 +220,6 @@ except APIError:
     # to "no Trade Date entered / Stop Loss computed yet" for every leg.
     saved_position_meta = []
 position_meta_by_leg = {(m.broker, m.raw_name): m for m in saved_position_meta if m.portfolio_name == portfolio_name}
-
-ltp_by_symbol = load_latest_prices(client, leg_symbols, st.session_state["portfolio_cache_bust"])
-# Same broker-live-first, daily_screener_snapshots-fallback preference as
-# My CSP's own "LTP Underlying" -- applies to every leg here (Holding or
-# Position), since it's a fact about the underlying itself, not the
-# leg's own instrument.
-live_ltp_by_symbol = load_live_broker_prices(client, user_id, leg_symbols, st.session_state["portfolio_cache_bust"])
-ltp_by_symbol = {**ltp_by_symbol, **live_ltp_by_symbol}
 
 leg_table_rows = []
 for leg in trade_legs:

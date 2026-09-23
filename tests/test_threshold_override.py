@@ -73,3 +73,29 @@ class TestRecomputeWithUserThresholds:
         settings = UserSettings(user_id="u1", dividend_yield_threshold=99.0)
         recompute_with_user_thresholds(row, settings)
         assert row.criterion_a is None  # original untouched
+
+
+class TestLivePriceOverride:
+    def test_live_price_updates_return_1d_and_latest_price(self):
+        # The Coal India scenario: stored EOD return_1d (+3.21%, vs
+        # 428.00) disagrees with today's live LTP (423.15), which is
+        # actually a loss against that same previous close.
+        row = make_row(latest_price=428.00, return_1d=3.21)
+        settings = UserSettings(user_id="u1", dividend_yield_threshold=3.0, peg_threshold=1.0)
+        result = recompute_with_user_thresholds(row, settings, live_price=423.15)
+        assert result.latest_price == 423.15
+        assert result.return_1d < 0
+
+    def test_live_price_can_flip_momentum_and_downgrade_status(self):
+        row = make_row(latest_price=428.00, return_1d=3.21, return_5d=1.0, return_20d=2.0, peg_ratio=0.8)
+        settings = UserSettings(user_id="u1", dividend_yield_threshold=3.0, peg_threshold=1.0)
+        result = recompute_with_user_thresholds(row, settings, live_price=423.15)
+        assert result.criterion_b is False  # 1D now negative
+        assert result.status == ScreenerStatus.AMBER  # Fundamentals (PEG) still passes
+
+    def test_no_live_price_keeps_stored_return_1d_and_latest_price(self):
+        row = make_row()
+        settings = UserSettings(user_id="u1", dividend_yield_threshold=3.0, peg_threshold=1.0)
+        result = recompute_with_user_thresholds(row, settings, live_price=None)
+        assert result.return_1d == row.return_1d
+        assert result.latest_price == row.latest_price
