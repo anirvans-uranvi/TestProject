@@ -334,6 +334,13 @@ def _render_modified_csps_table(*, trades: list[dict], portfolio_name: str, dhan
         column_config=column_config,
     )
 
+    # Same "plain markdown summary line below the table" convention My CSP
+    # uses for its own totals (see pages/11_My_CSP.py) -- sums only Cash
+    # Needed and Credit, the two "how much am I on the hook for" columns.
+    total_cash_needed = sum(r["Cash Needed"] for r in table_rows if r["Cash Needed"] is not None)
+    total_credit = sum(r["Credit"] for r in table_rows if r["Credit"] is not None)
+    st.markdown(f"**Total Cash Needed:** {format_inr(total_cash_needed)} &nbsp;&nbsp;|&nbsp;&nbsp; **Total Credit:** {format_inr(total_credit)}")
+
 
 def _render_modified_csps_tab(
     portfolio_name: str,
